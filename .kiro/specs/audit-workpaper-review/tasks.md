@@ -1,0 +1,543 @@
+# Implementation Plan: 审计底稿智能复核与文档生成程序
+
+## Overview
+
+基于现有 FastAPI + React 架构，增量实现审计底稿智能复核与文档生成两大核心功能。按照"数据模型 → 后端服务 → API路由 → 前端类型与工具 → 前端组件 → 集成联调"的顺序递进实现，确保每一步都可验证。后端使用 Python，前端使用 TypeScript。
+
+## Tasks
+
+- [x] 1. 数据模型与基础类型定义
+  - [x] 1.1 创建后端 Pydantic 数据模型 `backend/app/models/audit_schemas.py`
+    - 定义所有枚举类型：RiskLevel, WorkpaperType, ReviewDimension, FindingStatus, UserRole, TemplateType, WorkMode, PromptSource
+    - 定义底稿解析相关模型：CellData, SheetData, ExcelParseResult, WordParseResult, PdfParseResult, WorkpaperClassification, WorkpaperParseResult, WorkpaperUploadResponse
+    - 定义复核相关模型：ReviewRequest, ReviewFinding, ReviewReport, FindingStatusUpdate, ExportRequest
+    - 定义提示词相关模型：ReviewPromptInfo, ReviewPromptDetail, SavePromptRequest, EditPromptRequest, ReplacePromptRequest
+    - 定义 Git 版本管理模型：GitConfig, GitSyncResult, GitCommitHistory, GitConflictInfo, GitResolveRequest, GitPushRequest, GitTagRequest
+    - 定义补充材料模型：SupplementaryMaterial, RequiredReference, ReferenceCheckRequest
+    - 定义字体设置模型：FontSettings
+    - 定义交叉引用模型：CrossReference, CrossReferenceAnalysis
+    - 定义模板相关模型：TemplateSection, TemplateStructure, TemplateInfo, TemplateOutlineItem
+    - 定义文档生成模型：ProjectInfo, GenerateRequest, SectionGenerateRequest, GeneratedSection, GeneratedDocument, SectionRevisionRequest, DocumentExportRequest
+    - 定义项目管理模型：ProjectCreateRequest, ProjectDetail, ProjectReviewSummary
+    - _Requirements: 1.1-1.8, 2.1-2.13, 3.1-3.7, 4.1-4.7, 5.1-5.7, 11.1-11.8, 12.1-12.17, 13.1-13.16, 14.1-14.7_
+  - [x] 1.2 创建前端 TypeScript 类型定义 `frontend/src/types/audit.ts`
+    - 定义与后端对应的所有 TypeScript 类型和接口
+    - 定义 RISK_LEVEL_COLORS 和 DIMENSION_LABELS 常量映射
+    - 定义 SectionEditState 章节编辑状态接口
+    - 定义 TemplateOutlineItem 模板大纲项接口
+    - _Requirements: 7.1, 7.5, 9.13-9.16, 12.6, 12.16_
+  - [x] 1.3 更新后端 Python 依赖 `backend/requirements.txt`
+    - 新增 openpyxl（Excel 解析，WorkpaperParser 和 TemplateManager 使用）
+    - 新增 gitpython（Git 仓库操作，PromptGitService 使用）
+    - 新增 weasyprint（PDF 导出，ReportGenerator 使用）
+    - 新增 hypothesis（属性测试框架）
+    - 确认 python-docx 已存在（Word 解析），若缺失则补充
+    - 确认 openpyxl 版本兼容 .xls 格式或补充 xlrd 依赖
+    - _Requirements: 1.1, 4.3, 4.4, 14.1_
+
+- [x] 2. GT Design System CSS 基础与前端工具层
+  - [x] 2.1 创建 GT Design System CSS 变量与组件样式 `frontend/src/styles/gt-design-tokens.css`
+    - 定义主色调、辅助色、功能色、文字颜色 CSS 变量
+    - 定义字体族、字体缩放系统、间距系统、圆角系统、阴影系统 CSS 变量
+    - 实现标题层级样式（gt-h1 ~ gt-h4）
+    - 实现布局类（gt-container, gt-section, gt-grid 系列）
+    - 实现卡片类（gt-card, gt-card-header, gt-card-content）
+    - 实现按钮类（gt-button, gt-button--primary, gt-button--secondary）
+    - 实现表格类（gt-table）、工作流步骤指示器（gt-flow-diagram）
+    - 实现状态类（gt-active, gt-disabled, gt-loading, gt-success, gt-warning, gt-error）
+    - 实现风险等级视觉标识（gt-finding--high/medium/low, gt-risk-badge）
+    - 实现焦点样式（默认亮紫色轮廓线，紫色背景区域麦田黄轮廓线）
+    - 实现响应式断点（桌面端≥1024px多列、平板端768-1023px双列、移动端<768px单列）
+    - 实现打印样式（A4尺寸、黑白配色、隐藏非打印元素、防分页断裂）
+    - _Requirements: 9.1-9.21_
+  - [x] 2.2 创建前端 IndexedDB 缓存工具 `frontend/src/utils/auditStorage.ts`
+    - 实现 saveAuditState / loadAuditState 函数，缓存已上传底稿列表、复核配置、所选提示词、补充材料、复核报告
+    - 处理 QuotaExceededError 边界情况
+    - _Requirements: 7.6_
+  - [ ]* 2.3 编写 IndexedDB 工作状态往返一致性属性测试
+    - **Property 23: IndexedDB工作状态往返一致性**
+    - **Validates: Requirements 7.6**
+  - [x] 2.4 扩展前端 API 服务 `frontend/src/services/api.ts`
+    - 新增复核相关 API 调用函数（upload, uploadBatch, checkReferences, uploadSupplementary, startReview, getReport, exportReport, updateFindingStatus, getCrossReferences）
+    - 新增文档生成 API 调用函数（extractOutline, confirmOutline, startGenerate, generateSection, reviseSection, exportDocument）
+    - 新增提示词管理 API 调用函数（listPrompts, getPrompt, savePrompt, editPrompt, replacePrompt, restorePrompt, deletePrompt）
+    - 新增提示词 Git 管理 API 调用函数（configGit, getGitConfig, syncGit, pushGit, getGitHistory, getGitConflicts, resolveGitConflict, createGitTag, listGitTags）
+    - 新增模板管理 API 调用函数（uploadTemplate, listTemplates, getTemplate, deleteTemplate, updateTemplate）
+    - 新增项目管理 API 调用函数（createProject, listProjects, getProject, addWorkpaperToProject, getProjectSummary, filterWorkpapers, linkTemplateToProject）
+    - _Requirements: 1.1-1.8, 2.1-2.13, 4.3-4.4, 5.1-5.7, 11.1-11.8, 12.1-12.17, 13.1-13.16, 14.1-14.7_
+
+- [x] 3. Checkpoint - 确保数据模型和基础工具层编译通过
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [ ] 4. 底稿解析服务（WorkpaperParser）
+  - [x] 4.1 实现 `backend/app/services/workpaper_parser.py`
+    - 实现 parse_excel()：使用 openpyxl 解析 xlsx/xls，提取工作表、单元格数据、公式、合并单元格
+    - 实现 parse_word()：使用 python-docx 解析 docx，提取段落、表格、标题层级、批注
+    - 实现 parse_pdf()：复用现有 FileService 的 extract_text_from_pdf，提取文本和表格
+    - 实现 parse_file()：统一入口，校验文件大小（≤50MB）和格式（xlsx/xls/docx/pdf），分发到对应解析器
+    - 实现 identify_workpaper_type()：正则匹配底稿编号（B-xx ~ M-xx），映射到 BUSINESS_CYCLE_MAP
+    - 实现 batch_parse()：按顺序解析多个文件，为每个文件独立返回解析结果
+    - 处理错误情况：文件损坏、加密文件、空文件返回 parse_status="error" + error_message
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8_
+  - [ ]* 4.2 编写底稿解析属性测试
+    - **Property 1: 底稿文件解析完整性** — 对任意有效格式文件，解析返回 success 且 content_text 非空
+    - **Property 2: 无效上传拒绝** — 对任意超大或不支持格式文件，返回拒绝响应
+    - **Property 3: 批量解析结果独立性** — 批量解析返回数量与输入文件数量一致
+    - **Property 4: 底稿编号分类正确性** — 编号分类与 BUSINESS_CYCLE_MAP 映射一致
+    - **Validates: Requirements 1.1-1.8**
+  - [ ]* 4.3 编写底稿解析单元测试
+    - 测试损坏文件解析返回错误信息
+    - 测试加密文件解析返回错误信息
+    - 测试空文件上传返回错误
+    - 测试文件大小恰好50MB的边界情况
+    - _Requirements: 1.4, 1.5, 1.6_
+
+- [x] 5. 知识库服务扩展
+  - [x] 5.1 扩展 `KnowledgeService` 新增审计专用知识库分类
+    - 在现有 LIBRARIES 字典中追加 7 个审计知识库分类：底稿模板库、监管规定库、会计准则库、质控标准库、审计程序库、行业指引库、提示词库
+    - 确保新分类遵循现有文档管理和检索机制
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
+  - [ ]* 5.2 编写知识库扩展属性测试
+    - **Property 7: 知识库文档上传往返一致性**
+    - **Property 8: 知识库文档删除彻底性**
+    - **Property 9: 知识库缓存容量不变量** — 缓存文档数永不超过300
+    - **Property 10: 知识库关键词搜索召回**
+    - **Validates: Requirements 3.2, 3.3, 3.5, 3.7**
+
+- [x] 6. 提示词库服务（PromptLibrary）
+  - [x] 6.1 实现 `backend/app/services/prompt_library.py`
+    - 实现 _load_preset_prompts()：扫描 TSJ/ 目录加载所有 markdown 文件为预置提示词
+    - 实现 _classify_by_subject()：根据文件名推断会计科目分类
+    - 实现 list_prompts()：列出提示词，支持按会计科目筛选，返回含来源标识的列表
+    - 实现 get_prompt()：获取提示词完整内容，预置提示词附带原始内容
+    - 实现 save_custom_prompt()：保存用户追加的自定义提示词（source=user_appended）
+    - 实现 edit_preset_prompt()：编辑预置提示词，保存为用户修改版本（source=user_modified），保留原始版本
+    - 实现 replace_preset_prompt()：完全替换预置提示词（source=user_replaced），保留原始版本
+    - 实现 restore_preset_default()：恢复预置提示词为 TSJ 目录原始版本
+    - 实现 delete_prompt()：删除自定义提示词（预置提示词不可删除）
+    - 实现 resolve_file_placeholder()：将 {{#sys.files#}} 占位符替换为实际底稿文件列表
+    - 实现 refresh_presets()：重新扫描 TSJ 目录同步更新，保留用户自定义版本
+    - 实现 increment_usage_count()：增加提示词使用次数
+    - _Requirements: 13.1-13.16_
+  - [ ]* 6.2 编写提示词库属性测试
+    - **Property 36: 提示词库预置分类完整性** — TSJ 目录 markdown 文件全部加载
+    - **Property 37: 自定义提示词保存与检索一致性**
+    - **Property 38: 提示词会计科目筛选正确性**
+    - **Property 46: 文件占位符替换正确性** — 替换后不含占位符且包含文件名
+    - **Property 47: TSJ目录同步一致性** — 刷新后预置列表与目录一致
+    - **Property 48: 提示词来源标识正确性** — source 字段准确反映来源
+    - **Property 49: 预置提示词修改/替换保留原始版本**
+    - **Property 50: 预置提示词恢复默认往返一致性**
+    - **Property 51: TSJ文件变更时用户自定义版本保留**
+    - **Validates: Requirements 13.1-13.16**
+  - [ ]* 6.3 编写提示词库单元测试
+    - 测试预置提示词不可删除返回错误
+    - 测试非预置提示词调用恢复默认返回错误
+    - 测试提示词使用次数递增
+    - 测试提示词列表展示来源字段
+    - _Requirements: 13.2, 13.5, 13.7_
+
+- [x] 7. 提示词 Git 版本管理服务（PromptGitService）
+  - [x] 7.1 实现 `backend/app/services/prompt_git_service.py`
+    - 实现 configure()：配置 Git 仓库 URL、认证凭据（SSH/Token）和目标分支，首次 clone 或更新 remote
+    - 实现 get_config()：获取当前 Git 仓库配置
+    - 实现 pull_latest()：从远程拉取最新提示词文件，更新本地 TSJ 目录
+    - 实现 commit_and_push()：提交本地变更到远程，提交信息含变更类型、提示词名称和操作用户
+    - 实现 get_commit_history()：获取提示词 Git 版本历史
+    - 实现 detect_conflicts()：检测本地与远程冲突文件
+    - 实现 resolve_conflict()：解决冲突（keep_local / use_remote / manual_merge）
+    - 实现 create_tag() / list_tags()：Git 标签管理
+    - 处理边界情况：仓库不可达超时30秒、认证失败、推送冲突
+    - _Requirements: 14.1-14.7_
+  - [ ]* 7.2 编写 Git 服务属性测试
+    - **Property 52: Git拉取同步正确性**
+    - **Property 53: Git提交信息格式正确性**
+    - **Property 54: Git版本历史完整性**
+    - **Property 55: Git冲突检测正确性**
+    - **Property 56: Git标签往返一致性**
+    - **Validates: Requirements 14.1-14.7**
+  - [ ]* 7.3 编写 Git 服务单元测试
+    - 测试未配置 Git 时操作返回错误
+    - 测试 Git 认证失败返回 401
+    - 测试 Git 标签名重复返回错误
+    - 测试 Git 推送时远程有更新返回 409
+    - _Requirements: 14.2, 14.4, 14.6, 14.7_
+
+- [x] 8. Checkpoint - 确保底稿解析、知识库扩展、提示词库和 Git 服务测试通过
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 9. 项目管理服务（ProjectService）
+  - [x] 9.1 实现 `backend/app/services/project_service.py`
+    - 实现 create_project()：创建审计项目，记录名称、客户、审计期间、成员、状态
+    - 实现 get_project() / list_projects()：获取项目详情和按权限过滤的项目列表
+    - 实现 add_workpaper_to_project()：关联底稿到项目
+    - 实现 check_permission()：基于 ROLE_PERMISSIONS 字典检查角色权限
+    - 实现 get_project_review_summary()：计算复核进度概览（已复核/待复核/各风险等级统计）
+    - 实现 filter_workpapers()：按业务循环和底稿类型筛选
+    - 实现 link_template_to_project()：关联模板到项目
+    - JSON 文件存储于 ~/.ai_write_helper/projects/{project_id}/
+    - _Requirements: 5.1-5.7, 11.7_
+  - [ ]* 9.2 编写项目管理属性测试
+    - **Property 14: 角色权限执行正确性** — check_permission 与 ROLE_PERMISSIONS 一致
+    - **Property 15: 项目列表权限过滤** — 仅返回用户有权限的项目
+    - **Property 16: 项目复核进度统计一致性** — total = reviewed + pending
+    - **Property 17: 业务循环筛选正确性** — 筛选结果全部匹配条件
+    - **Property 31: 模板与项目关联持久性**
+    - **Property 32: 项目创建字段完整性**
+    - **Property 33: 底稿与项目关联持久性**
+    - **Validates: Requirements 5.1-5.7, 11.7**
+  - [ ]* 9.3 编写项目管理单元测试
+    - 测试 4 种用户角色定义正确
+    - 测试审计员删除底稿被拒绝（权限不足）
+    - _Requirements: 5.3, 5.4_
+
+- [x] 10. 模板管理服务（TemplateManager）
+  - [x] 10.1 实现 `backend/app/services/template_service.py`
+    - 实现 upload_template()：上传并解析模板文件（docx/xlsx/xls/pdf）
+    - 实现 parse_template_structure()：解析模板结构，提取章节标题、表格结构、填充区域
+    - 实现 list_templates() / get_template()：列出和获取模板
+    - 实现 delete_template() / update_template()：删除和更新模板
+    - 预置 5 种模板类型分类：审计计划、审计小结、尽调报告、审计报告、其他自定义
+    - 存储路径 ~/.ai_write_helper/templates/{template_id}/
+    - 处理模板解析错误（文件损坏、格式不支持）
+    - _Requirements: 11.1-11.8_
+  - [ ]* 10.2 编写模板管理属性测试
+    - **Property 24: 模板上传与删除一致性**
+    - **Property 25: 模板结构解析完整性**
+    - **Property 26: 模板更新替换正确性**
+    - **Validates: Requirements 11.1, 11.3, 11.4, 11.5, 11.6**
+  - [ ]* 10.3 编写模板管理单元测试
+    - 测试预置 5 种模板类型分类
+    - 测试模板解析错误返回描述信息
+    - _Requirements: 11.2, 11.8_
+
+- [x] 11. 复核引擎服务（ReviewEngine）
+  - [x] 11.1 实现 `backend/app/services/review_engine.py`
+    - 实现 review_workpaper_stream()：流式执行多维度复核，逐维度分析并通过 SSE 输出进度和结果
+    - 实现 _review_dimension()：执行单个维度复核分析，支持注入用户提示词和补充材料上下文
+    - 实现 _build_review_prompt()：构建复核提示词，注入业务循环、准则条款、质控标准等审计专业上下文；合并用户选择的预置/自定义提示词；替换 {{#sys.files#}} 占位符
+    - 实现 check_required_references()：检查复核所需相关底稿是否已上传，返回缺失引用清单
+    - 实现 analyze_cross_references()：分析底稿间交叉引用关系，验证 B/C/D-M 类底稿间结论一致性
+    - 实现 classify_risk_level()：对复核发现进行风险等级分类（高/中/低）
+    - 复用 OpenAIService.stream_chat_completion() 进行 LLM 推理
+    - 复用 KnowledgeService 检索审计准则和质控标准
+    - 支持复核过程中暂停等待用户补充材料（need_supplementary 事件）
+    - _Requirements: 2.1-2.13, 6.3-6.6, 8.1-8.5_
+  - [ ]* 11.2 编写复核引擎属性测试
+    - **Property 5: 复核维度覆盖完整性** — 输出覆盖所有请求维度
+    - **Property 6: 风险等级标注完整性** — 统计计数之和等于 findings 长度
+    - **Property 20: 审计上下文注入完整性** — 提示词包含业务循环和维度名称
+    - **Property 21: 交叉引用缺失检测** — 缺失引用标记为中风险
+    - **Property 22: 底稿类型间一致性验证**
+    - **Property 39: 复核提示词注入完整性** — 用户提示词被注入
+    - **Property 40: 补充材料上下文注入**
+    - **Property 41: 缺失引用检测触发**
+    - **Validates: Requirements 2.1-2.13, 6.3-6.6, 8.1-8.4**
+  - [ ]* 11.3 编写复核引擎单元测试
+    - 测试 429 限流重试行为
+    - 测试模型列表 API 不可用时返回推荐列表
+    - 测试问题状态更新持久化（Property 13）
+    - _Requirements: 6.5, 6.7, 4.6_
+
+- [x] 12. 复核报告生成与导出服务（ReportGenerator）
+  - [x] 12.1 实现 `backend/app/services/report_generator.py`
+    - 实现 generate_report()：将复核结果整合为结构化报告（概要、问题清单按风险排序、修改建议、结论）
+    - 实现 export_to_word()：导出复核报告为 Word 格式，复用 word_service.py
+    - 实现 export_to_pdf()：导出复核报告为 PDF 格式，使用 weasyprint 渲染 HTML 模板（A4尺寸、黑白配色）
+    - 实现 parse_report_to_structured() / structured_to_report()：报告序列化/反序列化（往返一致性）
+    - _Requirements: 4.1-4.7_
+  - [ ]* 12.2 编写报告生成属性测试
+    - **Property 11: 复核报告结构完整性** — 报告包含所有必需字段
+    - **Property 12: 复核报告往返一致性** — 序列化/反序列化产生等价对象
+    - **Property 34: 报告导出格式有效性** — Word 为有效 docx，PDF 文件头为 %PDF
+    - **Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5, 4.7**
+  - [ ]* 12.3 编写报告生成单元测试
+    - 测试问题按风险等级排序
+    - 测试风险等级统计汇总正确
+    - _Requirements: 4.1, 4.2_
+
+- [x] 13. Checkpoint - 确保复核引擎、报告生成、项目管理、模板管理服务测试通过
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 14. 文档生成服务（DocumentGenerator）
+  - [x] 14.1 实现 `backend/app/services/document_generator.py`
+    - 实现 extract_template_outline()：调用 LLM 自动识别模板章节结构，生成 OutlineItem 格式树形大纲（参照 generate_outline_with_old_prompt）
+    - 实现 generate_document_stream()：逐章节流式生成文档内容，注入 parent/sibling 上下文（参照 _generate_chapter_content）
+    - 实现 _generate_section_content()：单章节内容生成，注入知识库上下文和项目信息，使用 target_word_count 控制长度
+    - 实现 revise_section_stream()：AI 对话式修改章节，支持全文修改和选中文本局部修改（参照 ContentEdit.tsx ManualEditState）
+    - 实现 export_to_word()：导出为 Word 格式，支持用户自定义字体设置（参照 word_service.py set_run_font）
+    - 实现 parse_document_to_structured() / structured_to_document()：文档序列化/反序列化
+    - 生成规则：优先使用知识库真实信息，缺失标注【待补充】，严禁编造事实性信息
+    - _Requirements: 12.1-12.17_
+  - [ ]* 14.2 编写文档生成属性测试
+    - **Property 27: 文档生成章节与模板对应** — 生成章节标题与模板章节一一对应
+    - **Property 28: 知识库缺失时占位符标注** — 缺失信息标注【待补充】
+    - **Property 29: 反编造提示词注入** — 提示词包含禁止编造指令
+    - **Property 30: 审计文档导出往返一致性**
+    - **Property 35: 文档导出Word格式有效性**
+    - **Property 42: 字体设置应用正确性** — 导出字体与设置一致
+    - **Property 43: 章节编辑状态独立性** — 编辑章节 i 不影响章节 j
+    - **Property 44: 选中文本局部修改范围** — 仅替换选中部分
+    - **Validates: Requirements 12.1-12.17**
+  - [ ]* 14.3 编写文档生成单元测试
+    - 测试支持生成 5 种审计文档类型
+    - 测试 SSE 流式输出格式正确
+    - 测试字体设置为 None 时使用默认字体
+    - 测试选中文本为空时全文修改
+    - _Requirements: 12.5, 12.10, 12.14, 12.7_
+
+- [x] 15. 扩展 Word 导出服务
+  - [x] 15.1 扩展 `backend/app/services/word_service.py` 支持用户自定义字体设置
+    - 在现有 build_document() 基础上支持传入 FontSettings 参数
+    - 使用 set_run_font() 和 set_paragraph_font() 应用用户指定的中英文字体
+    - FontSettings 为 None 时使用 DEFAULT_FONT_NAME 默认字体
+    - _Requirements: 12.14, 12.15_
+
+- [x] 16. 后端 API 路由层
+  - [x] 16.1 实现复核 API 路由 `backend/app/routers/review.py`
+    - POST /api/review/upload — 上传底稿文件（校验大小和格式）
+    - POST /api/review/upload-batch — 批量上传底稿
+    - POST /api/review/check-references — 检查所需相关底稿
+    - POST /api/review/upload-supplementary — 上传补充材料
+    - POST /api/review/start — 发起复核（SSE 流式响应）
+    - GET /api/review/report/{review_id} — 获取复核报告
+    - POST /api/review/report/{review_id}/export — 导出复核报告（Word/PDF）
+    - PATCH /api/review/finding/{finding_id}/status — 更新问题处理状态
+    - GET /api/review/cross-references/{project_id} — 获取交叉引用分析
+    - _Requirements: 1.1-1.8, 2.1-2.13, 4.1-4.7, 8.1-8.5_
+  - [x] 16.2 实现文档生成 API 路由 `backend/app/routers/generate.py`
+    - POST /api/generate/extract-outline — 从模板提取章节大纲
+    - PUT /api/generate/confirm-outline — 用户确认/调整大纲
+    - POST /api/generate/start — 逐章节生成（SSE 流式响应）
+    - POST /api/generate/generate-section — 单章节内容生成（SSE）
+    - POST /api/generate/revise-section — AI 修改章节（SSE）
+    - POST /api/generate/export — 导出生成文档（支持字体设置）
+    - _Requirements: 12.1-12.17_
+  - [x] 16.3 实现提示词管理 API 路由 `backend/app/routers/prompt.py`
+    - GET /api/prompt/list — 获取提示词列表（支持会计科目筛选）
+    - GET /api/prompt/{prompt_id} — 获取提示词详情
+    - POST /api/prompt/save — 保存用户追加的自定义提示词
+    - PUT /api/prompt/{prompt_id}/edit — 编辑预置提示词
+    - PUT /api/prompt/{prompt_id}/replace — 替换预置提示词
+    - POST /api/prompt/{prompt_id}/restore — 恢复预置提示词为默认版本
+    - DELETE /api/prompt/{prompt_id} — 删除自定义提示词
+    - POST /api/prompt/git/config — 配置 Git 仓库关联
+    - GET /api/prompt/git/config — 获取 Git 仓库配置
+    - POST /api/prompt/git/sync — 从 Git 仓库拉取同步
+    - POST /api/prompt/git/push — 将变更提交到 Git 仓库
+    - GET /api/prompt/git/history — 获取 Git 版本历史
+    - GET /api/prompt/git/conflicts — 检测 Git 冲突
+    - POST /api/prompt/git/resolve — 解决 Git 冲突
+    - POST /api/prompt/git/tag — 创建 Git 版本标签
+    - GET /api/prompt/git/tags — 列出所有 Git 标签
+    - _Requirements: 13.1-13.16, 14.1-14.7_
+  - [x] 16.4 实现模板管理 API 路由 `backend/app/routers/template.py`
+    - POST /api/template/upload — 上传模板
+    - GET /api/template/list — 获取模板列表
+    - GET /api/template/{template_id} — 获取模板详情
+    - DELETE /api/template/{template_id} — 删除模板
+    - PUT /api/template/{template_id} — 更新模板
+    - _Requirements: 11.1-11.8_
+  - [x] 16.5 实现项目管理 API 路由 `backend/app/routers/project.py`
+    - POST /api/project/create — 创建项目
+    - GET /api/project/list — 获取项目列表（按权限过滤）
+    - GET /api/project/{project_id} — 获取项目详情
+    - POST /api/project/{project_id}/workpapers — 关联底稿到项目
+    - GET /api/project/{project_id}/summary — 获取复核进度概览
+    - GET /api/project/{project_id}/workpapers — 获取项目底稿列表（支持筛选）
+    - POST /api/project/{project_id}/templates — 关联模板到项目
+    - _Requirements: 5.1-5.7, 11.7_
+  - [x] 16.6 在 FastAPI 主应用中注册所有新路由
+    - 在 main.py 中 include_router 注册 review_router, generate_router, prompt_router, template_router, project_router
+    - _Requirements: 全部_
+
+- [x] 17. Checkpoint - 确保所有后端 API 路由可正常访问
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 18. 前端工作模式选择与导航
+  - [x] 18.1 实现 `WorkModeSelector.tsx` 工作模式选择组件
+    - 使用 gt-card 组件展示"底稿复核"和"文档生成"两个入口卡片
+    - 每个卡片包含模式名称、功能描述和入口按钮
+    - 使用 GT Design System 主色调和组件样式
+    - 语义化 HTML：nav 标签 + aria-label
+    - _Requirements: 10.1, 10.5, 9.6, 9.12_
+  - [x] 18.2 实现工作模式路由与切换逻辑
+    - 在 App 组件中集成 WorkModeSelector 作为首页
+    - 选择"底稿复核"导航至 ReviewWorkflow
+    - 选择"文档生成"导航至 GenerateWorkflow
+    - 在界面顶部提供 Work_Mode 切换入口
+    - _Requirements: 10.2, 10.3, 10.4_
+
+- [x] 19. 前端复核工作流（ReviewWorkflow）
+  - [x] 19.1 实现 `ReviewWorkflow.tsx` 四步骤复核工作流容器
+    - 使用 gt-flow-diagram 步骤指示器展示四步骤：底稿上传 → 提示词选择与维度配置 → 补充材料与确认 → 报告查看导出
+    - 管理步骤间导航和状态传递
+    - _Requirements: 7.1_
+  - [x] 19.2 实现 `WorkpaperUpload.tsx` 底稿上传组件
+    - 支持拖拽上传和点击选择文件两种方式
+    - 展示上传进度和解析状态
+    - 使用 gt-card 组件样式，进度条使用 GT 核心紫色（#4b2d77）
+    - 展示已上传底稿列表（文件名、格式、分类、解析状态）
+    - _Requirements: 7.2, 1.1-1.8_
+  - [x] 19.3 实现 `PromptSelector.tsx` 提示词选择组件
+    - 展示 Prompt_Library 中的预置提示词列表，支持按会计科目筛选
+    - 展示提示词名称、适用科目、来源标识、摘要和使用次数
+    - 提供提示词预览区域展示完整内容
+    - 提供自定义提示词输入区域
+    - 提供"保存为提示词"选项
+    - 支持提示词编辑、替换、恢复默认操作
+    - _Requirements: 2.9, 2.10, 13.1-13.12_
+  - [x] 19.4 实现 `ReviewDimensionConfig.tsx` 复核维度配置组件
+    - 展示 5 个标准复核维度（格式规范性、数据勾稽关系、会计准则合规性、审计程序完整性、审计证据充分性）
+    - 支持勾选需要执行的维度
+    - 支持添加自定义复核关注点
+    - _Requirements: 7.3, 2.6_
+  - [x] 19.5 实现 `SupplementaryUpload.tsx` 补充材料上传组件
+    - 展示复核引擎识别到的所需相关底稿清单
+    - 提供文件上传入口和文本输入区域
+    - _Requirements: 7.8, 2.11, 2.12_
+  - [x] 19.6 实现 `ReviewConfirmation.tsx` 复核确认页面组件
+    - 汇总展示已选底稿、复核维度、所选提示词、已上传补充材料
+    - 用户点击"确认并开始复核"按钮后才正式发起复核
+    - _Requirements: 2.13, 7.8_
+  - [ ]* 19.7 编写复核确认前不生成报告属性测试
+    - **Property 45: 复核确认前不生成报告** — 未确认前不调用 ReviewEngine
+    - **Validates: Requirements 2.13, 7.8**
+  - [x] 19.8 实现 `ReviewReport.tsx` 复核报告展示组件
+    - 按风险等级分组展示问题清单
+    - 高风险使用 #DC3545、中风险使用 #FFC107、低风险使用 #17A2B8 标识
+    - 同时使用颜色和文字标签（确保色觉障碍用户可区分）
+    - 支持展开查看问题详细信息和修改建议
+    - 支持标记问题为"已处理"
+    - 提供 Word/PDF 导出按钮
+    - 实时复核进度条和当前分析维度名称
+    - _Requirements: 7.4, 7.5, 4.1-4.6, 9.13-9.16_
+  - [x] 19.9 实现 `CrossReferenceGraph.tsx` 交叉引用关系图组件
+    - 展示底稿与其他底稿的关联关系图
+    - 标注关联底稿名称和引用方向
+    - 标注缺失引用
+    - _Requirements: 8.5_
+
+- [x] 20. Checkpoint - 确保复核工作流前端组件渲染正常
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 21. 前端文档生成工作流（GenerateWorkflow）
+  - [x] 21.1 实现 `GenerateWorkflow.tsx` 四步骤文档生成工作流容器
+    - 使用 gt-flow-diagram 步骤指示器展示四步骤：模板上传与配置 → 大纲识别与确认 → 逐章节生成与编辑 → 导出
+    - 管理步骤间导航和状态传递
+    - _Requirements: 7.1, 10.3_
+  - [x] 21.2 实现 `TemplateSelector.tsx` 模板选择与上传组件
+    - 支持上传模板文件（docx/xlsx/xls/pdf）
+    - 展示已上传模板列表（名称、类型、上传时间、格式）
+    - 支持模板删除和更新
+    - 展示可关联的知识库列表，支持勾选
+    - 提供项目特定信息输入表单（客户名称、审计期间、重要事项）
+    - _Requirements: 11.1-11.6, 12.2, 12.3_
+  - [x] 21.3 实现 `TemplateOutlineEditor.tsx` 模板大纲确认与调整组件
+    - 展示 LLM 自动识别的模板章节大纲（树形结构）
+    - 支持增删改章节、调整层级和顺序
+    - 参照现有 OutlineEdit.tsx 的大纲编辑交互模式
+    - 用户确认后进入逐章节生成阶段
+    - _Requirements: 12.17_
+  - [x] 21.4 实现 `DocumentEditor.tsx` 文档编辑组件
+    - 以章节为单位展示生成的文档内容
+    - 每个章节提供"手动编辑"和"AI修改"两个操作入口
+    - 实时展示 SSE 流式生成进度和内容
+    - _Requirements: 12.4, 12.5, 12.6_
+  - [x] 21.5 实现 `SectionEditor.tsx` 章节编辑器
+    - 支持手动文本编辑（打开文本编辑区域直接修改）
+    - 支持选中部分文本后仅对选中部分发起 AI 辅助修改
+    - 支持 AI 对话式修改（多轮对话历史）
+    - 每个章节独立维护编辑状态（editContent, aiInput, messages, targetWordCount）
+    - 参照现有 ContentEdit.tsx 的 ManualEditState 交互模式
+    - _Requirements: 12.7, 12.8, 12.16_
+  - [x] 21.6 实现 `ExportPanel.tsx` 导出步骤面板
+    - 展示文档预览
+    - 提供 Word 导出按钮
+    - _Requirements: 12.9_
+  - [x] 21.7 实现 `FontSettings.tsx` 字体设置组件
+    - 展示字体配置面板：中文字体名称、英文字体名称
+    - 默认使用系统预置字体（参照 word_service.py DEFAULT_FONT_NAME）
+    - 集成到 ExportPanel 中
+    - _Requirements: 12.14, 12.15_
+
+- [x] 22. 前端项目管理面板
+  - [x] 22.1 实现 `ProjectPanel.tsx` 项目管理面板
+    - 实现项目列表视图（ProjectList）：展示用户有权限的项目
+    - 实现项目详情视图（ProjectDetail）：展示项目信息、底稿列表、复核进度概览
+    - 支持创建项目、关联底稿、关联模板
+    - 支持按业务循环筛选底稿
+    - 展示复核进度概览（已复核/待复核/各风险等级统计）
+    - _Requirements: 5.1-5.7, 11.7_
+
+- [x] 23. 前端 SSE 流式通信集成
+  - [x] 23.1 集成复核工作流 SSE 流式通信
+    - 复用现有 SSEParser / processSSEStream 处理复核 SSE 事件
+    - 处理 dimension_start / dimension_complete / need_supplementary / streaming / completed 事件
+    - 实现实时复核进度条和当前分析维度展示
+    - 处理 SSE 错误事件和连接断开
+    - _Requirements: 2.7, 6.3, 7.4_
+  - [x] 23.2 集成文档生成工作流 SSE 流式通信
+    - 处理 section_start / section_complete / streaming / completed 事件
+    - 实现实时生成进度和内容渲染
+    - _Requirements: 12.5_
+
+- [x] 24. 响应式布局与可访问性
+  - [x] 24.1 确保所有新增组件响应式布局
+    - 桌面端（≥1024px）使用 gt-grid 多列网格布局
+    - 平板端（768-1023px）三列四列折叠为双列
+    - 移动端（<768px）全部单列，标题字号从30px缩小至24px
+    - _Requirements: 7.7, 9.20, 9.21_
+  - [x] 24.2 确保所有新增组件满足可访问性要求
+    - 正文文字对比度 ≥ 4.5:1，大文字对比度 ≥ 3:1
+    - 所有交互元素提供焦点样式（3px 亮紫色轮廓线）
+    - 表格包含 caption 和 scope 属性
+    - 装饰性图标使用 aria-hidden="true"
+    - 导航区域使用 nav + aria-label
+    - 章节使用 aria-labelledby 关联标题
+    - _Requirements: 9.10, 9.11, 9.12_
+
+- [x] 25. Checkpoint - 确保前端所有组件渲染正常，响应式和可访问性达标
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 26. 前后端集成联调
+  - [x] 26.1 集成复核工作流端到端流程
+    - 连通底稿上传 → 解析 → 提示词选择 → 维度配置 → 补充材料 → 确认 → SSE 流式复核 → 报告展示 → 导出完整链路
+    - 验证 IndexedDB 工作状态缓存与恢复
+    - _Requirements: 7.1, 7.6_
+  - [x] 26.2 集成文档生成工作流端到端流程
+    - 连通模板上传 → 大纲提取 → 大纲确认 → 逐章节 SSE 流式生成 → 章节编辑 → 字体设置 → Word 导出完整链路
+    - _Requirements: 10.3, 12.1-12.17_
+  - [x] 26.3 集成提示词管理与 Git 版本管理流程
+    - 连通提示词列表 → 预览 → 编辑/替换/追加 → Git 同步/推送 → 版本历史 → 冲突处理完整链路
+    - _Requirements: 13.1-13.16, 14.1-14.7_
+  - [x] 26.4 集成项目管理流程
+    - 连通项目创建 → 底稿关联 → 模板关联 → 复核进度概览 → 底稿筛选完整链路
+    - 验证角色权限控制（审计员无法删除底稿）
+    - _Requirements: 5.1-5.7_
+
+- [x] 27. LLM 配置与错误处理
+  - [x] 27.1 验证 LLM 配置热更新
+    - 确保通过 ConfigManager 修改 API 密钥、Base URL、模型名称后，新请求使用新配置
+    - 验证 Token 估算和上下文截断功能
+    - _Requirements: 6.1, 6.2, 6.4_
+  - [ ]* 27.2 编写 LLM 配置属性测试
+    - **Property 18: Token截断安全性** — 截断后不超过预算
+    - **Property 19: 配置热更新生效** — 新实例使用新配置
+    - **Validates: Requirements 6.2, 6.4**
+
+- [x] 28. Final checkpoint - 确保所有测试通过，端到端流程正常
+  - Ensure all tests pass, ask the user if questions arise.
+
+## Notes
+
+- Tasks marked with `*` are optional and can be skipped for faster MVP
+- Each task references specific requirements for traceability
+- Checkpoints ensure incremental validation
+- Property tests validate universal correctness properties from the design document (56 properties total)
+- Unit tests validate specific examples and edge cases
+- Backend uses Python (FastAPI + hypothesis for property tests)
+- Frontend uses TypeScript (React + fast-check for property tests)
+- 所有新增前端组件严格遵循 GT Design System 规范（gt-前缀组件、CSS 变量、可访问性标准）
+- 文档生成模式参照现有投标程序的 OutlineEdit.tsx / ContentEdit.tsx / word_service.py 模式
+- 提示词库从 TSJ/ 目录加载约70个预置 markdown 提示词文件

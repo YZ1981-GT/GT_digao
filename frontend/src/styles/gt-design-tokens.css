@@ -1,0 +1,493 @@
+/**
+ * GT Design System - 致同GT审计手册设计规范 CSS 变量与组件样式
+ * 
+ * 基于致同GT审计手册设计规范（需求9.1-9.21），定义完整的视觉设计体系：
+ * 颜色系统、字体规范、布局系统、组件库和可访问性标准。
+ * 所有 CSS 类名使用 gt- 前缀，采用 BEM 风格命名规范。
+ */
+
+/* ═══════════════════════════════════════════════════════════
+   1. CSS 变量定义（Design Tokens）
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  /* 主色调体系 (需求 9.1) */
+  --gt-primary: #4b2d77;          /* GT核心紫色 - 主要操作色 */
+  --gt-primary-light: #A06DFF;    /* 亮紫色 - 辅助高亮色 */
+  --gt-primary-dark: #2B1D4D;     /* 深紫色 - 悬停和强调色 */
+
+  /* 辅助色系 (需求 9.2) */
+  --gt-teal: #0094B3;             /* 水鸭蓝 */
+  --gt-coral: #FF5149;            /* 珊瑚橙 */
+  --gt-wheat: #FFC23D;            /* 麦田黄 */
+
+  /* 功能色 - 风险等级 (需求 9.13-9.15) */
+  --gt-danger: #DC3545;           /* 高风险 */
+  --gt-warning: #FFC107;          /* 中风险 */
+  --gt-info: #17A2B8;             /* 低风险 */
+  --gt-success: #28A745;          /* 成功 */
+
+  /* 文字颜色 (需求 9.3) */
+  --gt-text-primary: #2C3E50;     /* 主文字 */
+  --gt-text-secondary: #666666;   /* 次要文字 */
+  --gt-text-on-purple: #FFFFFF;   /* 紫色背景文字 */
+
+  /* 字体族 (需求 9.4) */
+  --gt-font-cn: 'FZYueHei', '方正悦黑', 'Microsoft YaHei', sans-serif;
+  --gt-font-en: 'GT Walsheim', 'Helvetica Neue', Arial, sans-serif;
+
+  /* 字体缩放系统 (需求 9.5) */
+  --gt-font-xs: 12px;
+  --gt-font-sm: 14px;
+  --gt-font-base: 16px;
+  --gt-font-lg: 18px;
+  --gt-font-xl: 20px;
+  --gt-font-2xl: 24px;
+  --gt-font-3xl: 30px;
+  --gt-font-4xl: 36px;
+
+  /* 间距系统 - 4px 基础网格 (需求 9.8) */
+  --gt-space-1: 4px;
+  --gt-space-2: 8px;
+  --gt-space-3: 12px;
+  --gt-space-4: 16px;
+  --gt-space-5: 20px;
+  --gt-space-6: 24px;
+  --gt-space-8: 32px;
+  --gt-space-10: 40px;
+  --gt-space-12: 48px;
+  --gt-space-16: 64px;
+
+  /* 圆角系统 (需求 9.8) */
+  --gt-radius-sm: 4px;
+  --gt-radius-md: 8px;
+  --gt-radius-lg: 12px;
+
+  /* 阴影系统 - 基于GT核心紫色 (需求 9.9) */
+  --gt-shadow-sm: 0 1px 3px rgba(75, 45, 119, 0.08);
+  --gt-shadow-md: 0 4px 12px rgba(75, 45, 119, 0.12);
+  --gt-shadow-lg: 0 8px 24px rgba(75, 45, 119, 0.16);
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   2. 标题层级样式 (需求 9.5)
+   ═══════════════════════════════════════════════════════════ */
+
+.gt-h1 {
+  font-size: var(--gt-font-3xl);  /* 30px */
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--gt-text-primary);
+}
+
+.gt-h2 {
+  font-size: var(--gt-font-2xl);  /* 24px */
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--gt-text-primary);
+}
+
+.gt-h3 {
+  font-size: var(--gt-font-xl);   /* 20px */
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--gt-text-primary);
+}
+
+.gt-h4 {
+  font-size: var(--gt-font-lg);   /* 18px */
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--gt-text-primary);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   3. 布局类 (需求 9.6, 9.8)
+   ═══════════════════════════════════════════════════════════ */
+
+.gt-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 var(--gt-space-4);
+}
+
+.gt-section {
+  padding: var(--gt-space-6);
+}
+
+.gt-section--purple {
+  background: linear-gradient(135deg, var(--gt-primary), var(--gt-primary-dark));
+  color: var(--gt-text-on-purple);
+}
+
+.gt-grid {
+  display: grid;
+  gap: var(--gt-space-4);
+}
+
+.gt-grid-2 {
+  display: grid;
+  gap: var(--gt-space-4);
+}
+
+.gt-grid-3 {
+  display: grid;
+  gap: var(--gt-space-4);
+}
+
+.gt-grid-4 {
+  display: grid;
+  gap: var(--gt-space-4);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   4. 卡片类 (需求 9.6, 10.5)
+   ═══════════════════════════════════════════════════════════ */
+
+.gt-card {
+  background: #ffffff;
+  border-radius: var(--gt-radius-md);
+  box-shadow: var(--gt-shadow-sm);
+  overflow: hidden;
+  transition: box-shadow 0.2s ease;
+}
+
+.gt-card:hover {
+  box-shadow: var(--gt-shadow-md);
+}
+
+.gt-card-header {
+  padding: var(--gt-space-4) var(--gt-space-6);
+  border-bottom: 1px solid #e8e8e8;
+  font-weight: 600;
+}
+
+.gt-card-content {
+  padding: var(--gt-space-6);
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   5. 按钮类 (需求 9.6)
+   ═══════════════════════════════════════════════════════════ */
+
+.gt-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gt-space-2);
+  padding: var(--gt-space-2) var(--gt-space-4);
+  font-size: var(--gt-font-sm);
+  font-weight: 600;
+  line-height: 1.5;
+  border: 1px solid transparent;
+  border-radius: var(--gt-radius-sm);
+  cursor: pointer;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.gt-button--primary {
+  background-color: var(--gt-primary);
+  color: var(--gt-text-on-purple);
+  border-color: var(--gt-primary);
+}
+
+.gt-button--primary:hover {
+  background-color: var(--gt-primary-dark);
+  border-color: var(--gt-primary-dark);
+}
+
+.gt-button--secondary {
+  background-color: #ffffff;
+  color: var(--gt-primary);
+  border-color: var(--gt-primary);
+}
+
+.gt-button--secondary:hover {
+  background-color: rgba(75, 45, 119, 0.05);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   6. 表格类 (需求 9.6, 9.12)
+   ═══════════════════════════════════════════════════════════ */
+
+.gt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--gt-font-sm);
+}
+
+.gt-table thead {
+  background-color: var(--gt-primary);
+  color: var(--gt-text-on-purple);
+}
+
+.gt-table th {
+  padding: var(--gt-space-3) var(--gt-space-4);
+  text-align: left;
+  font-weight: 600;
+}
+
+.gt-table td {
+  padding: var(--gt-space-3) var(--gt-space-4);
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.gt-table tbody tr:hover {
+  background-color: rgba(75, 45, 119, 0.03);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   7. 工作流步骤指示器 (需求 7.1)
+   ═══════════════════════════════════════════════════════════ */
+
+.gt-flow-diagram {
+  display: flex;
+  align-items: center;
+  gap: var(--gt-space-2);
+  padding: var(--gt-space-4) 0;
+}
+
+.gt-flow-diagram__step {
+  display: flex;
+  align-items: center;
+  gap: var(--gt-space-2);
+  padding: var(--gt-space-2) var(--gt-space-4);
+  border-radius: var(--gt-radius-sm);
+  font-size: var(--gt-font-sm);
+  color: var(--gt-text-secondary);
+  background-color: #f5f5f5;
+  white-space: nowrap;
+}
+
+.gt-flow-diagram__step.gt-active {
+  background-color: var(--gt-primary);
+  color: var(--gt-text-on-purple);
+  font-weight: 600;
+}
+
+.gt-flow-diagram__step.gt-completed {
+  background-color: var(--gt-success);
+  color: #ffffff;
+}
+
+.gt-flow-diagram__connector {
+  width: 24px;
+  height: 2px;
+  background-color: #d0d0d0;
+  flex-shrink: 0;
+}
+
+.gt-flow-diagram__connector.gt-completed {
+  background-color: var(--gt-success);
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   8. 状态类 (需求 9.7)
+   ═══════════════════════════════════════════════════════════ */
+
+.gt-active {
+  color: var(--gt-primary);
+}
+
+.gt-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+.gt-loading {
+  position: relative;
+  pointer-events: none;
+}
+
+.gt-loading::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  border: 2px solid var(--gt-primary-light);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: gt-spin 0.6s linear infinite;
+}
+
+@keyframes gt-spin {
+  to { transform: rotate(360deg); }
+}
+
+.gt-success {
+  color: var(--gt-success);
+}
+
+.gt-warning {
+  color: var(--gt-warning);
+}
+
+.gt-error {
+  color: var(--gt-danger);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   9. 风险等级视觉标识 (需求 9.13-9.16)
+   ═══════════════════════════════════════════════════════════ */
+
+.gt-finding--high {
+  border-left: 4px solid var(--gt-danger);   /* #DC3545 */
+}
+
+.gt-finding--medium {
+  border-left: 4px solid var(--gt-warning);  /* #FFC107 */
+}
+
+.gt-finding--low {
+  border-left: 4px solid var(--gt-info);     /* #17A2B8 */
+}
+
+/* 风险等级徽章 - 同时使用颜色和文字标签，确保色觉障碍用户可区分 (需求 9.16) */
+.gt-risk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gt-space-1);
+  padding: var(--gt-space-1) var(--gt-space-2);
+  border-radius: var(--gt-radius-sm);
+  font-size: var(--gt-font-sm);
+  font-weight: 600;
+}
+
+.gt-risk-badge--high {
+  background-color: rgba(220, 53, 69, 0.1);
+  color: var(--gt-danger);
+}
+
+.gt-risk-badge--medium {
+  background-color: rgba(255, 193, 7, 0.15);
+  color: #856404;
+}
+
+.gt-risk-badge--low {
+  background-color: rgba(23, 162, 184, 0.1);
+  color: var(--gt-info);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   10. 焦点样式 (需求 9.11)
+   ═══════════════════════════════════════════════════════════ */
+
+/* 全局默认焦点样式 - 3px 亮紫色轮廓线 (需求 9.11) */
+:focus-visible {
+  outline: 3px solid var(--gt-primary-light);  /* #A06DFF */
+  outline-offset: 2px;
+}
+
+/* 紫色背景上的主按钮焦点样式 - 麦田黄轮廓线 */
+.gt-button--primary:focus-visible {
+  outline-color: var(--gt-wheat);  /* #FFC23D - 麦田黄 */
+}
+
+/* 紫色背景区域焦点样式 - 麦田黄轮廓线 */
+.gt-section--purple :focus-visible {
+  outline: 3px solid var(--gt-wheat);  /* #FFC23D */
+  outline-offset: 2px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   11. 响应式断点 (需求 9.20, 9.21)
+   ═══════════════════════════════════════════════════════════ */
+
+/* 桌面端 ≥1024px：多列网格 */
+@media (min-width: 1024px) {
+  .gt-grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .gt-grid-3 { grid-template-columns: repeat(3, 1fr); }
+  .gt-grid-4 { grid-template-columns: repeat(4, 1fr); }
+}
+
+/* 平板端 768px~1023px：三列四列折叠为双列 */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .gt-grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .gt-grid-3, .gt-grid-4 { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* 移动端 <768px：全部单列，标题缩小 */
+@media (max-width: 767px) {
+  .gt-grid-2, .gt-grid-3, .gt-grid-4 {
+    grid-template-columns: 1fr;
+  }
+
+  .gt-h1 {
+    font-size: 24px;  /* 章节标题从30px缩小至24px */
+  }
+
+  .gt-h2 {
+    font-size: 20px;  /* 副标题从24px缩小至20px */
+  }
+
+  .gt-container {
+    padding: 0 var(--gt-space-3);  /* 移动端缩减水平内边距 */
+  }
+
+  .gt-flow-diagram {
+    flex-wrap: wrap;  /* 步骤指示器允许换行 */
+  }
+
+  .gt-flow-diagram__step {
+    font-size: var(--gt-font-xs);  /* 步骤文字缩小 */
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   12. 打印样式 (需求 9.17, 9.18, 9.19)
+   ═══════════════════════════════════════════════════════════ */
+
+@media print {
+  @page {
+    size: A4;
+    margin: 20mm 15mm;
+  }
+
+  /* 隐藏非打印元素 */
+  .gt-button,
+  nav,
+  .gt-flow-diagram {
+    display: none !important;
+  }
+
+  /* 黑白配色 */
+  body {
+    color: #000;
+    background: #fff;
+  }
+
+  /* 紫色渐变背景替换为白色+紫色下边框 (需求 9.19) */
+  .gt-section--purple {
+    background: #fff;
+    border-bottom: 3px solid var(--gt-primary);
+    color: #000;
+  }
+
+  /* 表格头部替换为浅灰色 (需求 9.19) */
+  .gt-table thead {
+    background: #f0f0f0;
+    color: #000;
+  }
+
+  /* 防止分页断裂 (需求 9.18) */
+  .gt-card,
+  .gt-table,
+  .gt-finding--high,
+  .gt-finding--medium,
+  .gt-finding--low {
+    break-inside: avoid;
+  }
+
+  h1, h2, h3, h4,
+  .gt-h1, .gt-h2, .gt-h3, .gt-h4 {
+    break-after: avoid;
+  }
+}

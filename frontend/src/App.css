@@ -1,0 +1,38 @@
+/* 统一文档内容的字体大小 */
+.prose p,
+.prose-sm p,
+.prose ul li,
+.prose ol li,
+.prose-sm ul li,
+.prose-sm ol li {
+  font-size: 1rem !important;
+  line-height: 1.75 !important;
+}
+
+/* 确保所有段落使用相同的字号 */
+.prose-p\:text-base p {
+  font-size: 1rem !important;
+}
+
+.prose-p\:leading-relaxed p {
+  line-height: 1.75 !important;
+}
+
+/* 标题保持层级区分 - 但字号统一为正文大小 */
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  font-size: 1rem !important;
+  line-height: 1.75 !important;
+  font-weight: 600 !important;
+  margin-top: 1em !important;
+  margin-bottom: 0.5em !important;
+}
+
+/* 一级标题稍微加粗一些 */
+.prose h1 {
+  font-weight: 700 !important;
+}

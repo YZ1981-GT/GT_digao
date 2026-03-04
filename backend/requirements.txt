@@ -1,0 +1,40 @@
+﻿fastapi==0.116.1
+uvicorn[standard]==0.35.0
+python-multipart==0.0.20
+openai==1.106.1
+python-docx==1.2.0
+PyPDF2==3.0.1
+pydantic==2.11.7
+pydantic-settings==2.10.1
+python-dotenv==1.1.1
+aiofiles==24.1.0
+# 版本兼容性（放宽范围给依赖解析）
+anyio>=4,<5
+# 新增的文档处理库
+pdfplumber==0.11.7
+pymupdf==1.26.4
+docx2python==3.5.0
+requests==2.32.3
+aiohttp==3.10.11
+Pillow==10.4.0
+asyncio-throttle==1.0.2
+# LangChain支持（已移除）
+beautifulsoup4==4.12.3
+
+# ============================================
+# 以下为可选依赖（体积较大，仅在需要高级爬虫功能时安装）
+# 安装方式: pip install playwright seleniumbase undetected-chromedriver
+# ============================================
+# playwright==1.51.0           # 可选：高级网页爬取，需运行 playwright install
+# seleniumbase==4.33.3         # 可选：Selenium自动化测试
+# undetected-chromedriver==3.5.5  # 可选：绕过反爬检测
+
+# 审计底稿复核与文档生成依赖
+openpyxl==3.1.5
+xlrd==2.0.1
+gitpython==3.1.44
+weasyprint==63.1
+hypothesis==6.122.3
+
+# MCP服务支持
+mcp==1.13.1
