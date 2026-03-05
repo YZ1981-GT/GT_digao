@@ -24,6 +24,7 @@ const API_BASE_URL =
 function App() {
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null); // null = 检测中
   const [workMode, setWorkMode] = useState<WorkMode>('select');
+  const [sidebarVisible, setSidebarVisible] = useState(true);
 
   const checkBackend = useCallback(async () => {
     try {
@@ -302,12 +303,68 @@ function App() {
         )}
         <div className="flex-1 flex min-h-0">
           {/* 左侧配置面板 */}
-          <div style={{ width: 320, flexShrink: 0 }}>
-            <ConfigPanel
-              config={state.config}
-              onConfigChange={updateConfig}
-            />
-          </div>
+          {sidebarVisible && (
+            <div style={{ width: 320, flexShrink: 0, position: 'relative' }}>
+              <ConfigPanel
+                config={state.config}
+                onConfigChange={updateConfig}
+              />
+              {/* 收起按钮 */}
+              <button
+                onClick={() => setSidebarVisible(false)}
+                title="收起侧栏"
+                style={{
+                  position: 'absolute',
+                  top: 12,
+                  right: -14,
+                  width: 28,
+                  height: 28,
+                  borderRadius: '50%',
+                  border: '1px solid #d0d0d0',
+                  backgroundColor: '#fff',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 14,
+                  color: '#666',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                  zIndex: 10,
+                }}
+              >
+                ◀
+              </button>
+            </div>
+          )}
+          {/* 展开按钮（侧栏隐藏时显示） */}
+          {!sidebarVisible && (
+            <button
+              onClick={() => setSidebarVisible(true)}
+              title="展开配置面板"
+              style={{
+                position: 'fixed',
+                left: 0,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                width: 24,
+                height: 48,
+                borderRadius: '0 6px 6px 0',
+                border: '1px solid #d0d0d0',
+                borderLeft: 'none',
+                backgroundColor: '#fff',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 12,
+                color: '#666',
+                boxShadow: '2px 0 4px rgba(0,0,0,0.08)',
+                zIndex: 10,
+              }}
+            >
+              ▶
+            </button>
+          )}
           {/* 右侧工作模式选择 */}
           <div className="flex-1 overflow-y-auto">
             <WorkModeSelector onSelectMode={handleSelectMode} />
