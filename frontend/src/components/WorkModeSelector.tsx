@@ -2,9 +2,7 @@
  * WorkModeSelector - 工作模式选择组件
  *
  * 系统首页入口，展示"底稿复核"和"文档生成"两个工作模式卡片。
- * 使用 GT Design System 组件样式（gt-card, gt-button--primary, gt-grid-2）。
- *
- * Requirements: 10.1, 10.5, 9.6, 9.12
+ * 使用 GT Design System 组件样式。
  */
 import React from 'react';
 import '../styles/gt-design-tokens.css';
@@ -15,61 +13,153 @@ interface WorkModeSelectorProps {
 
 const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => {
   return (
-    <nav aria-label="工作模式选择" className="gt-container" style={{ paddingTop: 'var(--gt-space-12)' }}>
-      <h1 className="gt-h1" style={{ textAlign: 'center', marginBottom: 'var(--gt-space-2)' }}>
-        审计底稿智能复核与文档生成
-      </h1>
-      <p
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* 顶部 banner */}
+      <div
         style={{
-          textAlign: 'center',
-          color: 'var(--gt-text-secondary)',
-          fontSize: 'var(--gt-font-base)',
-          marginBottom: 'var(--gt-space-10)',
+          background: 'linear-gradient(135deg, var(--gt-primary) 0%, var(--gt-primary-dark, #2B1D4D) 100%)',
+          padding: 'var(--gt-space-8) var(--gt-space-6)',
+          color: '#fff',
         }}
       >
-        请选择工作模式
-      </p>
+        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>
+          审计底稿智能复核与文档生成
+        </h1>
+        <p style={{ fontSize: 13, opacity: 0.8, marginTop: 6, marginBottom: 0 }}>
+          面向审计项目组的智能复核与文档生成平台
+        </p>
+      </div>
 
-      <div className="gt-grid-2" style={{ maxWidth: 720, margin: '0 auto' }}>
-        {/* 底稿复核卡片 */}
-        <div className="gt-card">
-          <div className="gt-card-header" style={{ color: 'var(--gt-primary)' }}>
-            底稿复核
-          </div>
-          <div className="gt-card-content">
-            <p style={{ color: 'var(--gt-text-secondary)', fontSize: 'var(--gt-font-sm)', marginBottom: 'var(--gt-space-6)', lineHeight: 1.6 }}>
-              上传审计底稿，系统从格式规范性、数据勾稽关系、会计准则合规性等多维度进行智能复核，生成结构化复核报告。
+      {/* 主内容区 */}
+      <div style={{ flex: 1, padding: 'var(--gt-space-6)', overflowY: 'auto' }}>
+        {/* 工作模式选择 */}
+        <p style={{ fontSize: 'var(--gt-font-sm)', color: 'var(--gt-text-secondary)', marginBottom: 'var(--gt-space-4)' }}>
+          请选择工作模式
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-6)' }}>
+          {/* 底稿复核卡片 */}
+          <div
+            onClick={() => onSelectMode('review')}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === 'Enter') onSelectMode('review'); }}
+            style={{
+              border: '2px solid #e8e8e8',
+              borderRadius: 'var(--gt-radius-md, 8px)',
+              padding: 'var(--gt-space-5)',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              backgroundColor: '#fff',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
+          >
+            <div style={{ fontSize: 28, marginBottom: 8 }}>📋</div>
+            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 8px 0' }}>
+              底稿复核
+            </h3>
+            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.6, margin: 0 }}>
+              上传审计底稿，从格式规范性、数据勾稽关系、会计准则合规性等多维度进行智能复核
             </p>
-            <button
-              className="gt-button gt-button--primary"
-              style={{ width: '100%' }}
-              onClick={() => onSelectMode('review')}
-            >
-              进入底稿复核
-            </button>
+            <div style={{ marginTop: 12 }}>
+              <span
+                style={{
+                  display: 'inline-block',
+                  padding: '4px 12px',
+                  borderRadius: 'var(--gt-radius-sm)',
+                  fontSize: 'var(--gt-font-xs)',
+                  fontWeight: 600,
+                  color: '#fff',
+                  backgroundColor: 'var(--gt-primary)',
+                }}
+              >
+                进入复核 →
+              </span>
+            </div>
+          </div>
+
+          {/* 文档生成卡片 */}
+          <div
+            onClick={() => onSelectMode('generate')}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === 'Enter') onSelectMode('generate'); }}
+            style={{
+              border: '2px solid #e8e8e8',
+              borderRadius: 'var(--gt-radius-md, 8px)',
+              padding: 'var(--gt-space-5)',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              backgroundColor: '#fff',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
+          >
+            <div style={{ fontSize: 28, marginBottom: 8 }}>📝</div>
+            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 8px 0' }}>
+              文档生成
+            </h3>
+            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.6, margin: 0 }}>
+              基于模板与知识库，智能生成审计计划、审计小结、尽调报告等标准化审计文档
+            </p>
+            <div style={{ marginTop: 12 }}>
+              <span
+                style={{
+                  display: 'inline-block',
+                  padding: '4px 12px',
+                  borderRadius: 'var(--gt-radius-sm)',
+                  fontSize: 'var(--gt-font-xs)',
+                  fontWeight: 600,
+                  color: '#fff',
+                  backgroundColor: 'var(--gt-primary)',
+                }}
+              >
+                进入生成 →
+              </span>
+            </div>
           </div>
         </div>
 
-        {/* 文档生成卡片 */}
-        <div className="gt-card">
-          <div className="gt-card-header" style={{ color: 'var(--gt-primary)' }}>
-            文档生成
+        {/* 快速指引 */}
+        <div style={{ borderTop: '1px solid #e8e8e8', paddingTop: 'var(--gt-space-4)' }}>
+          <h3 style={{ fontSize: 'var(--gt-font-sm)', fontWeight: 600, color: 'var(--gt-text-primary)', marginBottom: 'var(--gt-space-3)' }}>
+            快速开始
+          </h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--gt-space-3)' }}>
+            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>底稿复核流程</div>
+              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
+                1. 上传底稿文件（Excel/Word/PDF）<br />
+                2. 选择提示词与复核维度<br />
+                3. 上传补充材料并确认<br />
+                4. 查看复核报告并导出
+              </div>
+            </div>
+            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>文档生成流程</div>
+              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
+                1. 上传模板并关联知识库<br />
+                2. 确认章节大纲结构<br />
+                3. 逐章节生成与编辑<br />
+                4. 导出 Word 文档
+              </div>
+            </div>
           </div>
-          <div className="gt-card-content">
-            <p style={{ color: 'var(--gt-text-secondary)', fontSize: 'var(--gt-font-sm)', marginBottom: 'var(--gt-space-6)', lineHeight: 1.6 }}>
-              基于底稿模板与知识库，智能生成审计计划、审计小结、尽调报告等标准化审计文档，支持逐章节编辑与导出。
-            </p>
-            <button
-              className="gt-button gt-button--primary"
-              style={{ width: '100%' }}
-              onClick={() => onSelectMode('generate')}
-            >
-              进入文档生成
-            </button>
-          </div>
+        </div>
+
+        {/* 支持格式 */}
+        <div style={{ marginTop: 'var(--gt-space-4)', padding: 'var(--gt-space-3)', backgroundColor: '#fafafa', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)' }}>
+          <span style={{ fontWeight: 600, color: 'var(--gt-text-primary)' }}>支持格式：</span>
+          Excel (.xlsx/.xls) · Word (.doc/.docx) · PDF · Markdown · TXT
         </div>
       </div>
-    </nav>
+
+      {/* 底部 */}
+      <div style={{ padding: 'var(--gt-space-3) var(--gt-space-6)', borderTop: '1px solid #e8e8e8', textAlign: 'center', fontSize: 11, color: 'var(--gt-text-secondary)' }}>
+        致同研究院 · 审计底稿智能复核与文档生成平台
+      </div>
+    </div>
   );
 };
 
