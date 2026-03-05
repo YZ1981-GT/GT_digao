@@ -49,7 +49,7 @@ except ImportError:
 class WorkpaperParser:
     """审计底稿文件解析服务。"""
 
-    SUPPORTED_FORMATS = {'.xlsx', '.xls', '.docx', '.pdf'}
+    SUPPORTED_FORMATS = {'.xlsx', '.xls', '.doc', '.docx', '.pdf'}
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
     # 底稿编号正则：B-xx, C-xx, D-xx ~ M-xx, Q-xx
@@ -111,7 +111,7 @@ class WorkpaperParser:
                 # 将 Excel 内容拼接为纯文本
                 content_text = self._excel_to_text(excel_result)
 
-            elif ext == '.docx':
+            elif ext in ('.docx', '.doc'):
                 word_result = await self.parse_word(file_path)
                 structured_data = word_result.model_dump()
                 content_text = self._word_to_text(word_result)
@@ -158,7 +158,13 @@ class WorkpaperParser:
             raise ValueError(f"不支持的 Excel 格式：{ext}")
 
     async def parse_word(self, file_path: str) -> WordParseResult:
-        """解析 Word 文件，提取段落、表格、标题层级和批注。"""
+        """解析 Word 文件，提取段落、表格、标题层级和批注。支持 .docx 和 .doc 格式。"""
+        ext = os.path.splitext(file_path)[1].lower()
+
+        if ext == '.doc':
+            return await self._parse_doc_legacy(file_path)
+
+        # .docx 使用 python-docx
         if not HAS_DOCX:
             raise RuntimeError("python-docx 未安装，无法解析 docx 文件")
 
@@ -226,6 +232,54 @@ class WorkpaperParser:
             tables=tables,
             headings=headings,
             comments=comments,
+        )
+
+    async def _parse_doc_legacy(self, file_path: str) -> WordParseResult:
+        """解析旧版 .doc 文件。Windows 上使用 pywin32 COM 接口。"""
+        text = ""
+        tables: List[List[List[str]]] = []
+        try:
+            import win32com.client
+            import pythoncom
+            pythoncom.CoInitialize()
+            try:
+                word_app = win32com.client.Dispatch("Word.Application")
+                word_app.Visible = False
+                word_app.DisplayAlerts = False
+                abs_path = os.path.abspath(file_path)
+                doc = word_app.Documents.Open(abs_path, ReadOnly=True)
+                text = doc.Content.Text or ""
+                # 提取表格
+                for table in doc.Tables:
+                    table_data: List[List[str]] = []
+                    for row_idx in range(1, table.Rows.Count + 1):
+                        row_data: List[str] = []
+                        for col_idx in range(1, table.Columns.Count + 1):
+                            try:
+                                cell_text = table.Cell(row_idx, col_idx).Range.Text
+                                cell_text = cell_text.strip().rstrip('\r\x07')
+                                row_data.append(cell_text)
+                            except Exception:
+                                row_data.append("")
+                        table_data.append(row_data)
+                    tables.append(table_data)
+                doc.Close(False)
+                word_app.Quit()
+            finally:
+                pythoncom.CoUninitialize()
+        except ImportError:
+            raise RuntimeError("pywin32 未安装，Windows 上无法解析 .doc 文件。请安装：pip install pywin32")
+        except Exception as e:
+            raise RuntimeError(f".doc 文件解析失败：{e}")
+
+        # 按换行拆分为段落
+        paragraphs = [{"text": line, "style": ""} for line in text.split('\r') if line.strip()]
+
+        return WordParseResult(
+            paragraphs=paragraphs,
+            tables=tables,
+            headings=[],
+            comments=[],
         )
 
     async def parse_pdf(self, file_path: str) -> PdfParseResult:

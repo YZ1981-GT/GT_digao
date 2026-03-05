@@ -9,7 +9,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
         host="127.0.0.1",
-        port=8080,
+        port=9980,
         reload=False,
         log_level="info",
         workers=1  # 纯异步应用使用单进程，避免多进程各自初始化知识库缓存浪费内存

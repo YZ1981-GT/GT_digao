@@ -102,7 +102,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
     setError(null);
     try {
       const response = await templateApi.listTemplates();
-      setTemplates(response.data);
+      setTemplates(response.data.templates ?? []);
     } catch (err: any) {
       setError(err.message || '加载模板列表失败');
     } finally {
@@ -116,17 +116,15 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
     try {
       const response = await knowledgeApi.getLibraries();
       const data = response.data;
-      // Handle both array and object formats
-      if (Array.isArray(data)) {
-        setLibraries(data);
-      } else if (data && typeof data === 'object') {
-        const libs: KnowledgeLibrary[] = Object.entries(data).map(([id, info]: [string, any]) => ({
-          id,
-          name: info.name || id,
-          description: info.description || '',
-          document_count: info.document_count ?? info.documents?.length ?? 0,
-        }));
-        setLibraries(libs);
+      // Backend returns { success, libraries: [...], cache_info }
+      const libsArray = data?.libraries ?? data;
+      if (Array.isArray(libsArray)) {
+        setLibraries(libsArray.map((lib: any) => ({
+          id: lib.id,
+          name: lib.name || lib.id,
+          description: lib.desc || lib.description || '',
+          document_count: lib.doc_count ?? lib.document_count ?? 0,
+        })));
       }
     } catch {
       // Silently fail - libraries are optional
@@ -147,7 +145,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
       setError(null);
       try {
         const response = await templateApi.uploadTemplate(file, uploadType);
-        const newTemplate = response.data;
+        const newTemplate = response.data.template;
         setTemplates((prev) => [...prev, newTemplate]);
         // Auto-select the newly uploaded template
         onTemplateSelect(newTemplate.id);
@@ -201,7 +199,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
         setError(null);
         try {
           const response = await templateApi.updateTemplate(updatingTemplateId, file);
-          const updated = response.data;
+          const updated = response.data.template;
           setTemplates((prev) =>
             prev.map((t) => (t.id === updatingTemplateId ? updated : t))
           );

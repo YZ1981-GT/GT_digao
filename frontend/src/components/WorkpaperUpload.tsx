@@ -25,12 +25,13 @@ interface UploadingFile {
   errorMessage?: string;
 }
 
-const ACCEPTED_FORMATS = '.xlsx,.xls,.docx,.pdf';
+const ACCEPTED_FORMATS = '.xlsx,.xls,.doc,.docx,.pdf';
 
 function getFormatLabel(format: string): string {
   const map: Record<string, string> = {
     xlsx: 'Excel (.xlsx)',
     xls: 'Excel (.xls)',
+    doc: 'Word (.doc)',
     docx: 'Word (.docx)',
     pdf: 'PDF',
   };
@@ -220,7 +221,7 @@ const WorkpaperUpload: React.FC<WorkpaperUploadProps> = ({ workpapers, onWorkpap
         <div
           role="button"
           tabIndex={0}
-          aria-label="点击或拖拽文件到此区域上传底稿，支持 xlsx、xls、docx、pdf 格式"
+          aria-label="点击或拖拽文件到此区域上传底稿，支持 xlsx、xls、doc、docx、pdf 格式"
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
@@ -241,7 +242,7 @@ const WorkpaperUpload: React.FC<WorkpaperUploadProps> = ({ workpapers, onWorkpap
             {isDragOver ? '释放文件以上传' : '拖拽文件到此处，或点击选择文件'}
           </p>
           <p style={{ fontSize: 'var(--gt-font-sm)', color: 'var(--gt-text-secondary)' }}>
-            支持 .xlsx、.xls、.docx、.pdf 格式，可批量上传
+            支持 .xlsx、.xls、.doc、.docx、.pdf 格式，可批量上传
           </p>
         </div>
 

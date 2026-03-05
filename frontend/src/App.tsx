@@ -19,7 +19,7 @@ type WorkMode = 'select' | 'review' | 'generate' | 'bid';
 
 const API_BASE_URL =
   process.env.REACT_APP_API_URL ||
-  (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:8080');
+  (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:9980');
 
 function App() {
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null); // null = 检测中
@@ -159,7 +159,7 @@ function App() {
       {/* 后端离线提示 */}
       {backendOnline === false && (
         <div className="bg-red-600 text-white text-center py-2 text-sm flex-shrink-0">
-          ⚠️ 后端服务未启动，请先在 backend 目录运行 <code className="bg-red-800 px-1 rounded">python run.py</code> 启动后端（端口 8080）
+          ⚠️ 后端服务未启动，请先在 backend 目录运行 <code className="bg-red-800 px-1 rounded">python run.py</code> 启动后端（端口 9980）
           <button onClick={checkBackend} className="ml-3 underline hover:text-red-200">重新检测</button>
         </div>
       )}
@@ -180,12 +180,15 @@ function App() {
           {workMode === 'review' ? '底稿复核' : '文档生成'}
         </span>
         <button
-          className="gt-button gt-button--secondary"
           style={{
-            color: 'var(--gt-text-on-purple)',
-            borderColor: 'rgba(255,255,255,0.4)',
+            color: '#ffffff',
+            borderColor: 'rgba(255,255,255,0.6)',
+            border: '1px solid rgba(255,255,255,0.6)',
+            backgroundColor: 'transparent',
             fontSize: 'var(--gt-font-sm)',
             padding: 'var(--gt-space-1) var(--gt-space-3)',
+            borderRadius: 'var(--gt-radius-md, 6px)',
+            cursor: 'pointer',
           }}
           onClick={() => setWorkMode('select')}
         >
@@ -206,7 +209,7 @@ function App() {
       {/* 后端离线提示 */}
       {backendOnline === false && (
         <div className="bg-red-600 text-white text-center py-2 text-sm flex-shrink-0">
-          ⚠️ 后端服务未启动，请先在 backend 目录运行 <code className="bg-red-800 px-1 rounded">python run.py</code> 启动后端（端口 8080）
+          ⚠️ 后端服务未启动，请先在 backend 目录运行 <code className="bg-red-800 px-1 rounded">python run.py</code> 启动后端（端口 9980）
           <button onClick={checkBackend} className="ml-3 underline hover:text-red-200">重新检测</button>
         </div>
       )}
@@ -293,7 +296,7 @@ function App() {
       <div className="h-screen overflow-hidden bg-gray-50 flex flex-col">
         {backendOnline === false && (
           <div className="bg-red-600 text-white text-center py-2 text-sm flex-shrink-0">
-            ⚠️ 后端服务未启动，请先在 backend 目录运行 <code className="bg-red-800 px-1 rounded">python run.py</code> 启动后端（端口 8080）
+            ⚠️ 后端服务未启动，请先在 backend 目录运行 <code className="bg-red-800 px-1 rounded">python run.py</code> 启动后端（端口 9980）
             <button onClick={checkBackend} className="ml-3 underline hover:text-red-200">重新检测</button>
           </div>
         )}

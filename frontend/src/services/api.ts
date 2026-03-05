@@ -469,14 +469,14 @@ export const templateApi = {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('template_type', templateType);
-    return api.post<TemplateInfo>('/api/template/upload', formData, {
+    return api.post<{ success: boolean; template: TemplateInfo }>('/api/template/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
   },
 
   /** 获取模板列表 */
   listTemplates: () =>
-    api.get<TemplateInfo[]>('/api/template/list'),
+    api.get<{ success: boolean; templates: TemplateInfo[] }>('/api/template/list'),
 
   /** 获取模板详情 */
   getTemplate: (templateId: string) =>
@@ -490,7 +490,7 @@ export const templateApi = {
   updateTemplate: (templateId: string, file: File) => {
     const formData = new FormData();
     formData.append('file', file);
-    return api.put<TemplateInfo>(`/api/template/${templateId}`, formData, {
+    return api.put<{ success: boolean; template: TemplateInfo }>(`/api/template/${templateId}`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
   },

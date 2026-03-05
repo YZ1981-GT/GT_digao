@@ -15,10 +15,12 @@ class Settings(BaseSettings):
     # 环境标识：development / production
     environment: str = os.environ.get("APP_ENV", "development")
     
-    # CORS设置 - 仅允许 8080 端口
+    # CORS设置 - 允许前端端口
     cors_origins: list = [
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
+        "http://localhost:3030",
+        "http://127.0.0.1:3030",
+        "http://localhost:9980",
+        "http://127.0.0.1:9980",
     ]
     
     @property
@@ -27,8 +29,8 @@ class Settings(BaseSettings):
         if self.environment == "production":
             # 生产环境：仅允许同源请求（不使用正则通配）
             return ""
-        # 开发环境：允许本地 8080 端口
-        return r"https?://(localhost|127\.0\.0\.1)(:8080)?"
+        # 开发环境：允许本地 3030/9980 端口
+        return r"https?://(localhost|127\.0\.0\.1)(:(3030|9980))?"
     
     @property
     def cors_allow_headers(self) -> list:

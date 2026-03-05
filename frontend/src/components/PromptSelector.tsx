@@ -85,7 +85,7 @@ const PromptSelector: React.FC<PromptSelectorProps> = ({
     setError(null);
     try {
       const response = await promptApi.listPrompts(subjectFilter || undefined);
-      setPrompts(response.data?.prompts ?? []);
+      setPrompts(response.data ?? []);
     } catch (err: any) {
       setError(err.message || '加载提示词列表失败');
     } finally {
@@ -105,7 +105,7 @@ const PromptSelector: React.FC<PromptSelectorProps> = ({
       setEditMode(null);
       try {
         const response = await promptApi.getPrompt(promptId);
-        setPreviewDetail(response.data?.prompt ?? null);
+        setPreviewDetail(response.data ?? null);
       } catch (err: any) {
         setPreviewDetail(null);
       } finally {
@@ -156,7 +156,7 @@ const PromptSelector: React.FC<PromptSelectorProps> = ({
       setEditContent('');
       // Refresh preview and list
       const response = await promptApi.getPrompt(previewDetail.id);
-      setPreviewDetail(response.data?.prompt ?? null);
+      setPreviewDetail(response.data ?? null);
       fetchPrompts();
     } catch (err: any) {
       setError(err.message || '保存失败');
@@ -172,7 +172,7 @@ const PromptSelector: React.FC<PromptSelectorProps> = ({
     try {
       await promptApi.restorePrompt(previewDetail.id);
       const response = await promptApi.getPrompt(previewDetail.id);
-      setPreviewDetail(response.data?.prompt ?? null);
+      setPreviewDetail(response.data ?? null);
       fetchPrompts();
     } catch (err: any) {
       setError(err.message || '恢复默认失败');
