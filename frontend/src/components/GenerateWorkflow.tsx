@@ -32,6 +32,7 @@ interface WorkflowState {
   selectedTemplateId: string;
   projectInfo: ProjectInfo;
   knowledgeLibraryIds: string[];
+  knowledgeLibraryDocs: Record<string, string[]>;
   outline: TemplateOutlineItem[];
   documentId: string;
   sections: GeneratedSection[];
@@ -55,6 +56,7 @@ const GenerateWorkflow: React.FC = () => {
     selectedTemplateId: '',
     projectInfo: { ...DEFAULT_PROJECT_INFO },
     knowledgeLibraryIds: [],
+    knowledgeLibraryDocs: {},
     outline: [],
     documentId: '',
     sections: [],
@@ -99,9 +101,11 @@ const GenerateWorkflow: React.FC = () => {
             selectedTemplateId={state.selectedTemplateId}
             projectInfo={state.projectInfo}
             knowledgeLibraryIds={state.knowledgeLibraryIds}
+            knowledgeLibraryDocs={state.knowledgeLibraryDocs}
             onTemplateSelect={(templateId) => updateState({ selectedTemplateId: templateId })}
             onProjectInfoChange={(info) => updateState({ projectInfo: info })}
             onKnowledgeLibraryIdsChange={(ids) => updateState({ knowledgeLibraryIds: ids })}
+            onKnowledgeLibraryDocsChange={(docs) => updateState({ knowledgeLibraryDocs: docs })}
           />
         );
       case 1:
