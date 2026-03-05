@@ -300,8 +300,18 @@ function App() {
             <button onClick={checkBackend} className="ml-3 underline hover:text-red-200">重新检测</button>
           </div>
         )}
-        <div className="flex-1 overflow-y-auto">
-          <WorkModeSelector onSelectMode={handleSelectMode} />
+        <div className="flex-1 flex min-h-0">
+          {/* 左侧配置面板 */}
+          <div style={{ width: 320, flexShrink: 0 }}>
+            <ConfigPanel
+              config={state.config}
+              onConfigChange={updateConfig}
+            />
+          </div>
+          {/* 右侧工作模式选择 */}
+          <div className="flex-1 overflow-y-auto">
+            <WorkModeSelector onSelectMode={handleSelectMode} />
+          </div>
         </div>
       </div>
     );
