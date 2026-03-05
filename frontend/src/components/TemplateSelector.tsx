@@ -109,6 +109,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
   const [expandedLibraries, setExpandedLibraries] = useState<Set<string>>(new Set());
   const [libraryDocs, setLibraryDocs] = useState<Record<string, KnowledgeDocument[]>>({});
   const [loadingDocs, setLoadingDocs] = useState<Set<string>>(new Set());
+  const [knowledgeSectionOpen, setKnowledgeSectionOpen] = useState(false);
 
   /** Fetch template list */
   const fetchTemplates = useCallback(async () => {
@@ -548,9 +549,36 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
 
       {/* ─── Section 3: Knowledge Library Selection ─── */}
       <div className="gt-card">
-        <div className="gt-card-header" style={{ color: 'var(--gt-primary)' }}>
-          关联知识库
+        <div
+          className="gt-card-header"
+          style={{
+            color: 'var(--gt-primary)',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            userSelect: 'none',
+          }}
+          onClick={() => setKnowledgeSectionOpen((v) => !v)}
+          role="button"
+          aria-expanded={knowledgeSectionOpen}
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setKnowledgeSectionOpen((v) => !v); } }}
+        >
+          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, transition: 'transform 0.2s', transform: knowledgeSectionOpen ? 'rotate(90deg)' : 'rotate(0deg)', display: 'inline-block' }}>▶</span>
+            关联知识库
+            {knowledgeLibraryIds.length > 0 && (
+              <span style={{ fontSize: 'var(--gt-font-xs)', fontWeight: 400, color: 'var(--gt-text-secondary)' }}>
+                （已选 {knowledgeLibraryIds.length} 个库）
+              </span>
+            )}
+          </span>
+          <span style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', fontWeight: 400 }}>
+            {knowledgeSectionOpen ? '收起' : '展开'}
+          </span>
         </div>
+        {knowledgeSectionOpen && (
         <div className="gt-card-content">
           <p style={{ fontSize: 'var(--gt-font-sm)', color: 'var(--gt-text-secondary)', marginBottom: 'var(--gt-space-3)' }}>
             选择需要关联的知识库和文档，文档生成时将参考所选内容。点击知识库名称展开查看文档列表。
@@ -693,6 +721,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
             </fieldset>
           )}
         </div>
+        )}
       </div>
 
       {/* ─── Section 4: Project Info Form ─── */}
