@@ -761,6 +761,40 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                 style={inputStyle}
               />
             </div>
+            <div style={{ display: 'flex', gap: 'var(--gt-space-3)' }}>
+              <div style={{ flex: 1 }}>
+                <label htmlFor="project-preparer-name" style={labelStyle}>
+                  编制人
+                </label>
+                <input
+                  id="project-preparer-name"
+                  type="text"
+                  value={projectInfo.preparer_name || ''}
+                  onChange={(e) => handleProjectInfoField('preparer_name', e.target.value)}
+                  placeholder="请输入编制人姓名"
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label htmlFor="project-preparer-role" style={labelStyle}>
+                  角色
+                </label>
+                <select
+                  id="project-preparer-role"
+                  value={projectInfo.preparer_role || ''}
+                  onChange={(e) => handleProjectInfoField('preparer_role', e.target.value)}
+                  aria-label="选择编制人角色"
+                  style={inputStyle}
+                >
+                  <option value="">请选择角色</option>
+                  <option value="assistant">助理</option>
+                  <option value="project_manager">项目经理</option>
+                  <option value="manager">经理</option>
+                  <option value="senior_manager">高级经理</option>
+                  <option value="partner">合伙人</option>
+                </select>
+              </div>
+            </div>
             <div>
               <label htmlFor="project-key-matters" style={labelStyle}>
                 重要事项

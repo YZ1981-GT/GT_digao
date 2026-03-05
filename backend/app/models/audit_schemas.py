@@ -403,6 +403,8 @@ class ProjectInfo(BaseModel):
     """项目特定信息（用于文档生成）"""
     client_name: str = Field(..., description="客户名称")
     audit_period: str = Field(..., description="审计期间")
+    preparer_name: Optional[str] = Field(None, description="编制人姓名")
+    preparer_role: Optional[str] = Field(None, description="编制人角色：assistant/project_manager/manager/senior_manager/partner")
     key_matters: Optional[str] = Field(None, description="重要事项")
     additional_info: Optional[Dict[str, str]] = Field(None, description="其他补充信息")
 

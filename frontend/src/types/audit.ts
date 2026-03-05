@@ -370,6 +370,8 @@ export interface TemplateOutlineItem {
 export interface ProjectInfo {
   client_name: string;
   audit_period: string;
+  preparer_name?: string;
+  preparer_role?: string;
   key_matters?: string;
   additional_info?: Record<string, string>;
 }
