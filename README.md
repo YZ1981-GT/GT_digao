@@ -30,10 +30,17 @@
 
 - 支持上传 Word/Excel/PDF 格式模板
 - 5种预置模板类型：审计计划、审计小结、尽调报告、审计报告、其他自定义
-- LLM 自动识别模板章节结构，生成树形大纲，用户可调整后确认
-- SSE 流式逐章节生成，注入上下文保证章节间连贯性
-- 关联知识库，优先使用真实信息，缺失标注【待补充】，严禁编造事实
-- 每个章节支持手动编辑和 AI 对话式修改（含选中文本局部修改）
+- 大纲快速提取：优先使用 Word 标题样式，无样式时通过中文序号模式（一、（一）等）智能检测，自动过滤目录页，秒级完成；仅在无法识别时回退到 LLM
+- 统一阿拉伯数字层级编号（1, 1.1, 1.1.1），前后端一致
+- 大纲可视化编辑：增删改章节、调整层级和顺序，确认后进入生成
+- 三种生成模式：批量生成（3并发）、逐章节生成（顺序）、停止（中断所有）
+- SSE 流式逐章节生成，注入父级/同级章节上下文保证连贯性
+- 关联知识库，优先使用真实信息；无知识库时结合审计专业知识生成实质性内容（底线思维），仅具体数据标注【待补充】
+- 每个章节支持：单独生成、手动编辑、AI 对话式修改（含选中文本局部修改和高亮）、参考文档上传辅助生成
+- 章节编辑器内置模型选择器，支持切换 LLM 模型
+- 全局重置与单章节重置，章节点击高亮选中
+- 浮动导航按钮：滚动时一键返回顶部，顶部时跳转到生成中的章节
+- 步骤间状态缓存：返回修改大纲后已生成内容按标题匹配自动保留
 - Word 导出，支持自定义中英文字体设置
 
 ### 提示词库管理
@@ -73,7 +80,7 @@
 cd backend
 pip install -r requirements.txt
 
-# 启动后端（端口 8080）
+# 启动后端（端口 9980）
 python run.py
 
 # 另开终端，安装前端依赖并构建
@@ -82,7 +89,7 @@ npm install
 npm run build
 ```
 
-启动后访问 http://localhost:8080
+启动后访问 http://localhost:9980
 
 ## 技术架构
 
@@ -102,14 +109,15 @@ npm run build
 │   │   ├── services/
 │   │   │   ├── review_engine.py       # 复核引擎
 │   │   │   ├── report_generator.py    # 报告生成与导出
-│   │   │   ├── document_generator.py  # 文档生成
+│   │   │   ├── document_generator.py  # 文档生成（大纲提取+章节生成）
 │   │   │   ├── workpaper_parser.py    # 底稿解析
-│   │   │   ├── template_service.py    # 模板管理
+│   │   │   ├── template_service.py    # 模板管理（结构解析+标题检测）
 │   │   │   ├── project_service.py     # 项目管理
 │   │   │   ├── prompt_library.py      # 提示词库
 │   │   │   ├── prompt_git_service.py  # 提示词 Git 版本管理
-│   │   │   ├── openai_service.py      # LLM 服务
+│   │   │   ├── openai_service.py      # LLM 服务（多供应商）
 │   │   │   ├── knowledge_service.py   # 知识库服务
+│   │   │   ├── knowledge_retriever.py # 知识库智能检索（按章节匹配）
 │   │   │   └── word_service.py        # Word 导出
 │   │   └── utils/                 # 工具层
 │   └── requirements.txt
@@ -143,7 +151,7 @@ npm run build
 
 ## API 端点
 
-启动后访问 http://localhost:8080/docs 查看交互式 API 文档。
+启动后访问 http://localhost:9980/docs 查看交互式 API 文档。
 
 | 模块 | 端点前缀 | 说明 |
 |------|----------|------|
