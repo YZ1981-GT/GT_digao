@@ -389,23 +389,6 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ config, onConfigChange }) => 
           </div>
         </div>
 
-        {/* ─── 生成设置 ─── */}
-        <div>
-          <h3 className="text-base font-medium text-gray-900 mb-3">📝 生成设置</h3>
-          <div>
-            <label htmlFor="word_count" className="block text-sm font-medium text-gray-700">目标字数</label>
-            <input
-              type="number"
-              id="word_count"
-              value={localConfig.word_count || 100000}
-              onChange={(e) => setLocalConfig({ ...localConfig, word_count: parseInt(e.target.value) || 100000 })}
-              min={10000} max={2000000} step={10000}
-              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500 sm:text-sm"
-            />
-            <p className="mt-1 text-xs text-gray-500">建议范围：10000-2000000字</p>
-          </div>
-        </div>
-
         {/* ─── 知识库 ─── */}
         <div>
           <h3 className="text-base font-medium text-gray-900 mb-3">📚 知识库</h3>

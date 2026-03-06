@@ -32,6 +32,8 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
   const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number; currentFile: string; results: Array<{ name: string; success: boolean; message?: string }> } | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
 
   // 预览相关状态
   const [previewDoc, setPreviewDoc] = useState<Document | null>(null);
@@ -159,30 +161,67 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
     }
   };
 
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0 || !selectedLib) return;
+  const SUPPORTED_EXTS = ['.txt', '.md', '.markdown', '.pdf', '.doc', '.docx'];
+
+  const isSupportedFile = (name: string) => {
+    const ext = name.substring(name.lastIndexOf('.')).toLowerCase();
+    return SUPPORTED_EXTS.includes(ext);
+  };
+
+  // 递归读取 DataTransferItem 中的所有文件（支持多文件夹）
+  const readAllEntries = async (items: DataTransferItemList): Promise<File[]> => {
+    const files: File[] = [];
+
+    const readEntry = (entry: FileSystemEntry): Promise<void> => {
+      return new Promise((resolve) => {
+        if (entry.isFile) {
+          (entry as FileSystemFileEntry).file((f) => {
+            if (isSupportedFile(f.name)) files.push(f);
+            resolve();
+          }, () => resolve());
+        } else if (entry.isDirectory) {
+          const reader = (entry as FileSystemDirectoryEntry).createReader();
+          const readBatch = () => {
+            reader.readEntries(async (entries) => {
+              if (entries.length === 0) { resolve(); return; }
+              for (const e of entries) await readEntry(e);
+              readBatch(); // 继续读取（readEntries 可能分批返回）
+            }, () => resolve());
+          };
+          readBatch();
+        } else {
+          resolve();
+        }
+      });
+    };
+
+    const promises: Promise<void>[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const entry = items[i].webkitGetAsEntry?.();
+      if (entry) promises.push(readEntry(entry));
+    }
+    await Promise.all(promises);
+    return files;
+  };
+
+  // 通用上传逻辑
+  const doUploadFiles = async (files: File[]) => {
+    if (!selectedLib || files.length === 0) return;
 
     const totalFiles = files.length;
-    
     try {
       setUploading(true);
       setMessage(null);
       setUploadProgress({ current: 0, total: totalFiles, currentFile: files[0].name, results: [] });
-      
+
       let successCount = 0;
       let failCount = 0;
       const results: Array<{ name: string; success: boolean; message?: string }> = [];
-      
-      // 逐个上传文件
+
       for (let i = 0; i < totalFiles; i++) {
         const file = files[i];
-        setUploadProgress(prev => prev ? {
-          ...prev,
-          current: i,
-          currentFile: file.name,
-        } : null);
-        
+        setUploadProgress(prev => prev ? { ...prev, current: i, currentFile: file.name } : null);
+
         try {
           const response = await knowledgeApi.uploadDocument(selectedLib, file);
           if (response.data.success) {
@@ -197,12 +236,10 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
           failCount++;
           results.push({ name: file.name, success: false, message: error.message || '上传失败' });
         }
-        
-        // 更新进度结果
+
         setUploadProgress(prev => prev ? { ...prev, current: i + 1, results: [...results] } : null);
       }
-      
-      // 显示上传结果
+
       if (failCount === 0) {
         setMessage({ type: 'success', text: `成功上传 ${successCount} 个文档` });
       } else if (successCount === 0) {
@@ -210,8 +247,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
       } else {
         setMessage({ type: 'success', text: `上传完成：成功 ${successCount} 个，失败 ${failCount} 个` });
       }
-      
-      // 刷新列表
+
       loadDocuments(selectedLib);
       loadLibraries();
     } catch (error) {
@@ -219,13 +255,61 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
       setMessage({ type: 'error', text: '上传文档失败' });
     } finally {
       setUploading(false);
-      // 延迟清除进度，让用户看到最终结果
       setTimeout(() => setUploadProgress(null), 3000);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (folderInputRef.current) folderInputRef.current.value = '';
     }
     setTimeout(() => setMessage(null), 5000);
+  };
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const rawFiles = e.target.files;
+    if (!rawFiles || rawFiles.length === 0 || !selectedLib) return;
+
+    const files = Array.from(rawFiles).filter((f) => isSupportedFile(f.name));
+
+    if (files.length === 0) {
+      setMessage({ type: 'error', text: '没有找到支持的文档格式（.txt, .md, .pdf, .doc, .docx）' });
+      setTimeout(() => setMessage(null), 5000);
+      e.target.value = '';
+      return;
+    }
+
+    await doUploadFiles(files);
+  };
+
+  // 拖拽上传处理（支持多文件夹+多文件混合）
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    if (uploading || !selectedLib) return;
+
+    const items = e.dataTransfer.items;
+    if (!items || items.length === 0) return;
+
+    setMessage({ type: 'success', text: '正在扫描文件...' });
+    const files = await readAllEntries(items);
+
+    if (files.length === 0) {
+      setMessage({ type: 'error', text: '没有找到支持的文档格式（.txt, .md, .pdf, .doc, .docx）' });
+      setTimeout(() => setMessage(null), 5000);
+      return;
+    }
+
+    await doUploadFiles(files);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!uploading) setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
   };
 
   const handleDelete = async (docId: string) => {
@@ -352,8 +436,23 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
             )}
           </div>
 
-          {/* 右侧文档列表 */}
-          <div className="flex-1 p-4 overflow-y-auto">
+          {/* 右侧文档列表 - 拖拽上传区 */}
+          <div
+            className={`flex-1 p-4 overflow-y-auto relative ${isDragOver ? 'bg-blue-50' : ''}`}
+            onDrop={handleDrop}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+          >
+            {/* 拖拽覆盖层 */}
+            {isDragOver && (
+              <div className="absolute inset-0 bg-blue-50 bg-opacity-90 border-2 border-dashed border-blue-400 rounded-lg flex items-center justify-center z-10 pointer-events-none">
+                <div className="text-center">
+                  <div className="text-4xl mb-2">📂</div>
+                  <div className="text-blue-700 font-medium">松开鼠标上传文件或文件夹</div>
+                  <div className="text-xs text-blue-500 mt-1">支持同时拖入多个文件夹</div>
+                </div>
+              </div>
+            )}
             {selectedLibInfo && (
               <>
                 <div className="flex justify-between items-center mb-4">
@@ -361,7 +460,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
                     <h3 className="text-lg font-medium text-gray-900">{selectedLibInfo.name}</h3>
                     <p className="text-sm text-gray-500">{selectedLibInfo.desc}</p>
                   </div>
-                  <div>
+                  <div className="flex gap-2">
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -381,6 +480,25 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
                     >
                       {uploading ? '上传中...' : '📤 上传文档'}
                     </label>
+                    <input
+                      ref={folderInputRef}
+                      type="file"
+                      onChange={handleUpload}
+                      accept=".txt,.md,.markdown,.pdf,.doc,.docx"
+                      className="hidden"
+                      id="folder-upload"
+                      {...{ webkitdirectory: '', directory: '' } as any}
+                    />
+                    <label
+                      htmlFor="folder-upload"
+                      className={`inline-flex items-center px-4 py-2 border text-sm font-medium rounded-md cursor-pointer ${
+                        uploading
+                          ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                          : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      📁 上传文件夹
+                    </label>
                   </div>
                 </div>
 
@@ -392,7 +510,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
                     <div className="text-4xl mb-2">📭</div>
                     <div>暂无文档，点击此处上传</div>
                     <div className="text-xs mt-2">支持 .txt, .md, .pdf, .doc, .docx 格式</div>
-                    <div className="text-xs text-blue-600">支持多文件同时上传</div>
+                    <div className="text-xs text-blue-600">支持多文件上传，可拖拽多个文件夹到此处</div>
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -469,7 +587,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
 
         {/* 底部说明 */}
         <div className="px-6 py-3 border-t border-gray-200 bg-gray-50 text-sm text-gray-500 rounded-b-lg">
-          💡 上传的文档会在AI生成内容时自动检索，作为参考资料优先使用。支持多文件同时上传，点击文档可预览内容。
+          💡 上传的文档会在AI生成内容时自动检索，作为参考资料优先使用。支持拖拽多个文件夹到文档区域批量上传。
         </div>
 
         {/* 调整大小手柄 */}

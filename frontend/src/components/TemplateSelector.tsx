@@ -97,6 +97,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [showResumePrompt, setShowResumePrompt] = useState(false);
   const resumeCheckedRef = useRef(false);
+  const [templateSearch, setTemplateSearch] = useState('');
 
   // Upload state
   const [uploadType, setUploadType] = useState<TemplateType>('audit_plan');
@@ -501,8 +502,23 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
 
       {/* ─── Section 2: Template List ─── */}
       <div className="gt-card">
-        <div className="gt-card-header" style={{ color: 'var(--gt-primary)' }}>
-          已上传模板
+        <div className="gt-card-header" style={{ color: 'var(--gt-primary)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span>已上传模板</span>
+          {templates.length > 0 && (
+            <input
+              type="text"
+              value={templateSearch}
+              onChange={(e) => setTemplateSearch(e.target.value)}
+              placeholder="🔍 搜索模板名称..."
+              style={{
+                ...inputStyle,
+                width: 220,
+                padding: '4px 10px',
+                fontSize: 'var(--gt-font-xs)',
+                fontWeight: 400,
+              }}
+            />
+          )}
         </div>
         <div className="gt-card-content">
           {loading ? (
@@ -513,7 +529,19 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
             <div style={{ textAlign: 'center', padding: 'var(--gt-space-6)', color: 'var(--gt-text-secondary)', fontSize: 'var(--gt-font-sm)' }}>
               暂无已上传模板，请先上传模板文件
             </div>
-          ) : (
+          ) : (() => {
+            const keyword = templateSearch.trim().toLowerCase();
+            const filteredTemplates = keyword
+              ? templates.filter((t) =>
+                  t.name.toLowerCase().includes(keyword) ||
+                  (TEMPLATE_TYPE_LABELS[t.template_type] || '').includes(keyword)
+                )
+              : templates;
+            return filteredTemplates.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 'var(--gt-space-6)', color: 'var(--gt-text-secondary)', fontSize: 'var(--gt-font-sm)' }}>
+                未找到匹配的模板
+              </div>
+            ) : (
             <table className="gt-table" aria-label="已上传模板列表">
               <caption
                 style={{
@@ -524,7 +552,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                   color: 'var(--gt-text-primary)',
                 }}
               >
-                模板列表（{templates.length} 个）
+                {keyword ? `搜索结果（${filteredTemplates.length} / ${templates.length} 个）` : `模板列表（${templates.length} 个）`}
               </caption>
               <thead>
                 <tr>
@@ -536,7 +564,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                 </tr>
               </thead>
               <tbody>
-                {templates.map((tpl) => {
+                {filteredTemplates.map((tpl) => {
                   const isSelected = selectedTemplateId === tpl.id;
                   return (
                     <tr
@@ -619,7 +647,8 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                 })}
               </tbody>
             </table>
-          )}
+            );
+          })()}
         </div>
       </div>
 
