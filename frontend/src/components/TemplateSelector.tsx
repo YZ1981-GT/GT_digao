@@ -97,7 +97,6 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [showResumePrompt, setShowResumePrompt] = useState(false);
   const resumeCheckedRef = useRef(false);
-  const [templateSearch, setTemplateSearch] = useState('');
 
   // Upload state
   const [uploadType, setUploadType] = useState<TemplateType>('audit_plan');
@@ -113,6 +112,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
   const [libraryDocs, setLibraryDocs] = useState<Record<string, KnowledgeDocument[]>>({});
   const [loadingDocs, setLoadingDocs] = useState<Set<string>>(new Set());
   const [knowledgeSectionOpen, setKnowledgeSectionOpen] = useState(false);
+  const [docSearchMap, setDocSearchMap] = useState<Record<string, string>>({});
 
   /** Fetch template list */
   const fetchTemplates = useCallback(async () => {
@@ -502,23 +502,8 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
 
       {/* ─── Section 2: Template List ─── */}
       <div className="gt-card">
-        <div className="gt-card-header" style={{ color: 'var(--gt-primary)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span>已上传模板</span>
-          {templates.length > 0 && (
-            <input
-              type="text"
-              value={templateSearch}
-              onChange={(e) => setTemplateSearch(e.target.value)}
-              placeholder="🔍 搜索模板名称..."
-              style={{
-                ...inputStyle,
-                width: 220,
-                padding: '4px 10px',
-                fontSize: 'var(--gt-font-xs)',
-                fontWeight: 400,
-              }}
-            />
-          )}
+        <div className="gt-card-header" style={{ color: 'var(--gt-primary)' }}>
+          已上传模板
         </div>
         <div className="gt-card-content">
           {loading ? (
@@ -529,19 +514,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
             <div style={{ textAlign: 'center', padding: 'var(--gt-space-6)', color: 'var(--gt-text-secondary)', fontSize: 'var(--gt-font-sm)' }}>
               暂无已上传模板，请先上传模板文件
             </div>
-          ) : (() => {
-            const keyword = templateSearch.trim().toLowerCase();
-            const filteredTemplates = keyword
-              ? templates.filter((t) =>
-                  t.name.toLowerCase().includes(keyword) ||
-                  (TEMPLATE_TYPE_LABELS[t.template_type] || '').includes(keyword)
-                )
-              : templates;
-            return filteredTemplates.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: 'var(--gt-space-6)', color: 'var(--gt-text-secondary)', fontSize: 'var(--gt-font-sm)' }}>
-                未找到匹配的模板
-              </div>
-            ) : (
+          ) : (
             <table className="gt-table" aria-label="已上传模板列表">
               <caption
                 style={{
@@ -552,7 +525,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                   color: 'var(--gt-text-primary)',
                 }}
               >
-                {keyword ? `搜索结果（${filteredTemplates.length} / ${templates.length} 个）` : `模板列表（${templates.length} 个）`}
+                模板列表（{templates.length} 个）
               </caption>
               <thead>
                 <tr>
@@ -564,7 +537,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                 </tr>
               </thead>
               <tbody>
-                {filteredTemplates.map((tpl) => {
+                {templates.map((tpl) => {
                   const isSelected = selectedTemplateId === tpl.id;
                   return (
                     <tr
@@ -647,8 +620,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                 })}
               </tbody>
             </table>
-            );
-          })()}
+          )}
         </div>
       </div>
 
@@ -779,9 +751,39 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                             <div style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', padding: 'var(--gt-space-2) 0' }}>
                               该知识库暂无文档
                             </div>
-                          ) : (
+                          ) : (() => {
+                            const searchKey = docSearchMap[lib.id] || '';
+                            const keyword = searchKey.trim().toLowerCase();
+                            const filteredDocs = keyword
+                              ? docs.filter((d) => d.filename.toLowerCase().includes(keyword))
+                              : docs;
+                            return (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                              {docs.map((doc) => {
+                              {/* 搜索框 */}
+                              {docs.length > 5 && (
+                                <input
+                                  type="text"
+                                  value={searchKey}
+                                  onChange={(e) => setDocSearchMap((prev) => ({ ...prev, [lib.id]: e.target.value }))}
+                                  placeholder="🔍 搜索文档名称..."
+                                  onClick={(e) => e.stopPropagation()}
+                                  style={{
+                                    ...inputStyle,
+                                    padding: '5px 10px',
+                                    fontSize: 'var(--gt-font-xs)',
+                                    marginBottom: 6,
+                                    border: '2px solid var(--gt-primary)',
+                                    borderRadius: 'var(--gt-radius-sm)',
+                                    backgroundColor: 'rgba(75, 45, 119, 0.03)',
+                                    outline: 'none',
+                                  }}
+                                />
+                              )}
+                              {filteredDocs.length === 0 ? (
+                                <div style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', padding: 'var(--gt-space-2) 0' }}>
+                                  未找到匹配的文档
+                                </div>
+                              ) : filteredDocs.map((doc) => {
                                 const isDocSelected = selectedDocIds.includes(doc.id);
                                 return (
                                   <label
@@ -816,7 +818,8 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                                 );
                               })}
                             </div>
-                          )}
+                            );
+                          })()}
                         </div>
                       )}
                     </div>
