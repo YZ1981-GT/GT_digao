@@ -44,7 +44,7 @@ async def upload_template(
             tmp_path = tmp.name
 
         try:
-            info = template_manager.upload_template(tmp_path, filename, template_type)
+            info = await template_manager.upload_template(tmp_path, filename, template_type)
             return {"success": True, "template": info.model_dump()}
         finally:
             if os.path.exists(tmp_path):
@@ -115,7 +115,7 @@ async def update_template(template_id: str, file: UploadFile = File(...)):
             tmp_path = tmp.name
 
         try:
-            info = template_manager.update_template(template_id, tmp_path, filename)
+            info = await template_manager.update_template(template_id, tmp_path, filename)
             return {"success": True, "template": info.model_dump()}
         finally:
             if os.path.exists(tmp_path):

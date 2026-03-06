@@ -199,9 +199,9 @@ const CrossReferenceGraph: React.FC<CrossReferenceGraphProps> = ({ analysis }) =
   }
 
   const { references, missing_references, consistency_findings } = analysis;
-  const hasReferences = references.length > 0;
-  const hasMissing = missing_references.length > 0;
-  const hasConsistency = consistency_findings.length > 0;
+  const hasReferences = (references?.length ?? 0) > 0;
+  const hasMissing = (missing_references?.length ?? 0) > 0;
+  const hasConsistency = (consistency_findings?.length ?? 0) > 0;
 
   // No data at all
   if (!hasReferences && !hasMissing && !hasConsistency) {

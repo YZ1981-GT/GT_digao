@@ -126,16 +126,19 @@ class WordExportService:
                 i += 1
                 continue
 
-            # 列表项（有序/无序）
+            # 列表项（有序/无序，支持嵌套缩进）
             if line.startswith("- ") or line.startswith("* ") or re.match(r"^\d+\.\s", line):
                 items = []
                 while i < len(lines):
                     raw = lines[i].rstrip("\r")
                     stripped = raw.strip()
+                    # 计算缩进层级（每2空格或1个tab为一级）
+                    leading = len(raw) - len(raw.lstrip())
+                    indent_level = leading // 2
                     if stripped.startswith("- ") or stripped.startswith("* "):
                         text = re.sub(r"^[-*]\s+", "", stripped).strip()
                         if text:
-                            items.append(("unordered", None, text))
+                            items.append(("unordered", None, text, indent_level))
                         i += 1
                         continue
                     m_num = re.match(r"^(\d+)\.\s+(.*)$", stripped)
@@ -143,7 +146,7 @@ class WordExportService:
                         num_str, text = m_num.groups()
                         text = text.strip()
                         if text:
-                            items.append(("ordered", num_str, text))
+                            items.append(("ordered", num_str, text, indent_level))
                         i += 1
                         continue
                     break
@@ -210,8 +213,13 @@ class WordExportService:
             kind = block[0]
             if kind == "list":
                 items = block[1]
-                for item_kind, num_str, text in items:
+                for item_tuple in items:
+                    item_kind, num_str, text = item_tuple[0], item_tuple[1], item_tuple[2]
+                    indent_level = item_tuple[3] if len(item_tuple) > 3 else 0
                     p = self.doc.add_paragraph()
+                    # 嵌套缩进
+                    if indent_level > 0:
+                        p.paragraph_format.left_indent = Pt(18 * indent_level)
                     if item_kind == "unordered":
                         run = p.add_run("• ")
                         self._set_run_font(run)
@@ -222,8 +230,29 @@ class WordExportService:
                     self._add_markdown_runs(p, text)
             elif kind == "table":
                 rows = block[1]
-                for row in rows:
-                    self._add_markdown_paragraph(row)
+                if rows:
+                    # 解析表格行为真正的 Word 表格
+                    parsed_rows = []
+                    for row in rows:
+                        cells = [c.strip() for c in row.split("|") if c.strip()]
+                        if cells:
+                            parsed_rows.append(cells)
+                    if parsed_rows:
+                        max_cols = max(len(r) for r in parsed_rows)
+                        table = self.doc.add_table(rows=len(parsed_rows), cols=max_cols)
+                        table.style = 'Table Grid'
+                        for r_idx, row_cells in enumerate(parsed_rows):
+                            for c_idx, cell_text in enumerate(row_cells):
+                                if c_idx < max_cols:
+                                    cell = table.cell(r_idx, c_idx)
+                                    cell.text = cell_text
+                                    for para in cell.paragraphs:
+                                        self._set_paragraph_font(para)
+                                        if self._body_font_size:
+                                            for run in para.runs:
+                                                run.font.size = Pt(self._body_font_size)
+                        # 表格后加空段落
+                        self.doc.add_paragraph()
             elif kind == "heading":
                 _, level, text = block
                 heading = self.doc.add_heading(text, level=level)

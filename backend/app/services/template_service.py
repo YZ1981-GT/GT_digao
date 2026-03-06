@@ -45,6 +45,8 @@ class TemplateManager:
 
     def __init__(self) -> None:
         os.makedirs(self.TEMPLATE_DIR, exist_ok=True)
+        self._templates_cache: Optional[List[TemplateInfo]] = None
+        self._cache_mtime: float = 0  # 目录修改时间戳
 
     # ─── 内部工具方法 ───
 
@@ -74,6 +76,10 @@ class TemplateManager:
             logger.error("Failed to load template meta %s: %s", template_id, exc)
             return None
 
+    def _invalidate_cache(self) -> None:
+        """使模板列表缓存失效"""
+        self._templates_cache = None
+
     def _save_meta(self, data: Dict[str, Any]) -> None:
         template_id = data["id"]
         tpl_dir = self._template_dir(template_id)
@@ -81,6 +87,7 @@ class TemplateManager:
         path = self._meta_path(template_id)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        self._invalidate_cache()
 
     @staticmethod
     def _meta_to_info(data: Dict[str, Any]) -> TemplateInfo:
@@ -208,11 +215,20 @@ class TemplateManager:
         )
 
     def list_templates(self) -> List[TemplateInfo]:
-        """列出所有已上传模板。"""
-        results: List[TemplateInfo] = []
+        """列出所有已上传模板（带内存缓存）。"""
         if not os.path.isdir(self.TEMPLATE_DIR):
-            return results
+            return []
 
+        # 检查目录修改时间，决定是否使用缓存
+        try:
+            dir_mtime = os.path.getmtime(self.TEMPLATE_DIR)
+        except OSError:
+            dir_mtime = 0
+
+        if self._templates_cache is not None and dir_mtime <= self._cache_mtime:
+            return self._templates_cache
+
+        results: List[TemplateInfo] = []
         for entry in os.listdir(self.TEMPLATE_DIR):
             tpl_dir = os.path.join(self.TEMPLATE_DIR, entry)
             if not os.path.isdir(tpl_dir):
@@ -224,6 +240,8 @@ class TemplateManager:
 
         # 按上传时间倒序
         results.sort(key=lambda t: t.uploaded_at, reverse=True)
+        self._templates_cache = results
+        self._cache_mtime = dir_mtime
         return results
 
     def get_template(self, template_id: str) -> Optional[TemplateInfo]:
@@ -240,6 +258,7 @@ class TemplateManager:
             return False
         try:
             shutil.rmtree(tpl_dir)
+            self._invalidate_cache()
             logger.info("Deleted template %s", template_id)
             return True
         except OSError as exc:
@@ -310,8 +329,65 @@ class TemplateManager:
 
     @staticmethod
     def _extract_sections_from_word(word_result) -> List[TemplateSection]:
-        """从 Word 解析结果中提取章节结构。"""
+        """从 Word 解析结果中提取章节结构。
+        
+        性能优化：优先使用 headings 列表（已按顺序提取的标题），
+        避免遍历所有段落。
+        """
         sections: List[TemplateSection] = []
+
+        # 优先使用 headings 列表（性能更好，信息更准确）
+        if word_result.headings:
+            logger.info(f"[模板解析] 使用 headings 列表提取章节（{len(word_result.headings)} 个标题）")
+            
+            for idx, heading in enumerate(word_result.headings):
+                text = heading.get("text", "").strip()
+                level = heading.get("level", 1)
+                if not text:
+                    continue
+                
+                fillable = _detect_fillable_fields(text)
+                
+                sections.append(
+                    TemplateSection(
+                        index=idx,
+                        title=text,
+                        level=level,
+                        has_table=False,
+                        fillable_fields=fillable,
+                    )
+                )
+            
+            # 标记包含表格的章节：扫描段落找到表格位置，关联到最近的前置标题
+            if word_result.tables and sections and word_result.paragraphs:
+                table_preceding_headings = set()
+                last_heading_idx = -1
+                table_count_seen = 0
+                for para in word_result.paragraphs:
+                    p_text = para.get("text", "").strip()
+                    p_level = para.get("level")
+                    if p_level is not None and p_text:
+                        # 找到对应的 section index
+                        for si, sec in enumerate(sections):
+                            if sec.title == p_text and sec.level == p_level:
+                                last_heading_idx = si
+                                break
+                # 简化：如果有表格，标记最后一个章节
+                if last_heading_idx >= 0:
+                    sections[last_heading_idx].has_table = True
+                elif sections:
+                    sections[-1].has_table = True
+            
+            logger.info(
+                f"[模板解析] 提取了 {len(sections)} 个章节，"
+                f"层级: L1={sum(1 for s in sections if s.level==1)}, "
+                f"L2={sum(1 for s in sections if s.level==2)}, "
+                f"L3={sum(1 for s in sections if s.level==3)}"
+            )
+            return sections
+        
+        # 回退：从 paragraphs 中提取（兼容旧逻辑）
+        logger.info("[模板解析] headings 为空，回退到 paragraphs 扫描")
         idx = 0
 
         for para in word_result.paragraphs:
@@ -320,8 +396,10 @@ class TemplateManager:
                 continue
 
             level = para.get("level")
+            # 如果段落没有 Heading 样式，用严格模式检测中文章节标题
+            if level is None:
+                level = _detect_heading_level_strict(text)
             if level is not None:
-                # 检测该标题下是否有表格（简单启发式：标题后紧跟表格）
                 has_table = False
                 fillable = _detect_fillable_fields(text)
 
@@ -464,9 +542,43 @@ def _detect_heading_level(line: str) -> Optional[int]:
     if not line or len(line) > 100:
         return None
 
+    # 过滤目录条目：标题后跟页码数字（如 "一、审计工作范围    5"）
+    if re.search(r'[\s\t]\d{1,4}\s*$', line):
+        return None
+
     for level, pattern in _HEADING_PATTERNS:
         if pattern.match(line):
             return level
+    return None
+
+
+def _detect_heading_level_strict(line: str) -> Optional[int]:
+    """严格模式标题检测：仅识别中文大写序号标题，避免误判正文列表项。
+
+    只识别：
+    - 一级：中文数字序号（一、二、...）、第X章/部分/节
+    - 二级：中文括号序号（（一）（二）...）
+    不识别阿拉伯数字序号（1. 2、等），因为在无 Heading 样式的文档中
+    这些太容易与正文列表项混淆。
+    """
+    line = line.strip()
+    if not line or len(line) > 80:
+        return None
+
+    # 过滤目录条目
+    if re.search(r'[\s\t]\d{1,4}\s*$', line):
+        return None
+
+    # 一级：第X章/部分/节/篇
+    if re.match(r'^第[一二三四五六七八九十百零\d]+[章部分节篇]', line):
+        return 1
+    # 一级：中文数字 + 顿号/点号
+    if re.match(r'^[一二三四五六七八九十]+[、.．]\s*\S', line):
+        return 1
+    # 二级：中文括号数字
+    if re.match(r'^[（(][一二三四五六七八九十]+[）)]\s*\S', line):
+        return 2
+
     return None
 
 

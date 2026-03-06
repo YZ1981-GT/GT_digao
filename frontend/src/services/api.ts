@@ -34,7 +34,9 @@ import type {
   SupplementaryMaterial,
 } from '../types/audit';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || '';
+const API_BASE_URL =
+  process.env.REACT_APP_API_URL ||
+  (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:9980');
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -338,6 +340,12 @@ export const reviewApi = {
       responseType: 'blob',
     }),
 
+  /** 直接导出复核报告（携带报告数据，不依赖后端内存） */
+  exportDirect: (data: { format: string; report: any }) =>
+    api.post(`/api/review/export-direct`, data, {
+      responseType: 'blob',
+    }),
+
   /** 更新问题处理状态 */
   updateFindingStatus: (findingId: string, data: FindingStatusUpdate) =>
     api.patch(`/api/review/finding/${findingId}/status`, data),
@@ -350,7 +358,7 @@ export const reviewApi = {
 // 文档生成相关 API
 export const generateApi = {
   /** 从模板提取章节大纲 */
-  extractOutline: (data: { template_id: string }) =>
+  extractOutline: (data: { template_id: string; force_llm?: boolean }) =>
     api.post('/api/generate/extract-outline', data),
 
   /** 用户确认/调整大纲 */
@@ -366,19 +374,21 @@ export const generateApi = {
     }),
 
   /** 单章节内容生成（SSE流式），返回 fetch Response 供 SSEParser 使用 */
-  generateSection: (data: SectionGenerateRequest) =>
+  generateSection: (data: SectionGenerateRequest, signal?: AbortSignal) =>
     fetch(`${API_BASE_URL}/api/generate/generate-section`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
+      signal,
     }),
 
   /** AI修改章节（SSE流式），返回 fetch Response 供 SSEParser 使用 */
-  reviseSection: (data: SectionRevisionRequest) =>
+  reviseSection: (data: SectionRevisionRequest, signal?: AbortSignal) =>
     fetch(`${API_BASE_URL}/api/generate/revise-section`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
+      signal,
     }),
 
   /** 导出生成文档（返回 Blob） */

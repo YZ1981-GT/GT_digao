@@ -12,7 +12,8 @@
  */
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import type { SectionRevisionRequest } from '../types/audit';
-import { generateApi } from '../services/api';
+import { generateApi, reviewApi, configApi } from '../services/api';
+import type { ConfigData } from '../services/api';
 import { processSSEStream } from '../utils/sseParser';
 import '../styles/gt-design-tokens.css';
 
@@ -48,6 +49,16 @@ const SectionEditor: React.FC<SectionEditorProps> = ({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [targetWordCount, setTargetWordCount] = useState<number | undefined>(undefined);
 
+  // ─── Upload reference state ───
+  const [refFiles, setRefFiles] = useState<Array<{ name: string; content: string }>>([]);
+  const [uploadingRef, setUploadingRef] = useState(false);
+  const refFileInputRef = useRef<HTMLInputElement>(null);
+
+  // ─── Model selection state ───
+  const [modelName, setModelName] = useState('');
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const configRef = useRef<ConfigData | null>(null);
+
   // ─── Refs ───
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
@@ -56,6 +67,24 @@ const SectionEditor: React.FC<SectionEditorProps> = ({
   useEffect(() => {
     setEditContent(content);
   }, [content]);
+
+  /** Load current model config and available models on mount */
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await configApi.loadConfig();
+        const cfg = res.data as ConfigData;
+        configRef.current = cfg;
+        setModelName(cfg.model_name || '');
+        // Fetch available models
+        try {
+          const modelsRes = await configApi.getModels(cfg);
+          const models = modelsRes.data?.models ?? modelsRes.data ?? [];
+          if (Array.isArray(models)) setAvailableModels(models.map((m: any) => typeof m === 'string' ? m : m.id || m.name || ''));
+        } catch { /* models list optional */ }
+      } catch { /* config load optional */ }
+    })();
+  }, []);
 
   /** Auto-scroll chat log to bottom when messages change */
   useEffect(() => {
@@ -94,12 +123,60 @@ const SectionEditor: React.FC<SectionEditorProps> = ({
     onClose();
   }, [editContent, onContentChange, onClose]);
 
+  /** Upload reference file for AI context */
+  const handleRefFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+
+    setUploadingRef(true);
+    try {
+      const response = await reviewApi.uploadSupplementary(file);
+      const resp = response.data as any;
+      const material = resp?.material ?? resp;
+      const parsedContent = material?.parsed_content;
+      if (parsedContent) {
+        setRefFiles((prev) => [...prev, { name: file.name, content: parsedContent }]);
+        const sysMsg: ChatMessage = { role: 'assistant', content: `已加载参考文档「${file.name}」，后续 AI 修改将参考该文档内容。` };
+        setMessages((prev) => [...prev, sysMsg]);
+      }
+    } catch (err: any) {
+      const errMsg: ChatMessage = { role: 'assistant', content: `文档上传失败: ${err.message}` };
+      setMessages((prev) => [...prev, errMsg]);
+    } finally {
+      setUploadingRef(false);
+    }
+  }, []);
+
+  /** Remove a reference file */
+  const handleRemoveRefFile = useCallback((index: number) => {
+    setRefFiles((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  /** Change model and save config */
+  const handleModelChange = useCallback(async (newModel: string) => {
+    setModelName(newModel);
+    if (configRef.current) {
+      const updated = { ...configRef.current, model_name: newModel };
+      configRef.current = updated;
+      try { await configApi.saveConfig(updated); } catch { /* ignore */ }
+    }
+  }, []);
+
   /** Submit AI revision request via SSE */
   const handleAiSubmit = useCallback(async () => {
     if (!aiInput.trim() || aiProcessing) return;
 
     const hasSelection = selectedText.length > 0;
     const instruction = aiInput.trim();
+
+    // Build reference context from uploaded files
+    let refContext = '';
+    if (refFiles.length > 0) {
+      refContext = '\n\n【参考文档内容】\n' + refFiles.map((f) =>
+        `── ${f.name} ──\n${f.content.substring(0, 8000)}`
+      ).join('\n\n') + '\n【参考文档结束】\n';
+    }
 
     // Add user message to chat
     const userMessage: ChatMessage = { role: 'user', content: instruction };
@@ -109,11 +186,15 @@ const SectionEditor: React.FC<SectionEditorProps> = ({
     setAiProcessing(true);
 
     // Build request
+    const fullInstruction = instruction
+      + (hasSelection ? '\n\n【注意】只修改上述选中的部分内容，保持格式和风格一致。' : '')
+      + refContext;
+
     const requestData: SectionRevisionRequest = {
       document_id: documentId,
       section_index: sectionIndex,
       current_content: editContent,
-      user_instruction: instruction + (hasSelection ? '\n\n【注意】只修改上述选中的部分内容，保持格式和风格一致。' : ''),
+      user_instruction: fullInstruction,
       selected_text: hasSelection ? selectedText : undefined,
       selection_start: hasSelection ? selectionStart : undefined,
       selection_end: hasSelection ? selectionEnd : undefined,
@@ -247,6 +328,56 @@ const SectionEditor: React.FC<SectionEditorProps> = ({
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--gt-space-3)' }}>
+            {/* Model selector */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--gt-space-1)' }}>
+              <label
+                htmlFor="section-model-select"
+                style={{ fontSize: 'var(--gt-font-sm)', color: 'var(--gt-text-secondary)', whiteSpace: 'nowrap' }}
+              >
+                模型:
+              </label>
+              {availableModels.length > 0 ? (
+                <select
+                  id="section-model-select"
+                  value={modelName}
+                  onChange={(e) => handleModelChange(e.target.value)}
+                  style={{
+                    maxWidth: 180,
+                    padding: '2px var(--gt-space-2)',
+                    border: '1px solid #ddd',
+                    borderRadius: 'var(--gt-radius-sm)',
+                    fontSize: 'var(--gt-font-sm)',
+                    color: 'var(--gt-text-primary)',
+                  }}
+                  aria-label="选择AI模型"
+                >
+                  {availableModels.map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                  {modelName && !availableModels.includes(modelName) && (
+                    <option value={modelName}>{modelName}</option>
+                  )}
+                </select>
+              ) : (
+                <input
+                  id="section-model-select"
+                  type="text"
+                  value={modelName}
+                  onChange={(e) => setModelName(e.target.value)}
+                  onBlur={() => handleModelChange(modelName)}
+                  placeholder="模型名称"
+                  style={{
+                    width: 160,
+                    padding: '2px var(--gt-space-2)',
+                    border: '1px solid #ddd',
+                    borderRadius: 'var(--gt-radius-sm)',
+                    fontSize: 'var(--gt-font-sm)',
+                  }}
+                  aria-label="输入AI模型名称"
+                />
+              )}
+            </div>
+
             {/* Target word count */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--gt-space-1)' }}>
               <label
@@ -350,29 +481,73 @@ const SectionEditor: React.FC<SectionEditorProps> = ({
                 </span>
               )}
             </div>
-            <textarea
-              id={`section-editor-textarea-${sectionIndex}`}
-              ref={textareaRef}
-              value={editContent}
-              onChange={(e) => setEditContent(e.target.value)}
-              onSelect={handleTextSelect}
-              onMouseUp={handleTextSelect}
-              onKeyUp={handleTextSelect}
-              style={{
-                flex: 1,
-                width: '100%',
-                padding: 'var(--gt-space-3)',
-                border: '1px solid #ddd',
-                borderRadius: 'var(--gt-radius-md)',
-                fontFamily: 'var(--gt-font-cn)',
-                fontSize: 'var(--gt-font-base)',
-                lineHeight: 1.8,
-                resize: 'none',
-                color: 'var(--gt-text-primary)',
-                outline: 'none',
-              }}
-              aria-label={`编辑 ${sectionTitle} 内容`}
-            />
+            <div style={{ flex: 1, position: 'relative' }}>
+              {/* Highlight backdrop — shows selected text highlight even when textarea loses focus */}
+              {selectedText && selectionStart !== selectionEnd && (
+                <div
+                  aria-hidden="true"
+                  ref={(el) => {
+                    // Sync scroll position with textarea
+                    if (el && textareaRef.current) {
+                      el.scrollTop = textareaRef.current.scrollTop;
+                    }
+                  }}
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    padding: 'var(--gt-space-3)',
+                    fontFamily: 'var(--gt-font-cn)',
+                    fontSize: 'var(--gt-font-base)',
+                    lineHeight: 1.8,
+                    whiteSpace: 'pre-wrap',
+                    wordWrap: 'break-word',
+                    overflow: 'hidden',
+                    color: 'transparent',
+                    pointerEvents: 'none',
+                    borderRadius: 'var(--gt-radius-md)',
+                    border: '1px solid transparent',
+                  }}
+                >
+                  {editContent.substring(0, selectionStart)}
+                  <mark style={{ backgroundColor: 'rgba(75, 45, 119, 0.15)', color: 'transparent', borderRadius: 2 }}>
+                    {editContent.substring(selectionStart, selectionEnd)}
+                  </mark>
+                  {editContent.substring(selectionEnd)}
+                </div>
+              )}
+              <textarea
+                id={`section-editor-textarea-${sectionIndex}`}
+                ref={textareaRef}
+                value={editContent}
+                onChange={(e) => setEditContent(e.target.value)}
+                onSelect={handleTextSelect}
+                onMouseUp={handleTextSelect}
+                onKeyUp={handleTextSelect}
+                onScroll={() => {
+                  // Sync backdrop scroll
+                  const ta = textareaRef.current;
+                  const backdrop = ta?.previousElementSibling as HTMLElement | null;
+                  if (backdrop && ta) backdrop.scrollTop = ta.scrollTop;
+                }}
+                style={{
+                  position: 'relative',
+                  flex: 1,
+                  width: '100%',
+                  height: '100%',
+                  padding: 'var(--gt-space-3)',
+                  border: '1px solid #ddd',
+                  borderRadius: 'var(--gt-radius-md)',
+                  fontFamily: 'var(--gt-font-cn)',
+                  fontSize: 'var(--gt-font-base)',
+                  lineHeight: 1.8,
+                  resize: 'none',
+                  color: 'var(--gt-text-primary)',
+                  outline: 'none',
+                  background: selectedText ? 'transparent' : '#fff',
+                }}
+                aria-label={`编辑 ${sectionTitle} 内容`}
+              />
+            </div>
           </div>
 
           {/* ─── Right panel: AI chat ─── */}
@@ -509,6 +684,60 @@ const SectionEditor: React.FC<SectionEditorProps> = ({
                 将仅修改选中的 {selectedText.length} 字文本
               </div>
             )}
+
+            {/* Reference files upload */}
+            <div style={{ marginBottom: 'var(--gt-space-2)' }}>
+              {refFiles.length > 0 && (
+                <div style={{ marginBottom: 'var(--gt-space-2)' }}>
+                  <div style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', marginBottom: 4 }}>
+                    参考文档：
+                  </div>
+                  {refFiles.map((f, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        padding: '3px 8px',
+                        marginBottom: 2,
+                        backgroundColor: 'rgba(75, 45, 119, 0.06)',
+                        borderRadius: 'var(--gt-radius-sm)',
+                        fontSize: 'var(--gt-font-xs)',
+                      }}
+                    >
+                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--gt-text-primary)' }} title={f.name}>
+                        📄 {f.name}
+                      </span>
+                      <button
+                        onClick={() => handleRemoveRefFile(i)}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#999', fontSize: 14, padding: 0, lineHeight: 1 }}
+                        aria-label={`移除参考文档 ${f.name}`}
+                        title="移除"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <button
+                className="gt-button gt-button--secondary"
+                onClick={() => refFileInputRef.current?.click()}
+                disabled={uploadingRef || aiProcessing}
+                style={{ fontSize: 'var(--gt-font-xs)', padding: '3px 10px', width: '100%' }}
+              >
+                {uploadingRef ? '解析中...' : '📎 上传参考文档'}
+              </button>
+              <input
+                ref={refFileInputRef}
+                type="file"
+                accept=".docx,.xlsx,.xls,.pdf,.txt,.md,.doc"
+                onChange={handleRefFileUpload}
+                style={{ display: 'none' }}
+                aria-hidden="true"
+              />
+            </div>
 
             {/* AI input */}
             <div style={{ display: 'flex', gap: 'var(--gt-space-2)' }}>

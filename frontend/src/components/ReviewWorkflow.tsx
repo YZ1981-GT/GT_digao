@@ -21,7 +21,7 @@ import type {
 } from '../types/audit';
 import { processSSEStream } from '../utils/sseParser';
 import { reviewApi } from '../services/api';
-import { saveAuditState, loadAuditState } from '../utils/auditStorage';
+import { saveAuditState, loadAuditState, clearAuditState } from '../utils/auditStorage';
 import type { AuditWorkState } from '../utils/auditStorage';
 import WorkpaperUpload from './WorkpaperUpload';
 import PromptSelector from './PromptSelector';
@@ -72,6 +72,7 @@ const INITIAL_STATE: WorkflowState = {
   requiredReferences: [],
   crossReferenceAnalysis: null,
 };
+
 const ReviewWorkflow: React.FC = () => {
   const [currentStep, setCurrentStep] = useState(0);
   const [state, setState] = useState<WorkflowState>({ ...INITIAL_STATE });
@@ -89,7 +90,7 @@ const ReviewWorkflow: React.FC = () => {
     [],
   );
 
-  //  IndexedDB: load cached workflow state on mount 
+  // IndexedDB: load cached workflow state on mount
   useEffect(() => {
     let cancelled = false;
     loadAuditState().then((cached) => {
@@ -106,6 +107,7 @@ const ReviewWorkflow: React.FC = () => {
         customDimensions: cached.reviewConfig?.customDimensions ?? prev.customDimensions,
         supplementaryMaterials: cached.supplementaryMaterials ?? prev.supplementaryMaterials,
         report: cached.reviewReport ?? prev.report,
+        reviewId: cached.reviewReport?.id ?? prev.reviewId,
       }));
       if (cached.reviewReport) {
         setCurrentStep(3);
@@ -115,7 +117,7 @@ const ReviewWorkflow: React.FC = () => {
     return () => { cancelled = true; };
   }, []);
 
-  //  IndexedDB: save workflow state on change (debounced 500ms) 
+  // IndexedDB: save workflow state on change (debounced 500ms)
   useEffect(() => {
     if (!stateLoaded) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -217,7 +219,7 @@ const ReviewWorkflow: React.FC = () => {
               case 'completed':
                 updateState({
                   report: event.report || null,
-                  reviewId: event.review_id || '',
+                  reviewId: event.report?.id || event.review_id || '',
                   isReviewing: false,
                 });
                 setCurrentStep(3);
@@ -252,6 +254,7 @@ const ReviewWorkflow: React.FC = () => {
     state.supplementaryMaterials,
     updateState,
   ]);
+
   const handleFindingStatusUpdate = useCallback(
     async (findingId: string, newStatus: FindingStatus) => {
       try {
@@ -274,9 +277,13 @@ const ReviewWorkflow: React.FC = () => {
 
   const handleExport = useCallback(
     async (format: 'word' | 'pdf') => {
-      if (!state.reviewId) return;
+      if (!state.report) return;
+      setError(null);
       try {
-        const response = await reviewApi.exportReport(state.reviewId, { format });
+        const response = await reviewApi.exportDirect({
+          format,
+          report: state.report,
+        });
         const blob = new Blob([response.data]);
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -290,14 +297,21 @@ const ReviewWorkflow: React.FC = () => {
         setError(err.message || '导出报告失败');
       }
     },
-    [state.reviewId],
+    [state.report],
   );
+
+  const handleRestart = useCallback(async () => {
+    setState({ ...INITIAL_STATE });
+    setCurrentStep(0);
+    setError(null);
+    await clearAuditState();
+  }, []);
 
   const fetchCrossReferences = useCallback(async () => {
     if (!state.reviewId) return;
     try {
       const response = await reviewApi.getCrossReferences(state.reviewId);
-      updateState({ crossReferenceAnalysis: response.data });
+      updateState({ crossReferenceAnalysis: (response.data as any)?.analysis ?? response.data ?? null });
     } catch {
       /* non-critical */
     }
@@ -312,6 +326,7 @@ const ReviewWorkflow: React.FC = () => {
       }
     : null;
   const progressPct = totalDimensions > 0 ? Math.round((state.reviewProgress / totalDimensions) * 100) : 0;
+
   const renderStepContent = () => {
     switch (currentStep) {
       case 0:
@@ -402,12 +417,22 @@ const ReviewWorkflow: React.FC = () => {
               onExport={handleExport}
             />
             <CrossReferenceGraph analysis={state.crossReferenceAnalysis} />
+            <div style={{ textAlign: 'center', marginTop: 'var(--gt-space-4)' }}>
+              <button
+                className="gt-button gt-button--primary"
+                onClick={handleRestart}
+                aria-label="开始新的复核"
+              >
+                开始新的复核
+              </button>
+            </div>
           </div>
         );
       default:
         return null;
     }
   };
+
   // Fetch cross-references when entering step 3
   React.useEffect(() => {
     if (currentStep === 3 && state.reviewId) {
@@ -474,7 +499,7 @@ const ReviewWorkflow: React.FC = () => {
               padding: 'var(--gt-space-1)',
             }}
           >
-            
+            ✕
           </button>
         </div>
       )}

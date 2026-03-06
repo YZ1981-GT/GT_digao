@@ -1,8 +1,12 @@
 ﻿"""后端服务启动脚本"""
 import uvicorn
 import os
+import logging
 
 if __name__ == "__main__":
+    # 配置日志级别，确保应用日志可见
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+
     # 确保在正确的目录中运行
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 

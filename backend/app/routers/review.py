@@ -14,6 +14,7 @@ from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
+from pydantic import BaseModel
 
 from ..models.audit_schemas import (
     ExportRequest,
@@ -190,9 +191,13 @@ async def upload_supplementary(
 async def start_review(request: ReviewRequest):
     """发起复核（SSE 流式响应）"""
     try:
+        logger.info(f"[复核启动] 收到请求，workpaper_ids: {request.workpaper_ids}, 内存中底稿数: {len(_parsed_workpapers)}")
         workpapers = [_parsed_workpapers[wid] for wid in request.workpaper_ids if wid in _parsed_workpapers]
         if not workpapers:
+            logger.warning(f"[复核启动] 未找到底稿，请求ID: {request.workpaper_ids}, 内存中: {list(_parsed_workpapers.keys())}")
             raise HTTPException(status_code=404, detail="未找到指定底稿")
+
+        logger.info(f"[复核启动] 找到 {len(workpapers)} 份底稿，维度: {request.dimensions}, prompt_id: {request.prompt_id}")
 
         # Gather supplementary materials
         supplementary = None
@@ -206,6 +211,7 @@ async def start_review(request: ReviewRequest):
         async def generate():
             try:
                 report = None
+                event_count = 0
                 async for event_str in review_engine.review_workpaper_stream(
                     workpaper=workpapers[0],
                     dimensions=[d.value for d in request.dimensions],
@@ -214,6 +220,8 @@ async def start_review(request: ReviewRequest):
                     custom_prompt=request.custom_prompt,
                     supplementary_materials=supplementary,
                 ):
+                    event_count += 1
+                    logger.info(f"[SSE] 发送事件 #{event_count}: {event_str[:120]}...")
                     yield f"data: {event_str}\n\n"
                     # Try to capture the completed report
                     try:
@@ -222,9 +230,12 @@ async def start_review(request: ReviewRequest):
                             from ..models.audit_schemas import ReviewReport
                             report = ReviewReport(**evt["report"])
                             _review_reports[report.id] = report
+                            logger.info(f"[SSE] 报告已存储，ID: {report.id}, 内存中报告数: {len(_review_reports)}")
                     except (json.JSONDecodeError, Exception):
                         pass
+                logger.info(f"[SSE] 生成器正常结束，共发送 {event_count} 个事件")
             except Exception as e:
+                logger.error(f"[SSE] 生成器异常: {e}", exc_info=True)
                 yield f"data: {json.dumps({'status': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -247,34 +258,59 @@ async def get_report(review_id: str):
 
 @router.post("/report/{review_id}/export")
 async def export_report(review_id: str, request: ExportRequest):
-    """导出复核报告（Word/PDF）"""
+    """导出复核报告（Word/PDF）- 通过 review_id 从内存查找"""
     try:
         report = _review_reports.get(review_id)
         if not report:
             raise HTTPException(status_code=404, detail="复核报告不存在")
 
-        fmt = request.format.lower()
-        if fmt == "word":
-            content = report_generator.export_to_word(report)
-            return Response(
-                content=content,
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                headers={"Content-Disposition": f'attachment; filename="review_report_{review_id}.docx"'},
-            )
-        elif fmt == "pdf":
-            content = report_generator.export_to_pdf(report)
-            return Response(
-                content=content,
-                media_type="application/pdf",
-                headers={"Content-Disposition": f'attachment; filename="review_report_{review_id}.pdf"'},
-            )
-        else:
-            raise HTTPException(status_code=400, detail=f"不支持的导出格式: {fmt}，支持: word, pdf")
+        return _do_export(report, request.format, review_id)
     except HTTPException:
         raise
     except Exception as e:
         logger.error("报告导出失败: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"报告导出失败: {str(e)}")
+
+
+class ExportWithDataRequest(BaseModel):
+    """携带报告数据的导出请求"""
+    format: str
+    report: dict
+
+
+@router.post("/export-direct")
+async def export_report_direct(request: ExportWithDataRequest):
+    """导出复核报告（Word/PDF）- 直接接收报告数据，不依赖内存"""
+    try:
+        from ..models.audit_schemas import ReviewReport as ReviewReportModel
+        report = ReviewReportModel(**request.report)
+        return _do_export(report, request.format, report.id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("报告导出失败: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"报告导出失败: {str(e)}")
+
+
+def _do_export(report, fmt: str, review_id: str):
+    """共用的导出逻辑"""
+    fmt = fmt.lower()
+    if fmt == "word":
+        content = report_generator.export_to_word(report)
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="review_report_{review_id}.docx"'},
+        )
+    elif fmt == "pdf":
+        content = report_generator.export_to_pdf(report)
+        return Response(
+            content=content,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="review_report_{review_id}.pdf"'},
+        )
+    else:
+        raise HTTPException(status_code=400, detail=f"不支持的导出格式: {fmt}，支持: word, pdf")
 
 
 @router.patch("/finding/{finding_id}/status")

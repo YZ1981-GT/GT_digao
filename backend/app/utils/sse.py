@@ -45,19 +45,44 @@ async def sse_with_heartbeat(
     每隔 heartbeat_interval 秒发送一条 SSE 注释（: heartbeat），
     浏览器 EventSource 会忽略注释行，不影响业务逻辑。
 
+    注意：不能使用 asyncio.wait_for，因为它在超时时会 cancel 底层协程，
+    导致生成器内部的 LLM 流式调用被中断。改用 asyncio.wait + FIRST_COMPLETED
+    模式，超时时只发送心跳，不影响正在进行的数据获取。
+
     用法:
         return sse_response(sse_with_heartbeat(my_generator()))
     """
-    done = False
     gen_iter = generator.__aiter__()
+    # 持久化的 __anext__ 任务，超时后不取消，继续等待
+    next_task: asyncio.Task | None = None
 
-    while not done:
-        try:
-            # 使用 asyncio.wait_for 替代 async_timeout，无需额外依赖
-            data = await asyncio.wait_for(gen_iter.__anext__(), timeout=heartbeat_interval)
-            yield data
-        except asyncio.TimeoutError:
-            # 超时 → 发送心跳注释
-            yield ": heartbeat\n\n"
-        except StopAsyncIteration:
-            done = True
+    try:
+        while True:
+            if next_task is None:
+                next_task = asyncio.ensure_future(gen_iter.__anext__())
+
+            # 等待数据就绪或心跳超时（不取消 next_task）
+            done_set, _ = await asyncio.wait(
+                {next_task}, timeout=heartbeat_interval
+            )
+
+            if done_set:
+                # 数据就绪
+                task = done_set.pop()
+                next_task = None  # 重置，下次循环创建新任务
+                try:
+                    data = task.result()
+                    yield data
+                except StopAsyncIteration:
+                    return
+            else:
+                # 超时 → 发送心跳注释，next_task 继续运行
+                yield ": heartbeat\n\n"
+    finally:
+        # 清理：如果还有未完成的任务，取消它
+        if next_task is not None and not next_task.done():
+            next_task.cancel()
+            try:
+                await next_task
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass

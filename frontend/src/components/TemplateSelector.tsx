@@ -95,6 +95,8 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showResumePrompt, setShowResumePrompt] = useState(false);
+  const resumeCheckedRef = useRef(false);
 
   // Upload state
   const [uploadType, setUploadType] = useState<TemplateType>('audit_plan');
@@ -117,13 +119,26 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
     setError(null);
     try {
       const response = await templateApi.listTemplates();
-      setTemplates(response.data.templates ?? []);
+      const list = response.data.templates ?? [];
+      setTemplates(list);
+      // If templates exist and we haven't checked yet, show resume prompt
+      if (list.length > 0 && !resumeCheckedRef.current) {
+        resumeCheckedRef.current = true;
+        // Auto-select the most recently uploaded template
+        const sorted = [...list].sort((a, b) =>
+          new Date(b.uploaded_at).getTime() - new Date(a.uploaded_at).getTime()
+        );
+        if (!selectedTemplateId) {
+          onTemplateSelect(sorted[0].id);
+        }
+        setShowResumePrompt(true);
+      }
     } catch (err: any) {
       setError(err.message || '加载模板列表失败');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedTemplateId, onTemplateSelect]);
 
   /** Fetch knowledge libraries */
   const fetchLibraries = useCallback(async () => {
@@ -364,6 +379,67 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
         </div>
       )}
 
+      {/* Resume prompt — shown when templates already exist */}
+      {showResumePrompt && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 100,
+            backgroundColor: 'rgba(0,0,0,0.4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 'var(--gt-space-4)',
+          }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="确认是否更新模板"
+        >
+          <div
+            className="gt-card"
+            style={{ maxWidth: 460, width: '100%' }}
+          >
+            <div className="gt-card-header" style={{ color: 'var(--gt-primary)' }}>
+              检测到已上传模板
+            </div>
+            <div className="gt-card-content" style={{ fontSize: 'var(--gt-font-sm)', lineHeight: 1.7 }}>
+              <p style={{ marginBottom: 'var(--gt-space-2)' }}>
+                已有 {templates.length} 个模板，当前选中：
+              </p>
+              <p style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 'var(--gt-space-3)' }}>
+                {templates.find((t) => t.id === selectedTemplateId)?.name || '未选择'}
+              </p>
+              <p>是否需要更新上传新模板？选择「使用已有模板」将直接使用当前模板继续。</p>
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: 'var(--gt-space-2)',
+                padding: '0 var(--gt-space-4) var(--gt-space-4)',
+              }}
+            >
+              <button
+                className="gt-button gt-button--primary"
+                onClick={() => setShowResumePrompt(false)}
+              >
+                使用已有模板
+              </button>
+              <button
+                className="gt-button gt-button--secondary"
+                onClick={() => {
+                  setShowResumePrompt(false);
+                  // Stay on page, user can upload new template
+                }}
+              >
+                重新上传
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ─── Section 1: Template Upload ─── */}
       <div className="gt-card">
         <div className="gt-card-header" style={{ color: 'var(--gt-primary)' }}>
@@ -566,7 +642,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setKnowledgeSectionOpen((v) => !v); } }}
         >
           <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, transition: 'transform 0.2s', transform: knowledgeSectionOpen ? 'rotate(90deg)' : 'rotate(0deg)', display: 'inline-block' }}>▶</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, fontSize: 14, fontWeight: 600, color: '#6b7280', border: '1px solid #d1d5db', borderRadius: 3, lineHeight: 1 }}>{knowledgeSectionOpen ? '−' : '+'}</span>
             关联知识库
             {knowledgeLibraryIds.length > 0 && (
               <span style={{ fontSize: 'var(--gt-font-xs)', fontWeight: 400, color: 'var(--gt-text-secondary)' }}>
@@ -634,9 +710,9 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                         tabIndex={0}
                         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleLibraryExpand(lib.id); } }}
                       >
-                        {/* Expand/collapse arrow */}
-                        <span style={{ fontSize: 12, color: 'var(--gt-text-secondary)', transition: 'transform 0.2s', transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', display: 'inline-block', width: 16, textAlign: 'center' }}>
-                          ▶
+                        {/* Expand/collapse toggle */}
+                        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, fontSize: 14, fontWeight: 600, color: '#6b7280', border: '1px solid #d1d5db', borderRadius: 3, lineHeight: 1, flexShrink: 0 }}>
+                          {isExpanded ? '−' : '+'}
                         </span>
                         {/* Library-level checkbox */}
                         <input

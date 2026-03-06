@@ -2,12 +2,13 @@ import random
 from typing import Dict, List, Tuple
 
 
-def get_random_indexes(max_index: int) -> Tuple[int, int]:
+def get_random_indexes(max_index: int, seed: int = None) -> Tuple[int, int]:
     """
     从0到max_index范围内随机选择两个不同的索引
     
     Args:
         max_index: 索引的最大值（不包含）
+        seed: 随机种子，传入则结果可复现
         
     Returns:
         Tuple[int, int]: 两个不同的随机索引
@@ -15,13 +16,15 @@ def get_random_indexes(max_index: int) -> Tuple[int, int]:
     if max_index <= 1:
         return (0, 0)
     
-    i, j = random.sample(range(max_index), 2)
+    rng = random.Random(seed)
+    i, j = rng.sample(range(max_index), 2)
     return (i, j)
 
 
 def calculate_nodes_distribution_by_weights(
     weights: List[float],
     total_leaf_nodes: int,
+    seed: int = None,
 ) -> dict:
     """
     根据权重列表按比例分配叶子节点和二级节点。
@@ -42,6 +45,8 @@ def calculate_nodes_distribution_by_weights(
     n = len(weights)
     if n == 0:
         return {'level2_nodes': [], 'leaf_nodes': [], 'leaf_per_level2': []}
+
+    rng = random.Random(seed)
 
     # 保证每个节点至少有最小权重
     safe_weights = [max(w, 0.1) for w in weights]
@@ -85,10 +90,10 @@ def calculate_nodes_distribution_by_weights(
         if lf <= 2:
             level2_nodes.append(1)
         elif lf <= 9:
-            level2_nodes.append(random.choice([1, 2]))
+            level2_nodes.append(rng.choice([1, 2]))
         else:
             # 随机选择每个二级下平均 2~9 个叶子
-            avg_per_l2 = random.choice([2, 3, 4, 5, 6, 7, 8, 9])
+            avg_per_l2 = rng.choice([2, 3, 4, 5, 6, 7, 8, 9])
             l2 = max(round(lf / avg_per_l2), 2)
             level2_nodes.append(l2)
 
@@ -104,11 +109,13 @@ def calculate_nodes_distribution_by_weights(
             base = lf_count // l2_count
             extra = lf_count % l2_count
             dist = [(base + 1) if j < extra else base for j in range(l2_count)]
-            # 随机交换一些叶子，让分布不均匀（但保持总数不变）
+            # 确保每个二级节点至少有 1 个叶子
+            dist = [max(d, 1) for d in dist]
+            # 随机交换一些叶子，让分布不均匀（但保持总数不变且每个 >= 1）
             for _ in range(l2_count):
-                a, b = random.sample(range(l2_count), 2)
+                a, b = rng.sample(range(l2_count), 2)
                 if dist[a] > 1:  # 确保不会减到0
-                    transfer = random.randint(0, min(dist[a] - 1, 2))
+                    transfer = rng.randint(0, min(dist[a] - 1, 2))
                     dist[a] -= transfer
                     dist[b] += transfer
             leaf_per_level2.append(dist)

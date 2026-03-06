@@ -44,6 +44,9 @@ PRESET_PROVIDERS = {
 class ConfigManager:
     """用户配置管理器 - 支持多供应商"""
 
+    # 使用统计写入缓冲：累积 N 次调用后才写磁盘
+    _USAGE_FLUSH_INTERVAL = 10
+
     def __init__(self):
         home = os.path.expanduser("~")
         new_dir = os.path.join(home, ".gt_audit_helper")
@@ -59,6 +62,9 @@ class ConfigManager:
         self.config_file = os.path.join(self.config_dir, "user_config.json")
         self.usage_file = os.path.join(self.config_dir, "usage_stats.json")
         os.makedirs(self.config_dir, exist_ok=True)
+        # 使用统计内存缓冲
+        self._usage_buffer: Optional[dict] = None
+        self._usage_dirty_count = 0
 
     # ─── 兼容旧版：迁移单配置到多供应商格式 ───
 
@@ -292,8 +298,11 @@ class ConfigManager:
             logger.warning("保存使用统计失败: %s", e)
 
     def record_usage(self, provider_id: str, model_name: str, input_tokens: int = 0, output_tokens: int = 0) -> None:
-        """记录一次 API 调用"""
-        usage = self._load_usage()
+        """记录一次 API 调用（内存缓冲，累积后批量写磁盘）"""
+        if self._usage_buffer is None:
+            self._usage_buffer = self._load_usage()
+
+        usage = self._usage_buffer
         today = datetime.now().strftime('%Y-%m-%d')
 
         # 按供应商统计
@@ -324,11 +333,21 @@ class ConfigManager:
         d['input_tokens'] += input_tokens
         d['output_tokens'] += output_tokens
 
-        self._save_usage(usage)
+        self._usage_dirty_count += 1
+        if self._usage_dirty_count >= self._USAGE_FLUSH_INTERVAL:
+            self.flush_usage()
+
+    def flush_usage(self) -> None:
+        """将内存中的使用统计写入磁盘"""
+        if self._usage_buffer is not None and self._usage_dirty_count > 0:
+            self._save_usage(self._usage_buffer)
+            self._usage_dirty_count = 0
 
     def get_usage_stats(self) -> dict:
         """获取使用统计摘要"""
-        usage = self._load_usage()
+        # 先刷新缓冲确保数据完整
+        self.flush_usage()
+        usage = self._usage_buffer if self._usage_buffer is not None else self._load_usage()
         data = self._load_data()
         providers = data.get('providers', {})
         result = []

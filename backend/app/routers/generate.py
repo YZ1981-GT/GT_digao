@@ -36,6 +36,7 @@ _generated_documents: dict = {}  # document_id -> GeneratedDocument
 
 class ExtractOutlineRequest(BaseModel):
     template_id: str
+    force_llm: bool = False
 
 
 class ConfirmOutlineRequest(BaseModel):
@@ -47,7 +48,9 @@ class ConfirmOutlineRequest(BaseModel):
 async def extract_outline(request: ExtractOutlineRequest):
     """从模板提取章节大纲"""
     try:
-        outline = await document_generator.extract_template_outline(request.template_id)
+        outline = await document_generator.extract_template_outline(
+            request.template_id, force_llm=request.force_llm
+        )
         return {"success": True, "outline": outline}
     except Exception as e:
         logger.error("大纲提取失败: %s", e, exc_info=True)
@@ -102,13 +105,37 @@ async def generate_section(request: SectionGenerateRequest):
     try:
         async def generate():
             try:
+                # 加载知识库（如果有）
+                knowledge_context = ""
+                if request.knowledge_library_ids:
+                    try:
+                        from ..services.knowledge_retriever import knowledge_retriever
+                        from ..services.knowledge_service import knowledge_service
+
+                        if not knowledge_retriever.is_loaded:
+                            for _evt in knowledge_retriever.preload(
+                                knowledge_service,
+                                library_ids=request.knowledge_library_ids,
+                            ):
+                                pass  # consume preload events
+
+                        section_title = request.section.get("title", "")
+                        section_desc = request.section.get("description", "")
+                        knowledge_context = knowledge_retriever.get_formatted_for_chapter(
+                            chapter_title=section_title,
+                            chapter_description=section_desc,
+                            max_tokens=8000,
+                        )
+                    except Exception as e:
+                        logger.warning("单章节知识库加载失败: %s", e)
+
                 full_content = ""
                 async for chunk in document_generator._generate_section_content(
                     section=request.section,
                     parent_sections=request.parent_sections,
                     sibling_sections=request.sibling_sections,
                     project_info=request.project_info,
-                    knowledge_context="",
+                    knowledge_context=knowledge_context,
                     target_word_count=request.section.get("target_word_count", 1500),
                 ):
                     full_content += chunk

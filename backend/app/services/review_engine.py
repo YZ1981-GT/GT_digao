@@ -27,7 +27,8 @@ from ..models.audit_schemas import (
     WorkpaperType,
 )
 from .knowledge_service import knowledge_service
-from .openai_service import OpenAIService
+from .knowledge_retriever import knowledge_retriever
+from .openai_service import OpenAIService, _get_context_limit, estimate_token_count, truncate_to_token_limit, OUTPUT_RESERVE_RATIO
 from .prompt_library import PromptLibrary
 
 logger = logging.getLogger(__name__)
@@ -235,12 +236,14 @@ class ReviewEngine:
         # Collect streamed response
         full_response = ""
         try:
+            logger.info(f"[复核] 开始调用 LLM，维度: {dimension}, 消息数: {len(messages)}")
             async for chunk in self.openai_service.stream_chat_completion(
                 messages, temperature=0.3
             ):
                 full_response += chunk
+            logger.info(f"[复核] LLM 返回完成，维度: {dimension}, 响应长度: {len(full_response)}")
         except Exception as e:
-            logger.error("LLM call failed for dimension %s: %s", dimension, e)
+            logger.error("LLM call failed for dimension %s: %s", dimension, e, exc_info=True)
             return []
 
         # Parse findings from LLM response
@@ -279,7 +282,13 @@ class ReviewEngine:
             "",
             "请对以下底稿内容进行专业复核，输出发现的问题列表。",
             "每个问题请按以下 JSON 数组格式输出（不要输出其他内容）：",
-            '[{"location":"问题定位","description":"问题描述","reference":"参考依据","suggestion":"修改建议"}]',
+            '[{"location":"问题定位","description":"问题描述","reference":"参考依据","suggestion":"修改建议","risk_level":"high/medium/low"}]',
+            "",
+            "risk_level 判断标准：",
+            "- high: 重大错报、违规、舞弊、严重偏差等可能导致审计意见变更的问题",
+            "- medium: 数据不一致、信息缺失、程序遗漏等需要修正的问题",
+            "- low: 格式优化、表述改进等建议性问题",
+            "",
             "如果没有发现问题，请输出空数组 []。",
         ]
 
@@ -299,20 +308,29 @@ class ReviewEngine:
 
         system_content = "\n".join(system_parts)
 
-        # Build user message with workpaper content
+        # Build user message with workpaper content (dynamic truncation based on model context)
+        context_limit = _get_context_limit(self.openai_service.model_name)
+        max_input_tokens = int(context_limit * (1 - OUTPUT_RESERVE_RATIO))
+        system_tokens = estimate_token_count(system_content)
+        overhead = 500  # supplementary + metadata overhead
+        max_content_tokens = max(max_input_tokens - system_tokens - overhead, 2000)
+        truncated_content = truncate_to_token_limit(workpaper.content_text, max_content_tokens)
+
         user_parts: List[str] = [
             f"底稿文件名：{workpaper.filename}",
             f"底稿编号：{workpaper.classification.workpaper_id or '未识别'}",
             "",
             "========== 底稿内容 ==========",
-            workpaper.content_text[:30000],  # Truncate to avoid exceeding context
+            truncated_content,
             "========== 底稿内容结束 ==========",
         ]
 
         if supplementary_context:
+            supp_max_tokens = max(max_content_tokens // 3, 2000)
+            truncated_supp = truncate_to_token_limit(supplementary_context, supp_max_tokens)
             user_parts.append("")
             user_parts.append("========== 补充材料 ==========")
-            user_parts.append(supplementary_context[:10000])
+            user_parts.append(truncated_supp)
             user_parts.append("========== 补充材料结束 ==========")
 
         return [
@@ -498,12 +516,28 @@ class ReviewEngine:
     # ------------------------------------------------------------------
 
     def _get_knowledge_context(self, workpaper: WorkpaperParseResult, dimension: str) -> str:
-        """Retrieve relevant knowledge from KnowledgeService for a dimension."""
+        """Retrieve relevant knowledge from KnowledgeService for a dimension.
+
+        优先使用 knowledge_retriever 的全量缓存进行检索，
+        未预加载时回退到 knowledge_service.search_knowledge。
+        """
         dim_label = self.REVIEW_DIMENSIONS.get(dimension, dimension)
         business_cycle = workpaper.classification.business_cycle or ""
 
         query = f"{dim_label} {business_cycle}"
 
+        # 如果 knowledge_retriever 已预加载，优先使用检索
+        if knowledge_retriever.is_loaded:
+            result = knowledge_retriever.get_formatted_for_chapter(
+                chapter_title=query,
+                chapter_description="",
+                max_tokens=10000,
+            )
+            if result:
+                logger.info(f"[复核知识库] 维度 {dim_label} 从缓存检索到 {len(result)} 字符")
+                return result
+
+        # 回退到原有的 search_knowledge
         # Search across relevant knowledge libraries
         library_ids = []
         if dimension == "format":
@@ -569,7 +603,12 @@ class ReviewEngine:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            risk_level = self.classify_risk_level(item)
+            # 优先使用 LLM 输出的 risk_level，回退到关键词分类
+            llm_risk = (item.get("risk_level") or "").lower().strip()
+            if llm_risk in ("high", "medium", "low"):
+                risk_level = RiskLevel(llm_risk)
+            else:
+                risk_level = self.classify_risk_level(item)
             findings.append(
                 ReviewFinding(
                     id=str(uuid.uuid4())[:8],

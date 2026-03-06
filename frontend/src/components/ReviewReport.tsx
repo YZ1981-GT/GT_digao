@@ -215,8 +215,8 @@ const ReviewReportComponent: React.FC<ReviewReportProps> = ({
           }}
         >
           {/* Expand/collapse indicator */}
-          <span aria-hidden="true" style={{ flexShrink: 0, fontSize: 12, transition: 'transform 0.2s', transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}>
-            ▶
+          <span aria-hidden="true" style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, fontSize: 14, fontWeight: 600, color: '#6b7280', border: '1px solid #d1d5db', borderRadius: 3, lineHeight: 1 }}>
+            {isExpanded ? '−' : '+'}
           </span>
 
           {/* Risk badge with text label */}

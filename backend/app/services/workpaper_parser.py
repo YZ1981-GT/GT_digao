@@ -3,6 +3,8 @@
 复用现有 FileService 的文件提取能力（extract_text_from_pdf, extract_text_from_docx），
 新增 Excel 解析（openpyxl/xlrd）和底稿编号识别能力。
 """
+import asyncio
+import functools
 import logging
 import os
 import re
@@ -151,9 +153,9 @@ class WorkpaperParser:
             ext = os.path.splitext(file_path)[1].lower()
 
         if ext == '.xlsx':
-            return self._parse_xlsx(file_path)
+            return await asyncio.to_thread(self._parse_xlsx, file_path)
         elif ext == '.xls':
-            return self._parse_xls(file_path)
+            return await asyncio.to_thread(self._parse_xls, file_path)
         else:
             raise ValueError(f"不支持的 Excel 格式：{ext}")
 
@@ -164,7 +166,11 @@ class WorkpaperParser:
         if ext == '.doc':
             return await self._parse_doc_legacy(file_path)
 
-        # .docx 使用 python-docx
+        # .docx 使用 python-docx — 在线程池中执行以避免阻塞事件循环
+        return await asyncio.to_thread(self._parse_docx_sync, file_path)
+
+    def _parse_docx_sync(self, file_path: str) -> WordParseResult:
+        """同步解析 .docx 文件（在线程池中调用）。"""
         if not HAS_DOCX:
             raise RuntimeError("python-docx 未安装，无法解析 docx 文件")
 
@@ -185,6 +191,12 @@ class WorkpaperParser:
             if style_name.startswith("Heading"):
                 try:
                     level = int(style_name.replace("Heading", "").strip())
+                except ValueError:
+                    level = None
+            elif style_name.startswith("标题"):
+                # 中文样式名支持："标题 1" → level 1
+                try:
+                    level = int(style_name.replace("标题", "").strip())
                 except ValueError:
                     level = None
 
@@ -236,8 +248,13 @@ class WorkpaperParser:
 
     async def _parse_doc_legacy(self, file_path: str) -> WordParseResult:
         """解析旧版 .doc 文件。Windows 上使用 pywin32 COM 接口。"""
+        return await asyncio.to_thread(self._parse_doc_legacy_sync, file_path)
+
+    def _parse_doc_legacy_sync(self, file_path: str) -> WordParseResult:
+        """同步解析 .doc 文件（在线程池中调用）。"""
         text = ""
         tables: List[List[List[str]]] = []
+        headings: List[Dict[str, Any]] = []
         try:
             import win32com.client
             import pythoncom
@@ -249,6 +266,17 @@ class WorkpaperParser:
                 abs_path = os.path.abspath(file_path)
                 doc = word_app.Documents.Open(abs_path, ReadOnly=True)
                 text = doc.Content.Text or ""
+                # 提取标题（通过 OutlineLevel 判断）
+                for para in doc.Paragraphs:
+                    try:
+                        outline_level = para.OutlineLevel
+                        # OutlineLevel: 1-9 为标题级别，10 (wdOutlineLevelBodyText) 为正文
+                        if 1 <= outline_level <= 9:
+                            para_text = para.Range.Text.strip().rstrip('\r\x07')
+                            if para_text:
+                                headings.append({"text": para_text, "level": outline_level})
+                    except Exception:
+                        pass
                 # 提取表格
                 for table in doc.Tables:
                     table_data: List[List[str]] = []
@@ -278,7 +306,7 @@ class WorkpaperParser:
         return WordParseResult(
             paragraphs=paragraphs,
             tables=tables,
-            headings=[],
+            headings=headings,
             comments=[],
         )
 
@@ -332,16 +360,28 @@ class WorkpaperParser:
         )
 
     async def batch_parse(self, files: List[Tuple[str, str]]) -> List[WorkpaperParseResult]:
-        """批量解析多个底稿文件，按顺序返回各文件的独立解析结果。
+        """批量解析多个底稿文件，并发执行以提升性能。
 
         Args:
             files: [(file_path, filename), ...]
         """
-        results: List[WorkpaperParseResult] = []
-        for file_path, filename in files:
-            result = await self.parse_file(file_path, filename)
-            results.append(result)
-        return results
+        tasks = [self.parse_file(fp, fn) for fp, fn in files]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 将异常转为错误结果
+        final: List[WorkpaperParseResult] = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                fp, fn = files[i]
+                logger.error("批量解析文件 %s 失败: %s", fn, result)
+                final.append(self._error_result(
+                    str(uuid.uuid4()), fn,
+                    os.path.splitext(fn)[1].lower(),
+                    0, datetime.now(timezone.utc).isoformat(),
+                    str(result),
+                ))
+            else:
+                final.append(result)
+        return final
 
 
     # ─── Private helpers ───

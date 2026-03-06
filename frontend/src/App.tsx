@@ -25,13 +25,22 @@ function App() {
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null); // null = 检测中
   const [workMode, setWorkMode] = useState<WorkMode>('select');
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const failCountRef = React.useRef(0);
 
   const checkBackend = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/health`, { method: 'GET', signal: AbortSignal.timeout(3000) });
-      setBackendOnline(res.ok);
+      const res = await fetch(`${API_BASE_URL}/health`, { method: 'GET', signal: AbortSignal.timeout(8000) });
+      if (res.ok) {
+        failCountRef.current = 0;
+        setBackendOnline(true);
+      } else {
+        failCountRef.current += 1;
+        if (failCountRef.current >= 2) setBackendOnline(false);
+      }
     } catch {
-      setBackendOnline(false);
+      failCountRef.current += 1;
+      // 连续 2 次失败才判定离线，避免长请求期间误报
+      if (failCountRef.current >= 2) setBackendOnline(false);
     }
   }, []);
 

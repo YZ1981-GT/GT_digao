@@ -141,14 +141,14 @@ async def search_knowledge(req: SearchRequest):
 
 
 @router.get("/preview/{library_id}/{doc_id}")
-async def preview_document(library_id: str, doc_id: str, max_chars: int = 5000):
+async def preview_document(library_id: str, doc_id: str, max_chars: int = 0):
     """预览文档内容"""
     try:
         content = knowledge_service.get_document_content(library_id, doc_id)
         if content is None:
             raise HTTPException(status_code=404, detail="文档不存在")
-        # 截断过长内容
-        truncated = len(content) > max_chars
+        # 截断过长内容（max_chars=0 表示不截断）
+        truncated = max_chars > 0 and len(content) > max_chars
         preview = content[:max_chars] if truncated else content
         return {
             "success": True,

@@ -73,6 +73,22 @@ const TemplateOutlineEditor: React.FC<TemplateOutlineEditorProps> = ({
     }
   }, [templateId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /* ── Re-extract outline (force LLM) ── */
+  const handleReExtract = useCallback(async (forceLlm: boolean) => {
+    if (!templateId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await generateApi.extractOutline({ template_id: templateId, force_llm: forceLlm });
+      const data: TemplateOutlineItem[] = res.data?.outline ?? res.data ?? [];
+      onOutlineChange(data);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail ?? err?.response?.data?.message ?? err?.message ?? '大纲提取失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [templateId, onOutlineChange]);
+
   /* ── Expand all items when outline changes ── */
   useEffect(() => {
     if (outline.length > 0) {
@@ -358,8 +374,9 @@ const TemplateOutlineEditor: React.FC<TemplateOutlineEditorProps> = ({
     return (
       <div className="gt-card">
         <div className="gt-card-header">大纲识别中</div>
-        <div className="gt-card-content gt-loading" style={{ textAlign: 'center', padding: 'var(--gt-space-8)' }}>
-          <p style={{ color: 'var(--gt-text-secondary)' }}>正在从模板中提取章节大纲，请稍候…</p>
+        <div className="gt-card-content" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--gt-space-2)', padding: 'var(--gt-space-8) var(--gt-space-4)' }}>
+          <p style={{ color: 'var(--gt-text-secondary)', margin: 0 }}>正在从模板中提取章节大纲，请稍候…</p>
+          <div style={{ width: 16, height: 16, border: '2px solid #e9ecef', borderTopColor: 'var(--gt-primary)', borderRadius: '50%', animation: 'gt-spin 0.8s linear infinite', flexShrink: 0 }} />
         </div>
       </div>
     );
@@ -369,14 +386,36 @@ const TemplateOutlineEditor: React.FC<TemplateOutlineEditorProps> = ({
     <div className="gt-card">
       <div className="gt-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span>模板章节大纲</span>
-        <button
-          className="gt-button gt-button--secondary"
-          onClick={addRoot}
-          aria-label="添加根章节"
-          style={{ fontSize: 'var(--gt-font-xs)', padding: 'var(--gt-space-1) var(--gt-space-3)' }}
-        >
-          ＋ 添加章节
-        </button>
+        <span style={{ display: 'inline-flex', gap: 'var(--gt-space-2)' }}>
+          <button
+            className="gt-button gt-button--secondary"
+            onClick={() => handleReExtract(false)}
+            disabled={loading}
+            aria-label="重新识别大纲"
+            title="使用模板标题样式重新提取大纲"
+            style={{ fontSize: 'var(--gt-font-xs)', padding: 'var(--gt-space-1) var(--gt-space-3)' }}
+          >
+            🔄 重新识别
+          </button>
+          <button
+            className="gt-button gt-button--secondary"
+            onClick={() => handleReExtract(true)}
+            disabled={loading}
+            aria-label="AI 重新识别大纲"
+            title="调用 AI 模型重新分析模板结构"
+            style={{ fontSize: 'var(--gt-font-xs)', padding: 'var(--gt-space-1) var(--gt-space-3)' }}
+          >
+            🤖 AI 重新识别
+          </button>
+          <button
+            className="gt-button gt-button--secondary"
+            onClick={addRoot}
+            aria-label="添加根章节"
+            style={{ fontSize: 'var(--gt-font-xs)', padding: 'var(--gt-space-1) var(--gt-space-3)' }}
+          >
+            ＋ 添加章节
+          </button>
+        </span>
       </div>
 
       <div className="gt-card-content">

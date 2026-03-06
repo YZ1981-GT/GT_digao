@@ -14,6 +14,7 @@ from ..utils.config_manager import config_manager
 from ..utils.prompt_manager import chapter_content_system_prompt, chapter_revision_system_prompt
 from ..config import settings as app_settings
 from .knowledge_service import knowledge_service
+from .knowledge_retriever import knowledge_retriever, _estimate_tokens as _kb_estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -104,16 +105,7 @@ def truncate_to_token_limit(text: str, max_tokens: int) -> str:
     return text[:cut_len] + "\n\n...(内容因token限制已截断)"
 
 
-# ─── 模块级知识库预加载缓存 ───
-# 在生成开始前一次性读取并截断知识库内容，后续每个章节直接复用
-_knowledge_cache: Dict[str, Any] = {
-    'content': '',           # 已截断的知识库文本
-    'model_name': '',        # 缓存对应的模型名
-    'library_docs': None,    # 缓存对应的文档选择
-    'max_kb_tokens': 0,      # 知识库可用的 token 预算
-    'original_chars': 0,     # 原始字符数
-    'truncated_chars': 0,    # 截断后字符数
-}
+# ─── 知识库预加载已统一到 knowledge_retriever 单例 ───
 
 
 class OpenAIService:
@@ -144,155 +136,74 @@ class OpenAIService:
         )
 
     def preload_knowledge_stream(self, library_ids: List[str] = None, library_docs: Dict[str, List[str]] = None):
-        """预加载知识库内容，逐文档读取并 yield 进度事件，最终截断并缓存。
-        
+        """预加载知识库内容，全量缓存不截断，按需检索相关片段。
+
         Yields:
-            dict 进度事件，格式如 {'status': 'reading', 'loaded': 3, 'total': 8, 'filename': 'xxx.pdf', 'lib_name': '审计案例库'}
+            dict 进度事件
         """
-        global _knowledge_cache
-
-        progress_events = []
-
-        def on_progress(loaded, total, filename, lib_name):
-            progress_events.append({
-                'status': 'reading',
-                'loaded': loaded,
-                'total': total,
-                'filename': filename,
-                'lib_name': lib_name,
-            })
-
-        # 1. 读取知识库原始内容（带进度回调）
-        yield {'status': 'start', 'message': '开始读取知识库...'}
-
-        if library_docs:
-            kb_raw = knowledge_service.get_selected_knowledge(library_docs, progress_callback=on_progress)
-        else:
-            kb_raw = knowledge_service.get_all_knowledge_full(library_ids, progress_callback=on_progress)
-
-        # yield 所有收集到的进度事件
-        for evt in progress_events:
+        # 1. 使用 knowledge_retriever 预加载（全量缓存 + 建立索引）
+        for evt in knowledge_retriever.preload(
+            knowledge_service,
+            library_ids=library_ids,
+            library_docs=library_docs,
+        ):
             yield evt
 
-        original_chars = len(kb_raw)
-        original_tokens = estimate_token_count(kb_raw)
-
-        yield {
-            'status': 'read_done',
-            'message': f'知识库读取完成：{original_chars} 字符',
-            'original_chars': original_chars,
-            'original_tokens': original_tokens,
-        }
-
-        # 2. 计算当前模型的知识库 token 预算
+        # 2. 根据当前模型配置检索策略
         context_limit = _get_context_limit(self.model_name)
-        logger.info(f"[知识库预加载] 模型名: '{self.model_name}', 上下文限制: {context_limit} tokens")
-        max_input_tokens = int(context_limit * (1 - OUTPUT_RESERVE_RATIO))
-        fixed_overhead_tokens = 3000
-        max_kb_tokens = max(max_input_tokens - fixed_overhead_tokens, 2000)
-
-        # 3. 截断知识库内容
-        if original_tokens > max_kb_tokens:
-            yield {'status': 'truncating', 'message': f'正在适配模型上下文 ({self.model_name}: {context_limit} tokens)...'}
-            kb_truncated = truncate_to_token_limit(kb_raw, max_kb_tokens)
-        else:
-            kb_truncated = kb_raw
-
-        # 4. 构建带标记的知识库文本
-        if kb_truncated.strip():
-            formatted = f"""
-========== 知识库参考资料（必须严格遵守） ==========
-以下是致同会计师事务所的真实资料，生成内容时必须优先使用这些信息。
-严禁编造任何不存在于以下资料中的案例、人员、制度、流程等具体信息。
-
-{kb_truncated}
-
-========== 知识库参考资料结束 ==========
-
-"""
-        else:
-            formatted = ""
-
-        # 5. 写入缓存
-        _knowledge_cache = {
-            'content': formatted,
-            'model_name': self.model_name,
-            'library_docs': library_docs,
-            'max_kb_tokens': max_kb_tokens,
-            'original_chars': original_chars,
-            'truncated_chars': len(kb_truncated),
-        }
-
-        logger.info(
-            f"[知识库预加载] 原始 {original_chars} 字符 (~{original_tokens} tokens) "
-            f"→ {len(kb_truncated)} 字符，模型 {self.model_name} 上下文 {context_limit} tokens"
+        knowledge_retriever.configure_for_model(
+            model_name=self.model_name,
+            context_limit=context_limit,
+            output_reserve_ratio=OUTPUT_RESERVE_RATIO,
         )
 
+        stats = knowledge_retriever.stats
         yield {
             'status': 'done',
-            'message': f'知识库预加载完成',
-            'original_chars': original_chars,
-            'original_tokens': original_tokens,
-            'truncated_chars': len(kb_truncated),
-            'max_kb_tokens': max_kb_tokens,
+            'message': f'知识库预加载完成（{"智能检索" if stats["use_retrieval"] else "全量注入"}模式）',
+            'original_chars': stats['total_chars'],
+            'original_tokens': stats['total_tokens'],
+            'truncated_chars': stats['total_chars'],
+            'max_kb_tokens': stats['max_kb_tokens'],
             'model_name': self.model_name,
             'context_limit': context_limit,
+            'use_retrieval': stats['use_retrieval'],
         }
 
     @staticmethod
-    def get_knowledge_cache() -> str:
-        """获取预加载的知识库缓存内容。如果没有缓存返回空字符串。"""
-        return _knowledge_cache.get('content', '')
+    def get_knowledge_for_chapter(chapter_title: str, chapter_description: str = '') -> str:
+        """根据章节信息获取知识库内容（委托给 knowledge_retriever）。"""
+        return knowledge_retriever.get_knowledge_for_chapter(chapter_title, chapter_description)
 
     @staticmethod
     def clear_knowledge_cache():
         """清除知识库缓存"""
-        global _knowledge_cache
-        _knowledge_cache = {
-            'content': '', 'model_name': '', 'library_docs': None,
-            'max_kb_tokens': 0, 'original_chars': 0, 'truncated_chars': 0,
-        }
+        knowledge_retriever.clear()
         logger.info("[知识库预加载] 缓存已清除")
     
     async def get_available_models(self) -> List[str]:
         """获取可用的模型列表。
-        
-        优先从 API 实时获取，自动包含厂商新发布的模型；
-        API 不支持列出模型时，退回到精选推荐列表。
+
+        返回精选推荐列表，只包含适合文档生成的对话模型。
         """
-        # 精选推荐列表（仅在 API 不支持 models.list 时使用）
-        fallback_recommended = [
+        return [
+            # 通义千问
+            'qwen3-max', 'qwen-max', 'qwen-plus',
+            'qwen-max-latest', 'qwen-plus-latest',
+            'qwen-turbo', 'qwen3-235b-a22b', 'qwen-long',
+            # DeepSeek
+            'deepseek-chat', 'deepseek-reasoner',
             # MiniMax
             'MiniMax-M2.5', 'MiniMax-M2.5-highspeed', 'MiniMax-M2.1',
             # Kimi / Moonshot
             'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2-thinking-turbo', 'moonshot-v1-128k',
-            # 通义千问
-            'qwen3-max', 'qwen-max', 'qwen-plus',
-            'qwen-max-latest', 'qwen3-max-preview', 'qwen-plus-latest',
-            'qwen-turbo', 'qwen3-235b-a22b', 'qwen-long',
-            # DeepSeek
-            'deepseek-chat', 'deepseek-reasoner',
             # 智谱 GLM
             'glm-5', 'glm-4.6', 'glm-4-plus',
+            # 硅基流动
+            'Pro/deepseek-ai/DeepSeek-V3', 'Pro/Qwen/Qwen2.5-72B-Instruct',
             # Ollama 本地
             'deepseek-r1:32b', 'qwen2.5:32b', 'llama3.1:70b',
         ]
-
-        try:
-            models = await self.client.models.list()
-            api_models = sorted(set(m.id for m in models.data))
-            logger.info(f"[模型列表] API 实时返回 {len(api_models)} 个模型")
-
-            if api_models:
-                return api_models
-            
-            # API 返回空列表，退回推荐
-            logger.info("[模型列表] API 返回空列表，使用推荐列表")
-            return fallback_recommended
-
-        except Exception as e:
-            logger.info(f"[模型列表] 无法从 API 获取模型列表: {str(e)}，使用推荐列表")
-            return fallback_recommended
     
     async def stream_chat_completion(
         self, 
@@ -392,6 +303,117 @@ class OpenAIService:
         ):
             full_content += chunk
         return full_content
+
+    async def _digest_knowledge_batches(
+        self,
+        chapter_title: str,
+        chapter_description: str,
+        max_tokens_per_call: int,
+    ) -> str:
+        """分批让 AI 消化知识库内容，提取与章节相关的要点。
+
+        当知识库相关内容超出单次 prompt 的 token 限制时，
+        使用 knowledge_retriever 的溢出分组功能将内容分成多组，
+        每组让 AI 阅读并提取要点，最终合并为一份完整的消化摘要。
+
+        Args:
+            chapter_title: 章节标题
+            chapter_description: 章节描述
+            max_tokens_per_call: 每次 LLM 调用的知识库 token 预算
+
+        Returns:
+            消化后的知识库要点摘要文本
+        """
+        groups = knowledge_retriever.get_overflow_batches_for_chapter(
+            chapter_title=chapter_title,
+            chapter_description=chapter_description,
+            max_tokens_per_call=max_tokens_per_call,
+        )
+
+        if not groups:
+            return ""
+
+        if len(groups) == 1:
+            # 只有一组，直接拼接格式化文本返回，不需要消化
+            parts = [b['formatted'] for b in groups[0]]
+            return (
+                "========== 知识库参考资料（必须严格遵守） ==========\n"
+                "以下是致同会计师事务所的真实资料，生成内容时必须优先使用这些信息。\n"
+                "严禁编造任何不存在于以下资料中的案例、人员、制度、流程等具体信息。\n\n"
+                + "\n\n".join(parts) +
+                "\n\n========== 知识库参考资料结束 ==========\n\n"
+            )
+
+        logger.info(
+            f"[分批消化] 章节 '{chapter_title}' 知识库内容分为 {len(groups)} 组消化"
+        )
+
+        digest_system = (
+            "你是致同会计师事务所的资深审计专家。你的任务是阅读知识库资料，"
+            "提取与指定章节相关的所有要点信息。\n"
+            "要求：\n"
+            "1. 保留所有与章节相关的具体数据、案例、制度、流程、人员等事实性信息\n"
+            "2. 保留原文的关键表述，不要过度概括\n"
+            "3. 按主题分类整理，便于后续写作引用\n"
+            "4. 如果资料与章节无关，直接跳过\n"
+            "5. 输出格式为结构化的要点列表"
+        )
+
+        accumulated_digest = ""
+
+        for group_idx, group_batches in enumerate(groups):
+            batch_text = "\n\n".join(b['formatted'] for b in group_batches)
+            group_tokens = sum(b['tokens'] for b in group_batches)
+
+            # 构建本组的 prompt
+            if accumulated_digest:
+                user_content = (
+                    f"章节标题：{chapter_title}\n"
+                    f"章节描述：{chapter_description}\n\n"
+                    f"前面批次已提取的要点：\n{accumulated_digest}\n\n"
+                    f"请继续阅读以下知识库资料（第 {group_idx + 1}/{len(groups)} 组），"
+                    f"提取与该章节相关的新增要点，与前面的要点合并输出完整的要点列表：\n\n"
+                    f"{batch_text}"
+                )
+            else:
+                user_content = (
+                    f"章节标题：{chapter_title}\n"
+                    f"章节描述：{chapter_description}\n\n"
+                    f"请阅读以下知识库资料（第 {group_idx + 1}/{len(groups)} 组），"
+                    f"提取与该章节相关的所有要点信息：\n\n"
+                    f"{batch_text}"
+                )
+
+            messages = [
+                {"role": "system", "content": digest_system},
+                {"role": "user", "content": user_content},
+            ]
+
+            accumulated_digest = await self._collect_stream_text(
+                messages, temperature=0.3
+            )
+
+            logger.info(
+                f"[分批消化] 第 {group_idx + 1}/{len(groups)} 组完成，"
+                f"本组 {group_tokens} tokens，摘要 {len(accumulated_digest)} 字符"
+            )
+
+        # 将消化后的摘要格式化为知识库注入文本
+        if accumulated_digest.strip():
+            result = (
+                "========== 知识库参考资料（已消化整理，必须严格遵守） ==========\n"
+                "以下是从致同会计师事务所知识库中提取的与本章节相关的要点信息。\n"
+                "生成内容时必须优先使用这些信息，严禁编造不存在的事实。\n\n"
+                f"{accumulated_digest}\n\n"
+                "========== 知识库参考资料结束 ==========\n\n"
+            )
+            logger.info(
+                f"[分批消化] 章节 '{chapter_title}' 消化完成，"
+                f"最终摘要 {len(result)} 字符"
+            )
+            return result
+
+        return ""
 
     # 单次生成的安全字数上限（大多数模型 max_output_tokens ≈ 4096~8192 tokens ≈ 2500~5000 中文字）
     SINGLE_BATCH_CHAR_LIMIT = 3000
@@ -653,10 +675,11 @@ class OpenAIService:
             
             # 优先使用预加载的知识库缓存，避免每个章节重复读取磁盘
             knowledge_info = ""
-            cached_kb = self.get_knowledge_cache()
+            cached_kb = self.get_knowledge_for_chapter(chapter_title, chapter_description)
             if cached_kb:
                 knowledge_info = cached_kb
-                logger.info(f"[知识库] 章节 {chapter_title} 使用预加载缓存 ({_knowledge_cache.get('truncated_chars', 0)} 字符)")
+                mode = '智能检索' if knowledge_retriever.use_retrieval else '全量注入'
+                logger.info(f"[知识库] 章节 {chapter_title} 使用预加载缓存（{mode}模式，{len(cached_kb)} 字符）")
             else:
                 # 没有预加载缓存，回退到直接读取（兼容单章节生成场景）
                 try:
@@ -734,18 +757,46 @@ class OpenAIService:
                 {"role": "user", "content": user_prompt}
             ]
 
-            # Token限制检查与截断
+            # Token限制检查与智能调整
             context_limit = _get_context_limit(self.model_name)
             max_input_tokens = int(context_limit * (1 - OUTPUT_RESERVE_RATIO))
             total_tokens = sum(estimate_token_count(m["content"]) for m in messages)
             if total_tokens > max_input_tokens:
-                logger.warning(f"[Token限制] 章节 {chapter_title} 输入约 {total_tokens} tokens，超过限制 {max_input_tokens}，将截断知识库内容")
-                # 截断知识库内容（最大的可变部分）
+                logger.warning(f"[Token限制] 章节 {chapter_title} 输入约 {total_tokens} tokens，超过限制 {max_input_tokens}")
                 overflow = total_tokens - max_input_tokens
                 if knowledge_info:
                     kb_tokens = estimate_token_count(knowledge_info)
-                    new_kb_max = max(kb_tokens - overflow - 500, 1000)  # 至少保留1000 tokens
-                    knowledge_info = truncate_to_token_limit(knowledge_info, new_kb_max)
+                    new_kb_max = max(kb_tokens - overflow - 500, 1000)
+
+                    # 检索模式下：尝试分批消化，确保所有相关知识都被 AI 读到
+                    if knowledge_retriever.use_retrieval and knowledge_retriever.is_loaded:
+                        # 获取所有相关 batch 的总 token 数
+                        all_batches = knowledge_retriever.get_batches_for_chapter(
+                            chapter_title, chapter_description, max_tokens=0)
+                        all_relevant_tokens = sum(b['tokens'] for b in all_batches)
+
+                        if all_relevant_tokens > new_kb_max and len(all_batches) > 1:
+                            # 知识库内容超出预算，分批消化
+                            logger.info(
+                                f"[分批消化] 章节 {chapter_title} 相关知识 {all_relevant_tokens} tokens "
+                                f"超出预算 {new_kb_max}，启动分批消化"
+                            )
+                            knowledge_info = await self._digest_knowledge_batches(
+                                chapter_title=chapter_title,
+                                chapter_description=chapter_description,
+                                max_tokens_per_call=new_kb_max,
+                            )
+                        else:
+                            # 重新检索更少的内容
+                            knowledge_info = knowledge_retriever.get_formatted_for_chapter(
+                                chapter_title=chapter_title,
+                                chapter_description=chapter_description,
+                                max_tokens=new_kb_max,
+                            )
+                            logger.info(f"[Token限制] 重新检索，缩减到 {len(knowledge_info)} 字符")
+                    else:
+                        knowledge_info = truncate_to_token_limit(knowledge_info, new_kb_max)
+
                     # 重建user_prompt
                     user_prompt = f"""请为以下审计文档章节生成具体内容：
 

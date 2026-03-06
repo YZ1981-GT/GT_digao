@@ -1414,7 +1414,9 @@ const ContentEdit: React.FC<ContentEditProps> = ({
                         onClick={() => toggleLibraryExpand(lib.id)}
                         className="mr-2 text-gray-500 hover:text-gray-700"
                       >
-                        {expandedLibraries.has(lib.id) ? '▼' : '▶'}
+                        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, fontSize: 14, fontWeight: 600, color: '#6b7280', border: '1px solid #d1d5db', borderRadius: 3, lineHeight: 1 }}>
+                          {expandedLibraries.has(lib.id) ? '−' : '+'}
+                        </span>
                       </button>
                       <div className="flex-1">
                         <div className="text-sm font-medium text-gray-900">{lib.name}</div>
