@@ -1,5 +1,6 @@
 """OpenAI服务"""
 import openai
+import httpx
 from typing import Dict, Any, List, AsyncGenerator
 import json
 import asyncio
@@ -132,7 +133,8 @@ class OpenAIService:
         # 初始化OpenAI客户端 - 使用异步客户端
         self.client = openai.AsyncOpenAI(
             api_key=self.api_key,
-            base_url=self.base_url if self.base_url else None
+            base_url=self.base_url if self.base_url else None,
+            timeout=httpx.Timeout(300.0, connect=30.0),
         )
 
     def preload_knowledge_stream(self, library_ids: List[str] = None, library_docs: Dict[str, List[str]] = None):

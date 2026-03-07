@@ -100,6 +100,32 @@ const STATUS_CONFIG: Record<SectionStatus, { label: string; color: string; bg: s
 /** Batch concurrency limit */
 const BATCH_CONCURRENCY = 3;
 
+/** Render text with 【待补充】 highlighted */
+function renderContentWithHighlights(text: string): React.ReactNode {
+  if (!text) return <span style={{ color: '#9ca3af', fontStyle: 'italic' }}>暂无内容</span>;
+  const parts = text.split(/(【待补充】)/g);
+  if (parts.length === 1) return text;
+  return parts.map((part, i) =>
+    part === '【待补充】' ? (
+      <mark
+        key={i}
+        style={{
+          backgroundColor: '#fef3c7',
+          color: '#d97706',
+          padding: '1px 4px',
+          borderRadius: 3,
+          fontWeight: 600,
+          border: '1px solid #fcd34d',
+        }}
+      >
+        【待补充】
+      </mark>
+    ) : (
+      <span key={i}>{part}</span>
+    ),
+  );
+}
+
 const DocumentEditor: React.FC<DocumentEditorProps> = ({
   documentId,
   templateId,
@@ -197,10 +223,8 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
   }, [leafSections]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Scroll position tracking for floating button
-  const [isAtTop, setIsAtTop] = useState(true);
-
   useEffect(() => {
-    const onScroll = () => setIsAtTop(window.scrollY < 100);
+    const onScroll = () => {};
     window.addEventListener('scroll', onScroll, { passive: true });
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
@@ -211,14 +235,6 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
     }
     return null;
   }, [leafSections, sectionStatuses]);
-
-  const handleFloatingClick = useCallback(() => {
-    if (!isAtTop) {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } else if (generatingIndex !== null) {
-      sectionRefs.current[generatingIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  }, [isAtTop, generatingIndex]);
 
   const getUI = useCallback(
     (index: number): SectionUIState =>
@@ -261,6 +277,18 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
       // Build parent/sibling context from outline tree
       const ctx = findSectionContext(outline, outlineItem.id, outlineItem.title);
 
+      // Collect previously generated sections for context (avoid duplicate content)
+      const prevGenerated: Array<{ title: string; summary: string }> = [];
+      const currentSections = sectionsRef.current;
+      for (let i = 0; i < leafIdx; i++) {
+        const sec = currentSections[i];
+        if (sec?.content?.trim()) {
+          // Send first 1500 chars to capture abbreviation definitions and key context
+          const summary = sec.content.trim().substring(0, 1500);
+          prevGenerated.push({ title: sec.title || leafSections[i]?.title || '', summary });
+        }
+      }
+
       const response = await generateApi.generateSection(
         {
           document_id: documentId || 'pending',
@@ -269,6 +297,7 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
           sibling_sections: ctx.siblings.length > 0 ? ctx.siblings : undefined,
           project_info: projectInfo,
           knowledge_library_ids: knowledgeLibraryIds,
+          previously_generated: prevGenerated.length > 0 ? prevGenerated : undefined,
         },
         signal,
       );
@@ -320,12 +349,12 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
         is_placeholder: content.includes('【待补充】'),
       };
 
-      // Use functional update to avoid stale closure
-      onSectionsChange((() => {
-        const current = [...sectionsRef.current];
-        current[leafIdx] = section;
-        return current;
-      })());
+      // Synchronously update ref so next section can read it immediately
+      const current = [...sectionsRef.current];
+      current[leafIdx] = section;
+      sectionsRef.current = current;
+
+      onSectionsChange(current);
 
       setSectionStatuses((prev) => ({ ...prev, [leafIdx]: 'done' }));
       setStreamingContents((prev) => { const n = { ...prev }; delete n[leafIdx]; return n; });
@@ -491,6 +520,17 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
 
       try {
         const ctx = findSectionContext(outline, outlineItem.id, outlineItem.title);
+        // Collect previously generated sections for context
+        const prevGenerated: Array<{ title: string; summary: string }> = [];
+        const currentSections = sectionsRef.current;
+        for (let i = 0; i < leafSections.length; i++) {
+          if (i === sectionIndex) continue;
+          const sec = currentSections[i];
+          if (sec?.content?.trim()) {
+            const summary = sec.content.trim().substring(0, 1500);
+            prevGenerated.push({ title: sec.title || leafSections[i]?.title || '', summary });
+          }
+        }
         const response = await generateApi.generateSection({
           document_id: documentId || 'pending',
           section: { ...outlineItem },
@@ -498,6 +538,7 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
           sibling_sections: ctx.siblings.length > 0 ? ctx.siblings : undefined,
           project_info: projectInfo,
           knowledge_library_ids: knowledgeLibraryIds,
+          previously_generated: prevGenerated.length > 0 ? prevGenerated : undefined,
         });
         if (!response.ok) throw new Error(`章节生成失败: ${response.status}`);
 
@@ -708,8 +749,13 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
           </span>
 
           {/* Title */}
-          <span style={{ flex: 1, fontSize: 14, color: 'var(--gt-text-primary)' }}>
-            {item.id} {item.title}
+          <span style={{ flex: 1, fontSize: 14, color: 'var(--gt-text-primary)', minWidth: 0 }}>
+            <span>{item.id} {item.title}</span>
+            {item.description && (
+              <span style={{ display: 'block', fontSize: 12, color: '#6b7280', fontWeight: 400, marginTop: 2, whiteSpace: 'normal', lineHeight: 1.4 }}>
+                {item.description.length > 80 ? item.description.substring(0, 80) + '…' : item.description}
+              </span>
+            )}
           </span>
 
           {/* Status badge — clickable to generate when pending/error */}
@@ -825,7 +871,7 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
                   overflow: 'auto',
                 }}
               >
-                {section.content || <span style={{ color: '#9ca3af', fontStyle: 'italic' }}>暂无内容</span>}
+                {renderContentWithHighlights(section.content)}
               </div>
             )}
 
@@ -846,7 +892,7 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
                     marginBottom: 'var(--gt-space-2)',
                   }}
                 >
-                  {section?.content}
+                  {section?.content ? renderContentWithHighlights(section.content) : null}
                 </div>
                 <textarea
                   value={ui.aiInstruction}
@@ -915,6 +961,11 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
               }}
             >
               {item.id} {item.title}
+              {item.description && (
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '2px 0 0', fontWeight: 400 }}>
+                  {item.description}
+                </p>
+              )}
             </div>
             <div style={{ paddingLeft: depth === 0 ? 0 : 16 }}>
               {renderOutlineTree(item.children!, depth + 1)}
@@ -1092,34 +1143,41 @@ const DocumentEditor: React.FC<DocumentEditorProps> = ({
         />
       )}
 
-      {/* Floating scroll button */}
-      {(!isAtTop || generatingIndex !== null) && (
+      {/* Floating buttons */}
+      {/* Scroll to generating section */}
+      {generatingIndex !== null && (
         <button
-          onClick={handleFloatingClick}
-          title={!isAtTop ? '返回顶部' : '跳转到生成中的章节'}
+          onClick={() => sectionRefs.current[generatingIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+          title="跳转到生成中的章节"
+          aria-label="跳转到生成中的章节"
           style={{
             position: 'fixed',
             right: 32,
-            bottom: 32,
+            bottom: 88,
             width: 44,
             height: 44,
             borderRadius: '50%',
-            border: 'none',
+            border: '2px solid #fff',
             backgroundColor: 'var(--gt-primary, #7c3aed)',
             color: '#fff',
             fontSize: 20,
+            lineHeight: 1,
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
             zIndex: 1000,
-            transition: 'transform 0.2s, opacity 0.2s',
+            transition: 'transform 0.2s',
+            padding: 0,
+            outline: 'none',
           }}
           onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = 'scale(1.1)'; }}
           onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'scale(1)'; }}
         >
-          {!isAtTop ? '↑' : '↓'}
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" style={{ display: 'block' }}>
+            <path d="M10 16L16 8h-4V4H6v4H2l8 8z" fill="#fff"/>
+          </svg>
         </button>
       )}
     </section>

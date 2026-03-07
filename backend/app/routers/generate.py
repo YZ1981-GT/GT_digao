@@ -137,6 +137,7 @@ async def generate_section(request: SectionGenerateRequest):
                     project_info=request.project_info,
                     knowledge_context=knowledge_context,
                     target_word_count=request.section.get("target_word_count", 1500),
+                    previously_generated=request.previously_generated,
                 ):
                     full_content += chunk
                     yield f"data: {json.dumps({'status': 'streaming', 'content': chunk}, ensure_ascii=False)}\n\n"

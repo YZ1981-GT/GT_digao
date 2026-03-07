@@ -27,6 +27,39 @@ function App() {
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const failCountRef = React.useRef(0);
 
+  // ─── 全局返回顶部按钮 ───
+  const [showScrollTop, setShowScrollTop] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => setShowScrollTop(window.scrollY > 100);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // 同时监听页面内 overflow 容器的滚动
+  useEffect(() => {
+    const handler = () => {
+      // 检查 window 滚动
+      if (window.scrollY > 100) { setShowScrollTop(true); return; }
+      // 检查常见的 overflow 滚动容器
+      let found = false;
+      document.querySelectorAll('.overflow-y-auto, .overflow-auto').forEach(el => {
+        if (el.scrollTop > 100) found = true;
+      });
+      setShowScrollTop(found);
+    };
+    document.addEventListener('scroll', handler, { capture: true, passive: true });
+    return () => document.removeEventListener('scroll', handler, { capture: true });
+  }, []);
+
+  const handleGlobalScrollTop = useCallback(() => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    // 同时滚动所有 overflow 容器
+    document.querySelectorAll('.overflow-y-auto, .overflow-auto').forEach(el => {
+      el.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }, []);
+
   const checkBackend = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/health`, { method: 'GET', signal: AbortSignal.timeout(8000) });
@@ -301,8 +334,7 @@ function App() {
   );
 
   // ─── 根据工作模式渲染对应界面 ───
-  if (workMode === 'select') {
-    return (
+  const renderSelectMode = () => (
       <div className="h-screen overflow-hidden bg-gray-50 flex flex-col">
         {backendOnline === false && (
           <div className="bg-red-600 text-white text-center py-2 text-sm flex-shrink-0">
@@ -380,14 +412,70 @@ function App() {
           </div>
         </div>
       </div>
+  );
+
+  // ─── 全局返回顶部浮动按钮 ───
+  const scrollTopButton = showScrollTop ? (
+    <button
+      onClick={handleGlobalScrollTop}
+      title="返回顶部"
+      aria-label="返回顶部"
+      style={{
+        position: 'fixed',
+        right: 28,
+        bottom: 28,
+        width: 44,
+        height: 44,
+        borderRadius: '50%',
+        border: '2px solid #fff',
+        backgroundColor: '#6b7280',
+        color: '#fff',
+        fontSize: 20,
+        lineHeight: 1,
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.25)',
+        zIndex: 99999,
+        transition: 'transform 0.2s, opacity 0.2s',
+        padding: 0,
+        outline: 'none',
+        opacity: 0.85,
+      }}
+      onMouseEnter={(e) => { const t = e.currentTarget; t.style.transform = 'scale(1.1)'; t.style.opacity = '1'; }}
+      onMouseLeave={(e) => { const t = e.currentTarget; t.style.transform = 'scale(1)'; t.style.opacity = '0.85'; }}
+    >
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" style={{ display: 'block' }}>
+        <path d="M10 4L4 12h4v4h4v-4h4L10 4z" fill="#fff"/>
+      </svg>
+    </button>
+  ) : null;
+
+  if (workMode === 'select') {
+    return (
+      <>
+        {renderSelectMode()}
+        {scrollTopButton}
+      </>
     );
   }
 
   if (workMode === 'review' || workMode === 'generate') {
-    return renderAuditMode();
+    return (
+      <>
+        {renderAuditMode()}
+        {scrollTopButton}
+      </>
+    );
   }
 
-  return renderBidMode();
+  return (
+    <>
+      {renderBidMode()}
+      {scrollTopButton}
+    </>
+  );
 }
 
 export default App;

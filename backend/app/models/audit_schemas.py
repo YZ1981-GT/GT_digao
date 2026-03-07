@@ -427,6 +427,7 @@ class SectionGenerateRequest(BaseModel):
     project_info: ProjectInfo = Field(..., description="项目特定信息")
     knowledge_library_ids: Optional[List[str]] = Field(None, description="关联知识库ID列表")
     library_docs: Optional[Dict[str, List[str]]] = Field(None, description="要使用的具体文档，格式: {库ID: [文档ID列表]}")
+    previously_generated: Optional[List[Dict[str, str]]] = Field(None, description="前面已生成章节的标题和内容摘要，用于避免重复")
 
 
 class GeneratedSection(BaseModel):

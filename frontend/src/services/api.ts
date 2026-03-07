@@ -359,7 +359,7 @@ export const reviewApi = {
 export const generateApi = {
   /** 从模板提取章节大纲 */
   extractOutline: (data: { template_id: string; force_llm?: boolean }) =>
-    api.post('/api/generate/extract-outline', data),
+    api.post('/api/generate/extract-outline', data, { timeout: 300000 }),
 
   /** 用户确认/调整大纲 */
   confirmOutline: (data: { template_id: string; outline: Array<Record<string, any>> }) =>

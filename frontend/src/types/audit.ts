@@ -394,6 +394,7 @@ export interface SectionGenerateRequest {
   project_info: ProjectInfo;
   knowledge_library_ids?: string[];
   library_docs?: Record<string, string[]>;
+  previously_generated?: Array<{ title: string; summary: string }>;
 }
 
 /** 生成的文档章节 */
