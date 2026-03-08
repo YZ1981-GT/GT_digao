@@ -107,13 +107,14 @@
    ═══════════════════════════════════════════════════════════ */
 
 .gt-container {
-  max-width: 1200px;
+  max-width: 1800px;
   margin: 0 auto;
-  padding: 0 var(--gt-space-4);
+  padding: 0 var(--gt-space-6);
+  width: 90%;
 }
 
 .gt-section {
-  padding: var(--gt-space-6);
+  padding: var(--gt-space-5);
 }
 
 .gt-section--purple {
@@ -128,17 +129,17 @@
 
 .gt-grid-2 {
   display: grid;
-  gap: var(--gt-space-4);
+  gap: var(--gt-space-3);
 }
 
 .gt-grid-3 {
   display: grid;
-  gap: var(--gt-space-4);
+  gap: var(--gt-space-3);
 }
 
 .gt-grid-4 {
   display: grid;
-  gap: var(--gt-space-4);
+  gap: var(--gt-space-3);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -164,7 +165,7 @@
 }
 
 .gt-card-content {
-  padding: var(--gt-space-6);
+  padding: var(--gt-space-5);
 }
 
 
@@ -401,11 +402,30 @@
    11. 响应式断点 (需求 9.20, 9.21)
    ═══════════════════════════════════════════════════════════ */
 
-/* 桌面端 ≥1024px：多列网格 */
-@media (min-width: 1024px) {
+/* 超大屏 ≥1920px：最大化利用屏幕空间 */
+@media (min-width: 1920px) {
+  .gt-container { max-width: 2000px; }
+  .gt-grid-4 { grid-template-columns: repeat(4, 1fr); }
+}
+
+/* 大屏 ≥1536px：宽屏优化 */
+@media (min-width: 1536px) {
+  .gt-container { max-width: 1800px; }
+  .gt-grid-3 { grid-template-columns: repeat(3, 1fr); }
+  .gt-grid-4 { grid-template-columns: repeat(4, 1fr); }
+}
+
+/* 标准桌面 ≥1280px：多列网格 */
+@media (min-width: 1280px) {
   .gt-grid-2 { grid-template-columns: repeat(2, 1fr); }
   .gt-grid-3 { grid-template-columns: repeat(3, 1fr); }
   .gt-grid-4 { grid-template-columns: repeat(4, 1fr); }
+}
+
+/* 小桌面 1024px~1279px：三列四列折叠为双列 */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .gt-grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .gt-grid-3, .gt-grid-4 { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* 平板端 768px~1023px：三列四列折叠为双列 */

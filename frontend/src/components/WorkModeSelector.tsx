@@ -18,7 +18,7 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
       <div
         style={{
           background: 'linear-gradient(135deg, var(--gt-primary) 0%, var(--gt-primary-dark, #2B1D4D) 100%)',
-          padding: 'var(--gt-space-8) var(--gt-space-6)',
+          padding: 'var(--gt-space-5) var(--gt-space-6)',
           color: '#fff',
         }}
       >
@@ -31,13 +31,13 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
       </div>
 
       {/* 主内容区 */}
-      <div style={{ flex: 1, padding: 'var(--gt-space-6)', overflowY: 'auto' }}>
+      <div style={{ flex: 1, padding: 'var(--gt-space-5)', overflowY: 'auto' }}>
         {/* 工作模式选择 */}
-        <p style={{ fontSize: 'var(--gt-font-sm)', color: 'var(--gt-text-secondary)', marginBottom: 'var(--gt-space-4)' }}>
+        <p style={{ fontSize: 'var(--gt-font-sm)', color: 'var(--gt-text-secondary)', marginBottom: 'var(--gt-space-3)' }}>
           请选择工作模式
         </p>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-6)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-5)' }}>
           {/* 底稿复核卡片 */}
           <div
             onClick={() => onSelectMode('review')}
@@ -47,7 +47,7 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
             style={{
               border: '2px solid #e8e8e8',
               borderRadius: 'var(--gt-radius-md, 8px)',
-              padding: 'var(--gt-space-5)',
+              padding: 'var(--gt-space-4)',
               cursor: 'pointer',
               transition: 'all 0.2s',
               backgroundColor: '#fff',
@@ -55,14 +55,14 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
             onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
             onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
           >
-            <div style={{ fontSize: 28, marginBottom: 8 }}>📋</div>
-            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 8px 0' }}>
+            <div style={{ fontSize: 24, marginBottom: 6 }}>📋</div>
+            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 6px 0' }}>
               底稿复核
             </h3>
-            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.6, margin: 0 }}>
+            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.5, margin: 0 }}>
               上传审计底稿，从格式规范性、数据勾稽关系、会计准则合规性等多维度进行智能复核
             </p>
-            <div style={{ marginTop: 12 }}>
+            <div style={{ marginTop: 10 }}>
               <span
                 style={{
                   display: 'inline-block',
@@ -88,7 +88,7 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
             style={{
               border: '2px solid #e8e8e8',
               borderRadius: 'var(--gt-radius-md, 8px)',
-              padding: 'var(--gt-space-5)',
+              padding: 'var(--gt-space-4)',
               cursor: 'pointer',
               transition: 'all 0.2s',
               backgroundColor: '#fff',
@@ -96,14 +96,14 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
             onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
             onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
           >
-            <div style={{ fontSize: 28, marginBottom: 8 }}>📝</div>
-            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 8px 0' }}>
+            <div style={{ fontSize: 24, marginBottom: 6 }}>📝</div>
+            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 6px 0' }}>
               文档生成
             </h3>
-            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.6, margin: 0 }}>
+            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.5, margin: 0 }}>
               基于模板与知识库，智能生成审计计划、审计小结、尽调报告等标准化审计文档
             </p>
-            <div style={{ marginTop: 12 }}>
+            <div style={{ marginTop: 10 }}>
               <span
                 style={{
                   display: 'inline-block',
@@ -122,23 +122,23 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
         </div>
 
         {/* 快速指引 */}
-        <div style={{ borderTop: '1px solid #e8e8e8', paddingTop: 'var(--gt-space-4)' }}>
+        <div style={{ borderTop: '1px solid #e8e8e8', paddingTop: 'var(--gt-space-3)' }}>
           <h3 style={{ fontSize: 'var(--gt-font-sm)', fontWeight: 600, color: 'var(--gt-text-primary)', marginBottom: 'var(--gt-space-3)' }}>
             快速开始
           </h3>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--gt-space-3)' }}>
-            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
-              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>底稿复核流程</div>
-              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
+            <div style={{ padding: 'var(--gt-space-2)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 3 }}>底稿复核流程</div>
+              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.5 }}>
                 1. 上传底稿文件（Excel/Word/PDF）<br />
                 2. 选择提示词与复核维度<br />
                 3. 上传补充材料并确认<br />
                 4. 查看复核报告并导出
               </div>
             </div>
-            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
-              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>文档生成流程</div>
-              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
+            <div style={{ padding: 'var(--gt-space-2)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 3 }}>文档生成流程</div>
+              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.5 }}>
                 1. 上传模板并关联知识库<br />
                 2. 确认章节大纲结构<br />
                 3. 逐章节生成与编辑<br />
@@ -149,14 +149,14 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
         </div>
 
         {/* 支持格式 */}
-        <div style={{ marginTop: 'var(--gt-space-4)', padding: 'var(--gt-space-3)', backgroundColor: '#fafafa', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)' }}>
+        <div style={{ marginTop: 'var(--gt-space-3)', padding: 'var(--gt-space-3)', backgroundColor: '#fafafa', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)' }}>
           <span style={{ fontWeight: 600, color: 'var(--gt-text-primary)' }}>支持格式：</span>
           Excel (.xlsx/.xls) · Word (.doc/.docx) · PDF · Markdown · TXT
         </div>
       </div>
 
       {/* 底部 */}
-      <div style={{ padding: 'var(--gt-space-3) var(--gt-space-6)', borderTop: '1px solid #e8e8e8', textAlign: 'center', fontSize: 11, color: 'var(--gt-text-secondary)' }}>
+      <div style={{ padding: 'var(--gt-space-2) var(--gt-space-5)', borderTop: '1px solid #e8e8e8', textAlign: 'center', fontSize: 11, color: 'var(--gt-text-secondary)' }}>
         致同研究院 · 审计底稿智能复核与文档生成平台
       </div>
     </div>

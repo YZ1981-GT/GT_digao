@@ -442,12 +442,12 @@ const ReviewWorkflow: React.FC = () => {
 
   return (
     <section className="gt-container gt-section" aria-label="底稿复核工作流">
-      <h2 className="gt-h2" style={{ marginBottom: 'var(--gt-space-4)' }}>
+      <h2 className="gt-h2" style={{ marginBottom: 'var(--gt-space-3)' }}>
         底稿复核工作流
       </h2>
 
       {/* Step indicator */}
-      <nav aria-label="工作流步骤" className="gt-flow-diagram" style={{ marginBottom: 'var(--gt-space-6)' }}>
+      <nav aria-label="工作流步骤" className="gt-flow-diagram" style={{ marginBottom: 'var(--gt-space-4)' }}>
         {STEPS.map((step, index) => (
           <React.Fragment key={step.key}>
             {index > 0 && (
@@ -505,12 +505,12 @@ const ReviewWorkflow: React.FC = () => {
       )}
 
       {/* Step content */}
-      <div style={{ marginBottom: 'var(--gt-space-6)' }}>
+      <div style={{ marginBottom: 'var(--gt-space-5)' }}>
         {renderStepContent()}
       </div>
 
       {/* Navigation buttons */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--gt-space-4)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--gt-space-3)' }}>
         <button
           className="gt-button gt-button--secondary"
           onClick={handlePrev}
