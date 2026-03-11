@@ -5,6 +5,10 @@
 user_config.json
 config.json
 
+# MinerU 虚拟环境和测试输入
+MinerU/mineru_env/
+MinerU/input/
+
 # 上传文件目录
 uploads/
 *.docx
