@@ -29,8 +29,8 @@ class Settings(BaseSettings):
         if self.environment == "production":
             # 生产环境：仅允许同源请求（不使用正则通配）
             return ""
-        # 开发环境：允许本地 3030/9980 端口
-        return r"https?://(localhost|127\.0\.0\.1)(:(3030|9980))?"
+        # 开发环境：允许本地任意端口，避免端口被占用时 CORS 失败
+        return r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
     
     @property
     def cors_allow_headers(self) -> list:
