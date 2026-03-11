@@ -8,7 +8,7 @@ import React from 'react';
 import '../styles/gt-design-tokens.css';
 
 interface WorkModeSelectorProps {
-  onSelectMode: (mode: 'review' | 'generate') => void;
+  onSelectMode: (mode: 'review' | 'generate' | 'analysis') => void;
 }
 
 const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => {
@@ -37,7 +37,7 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
           请选择工作模式
         </p>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-5)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-5)' }}>
           {/* 底稿复核卡片 */}
           <div
             onClick={() => onSelectMode('review')}
@@ -119,6 +119,47 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
               </span>
             </div>
           </div>
+
+          {/* 文档分析卡片 */}
+          <div
+            onClick={() => onSelectMode('analysis')}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === 'Enter') onSelectMode('analysis'); }}
+            style={{
+              border: '2px solid #e8e8e8',
+              borderRadius: 'var(--gt-radius-md, 8px)',
+              padding: 'var(--gt-space-5)',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              backgroundColor: '#fff',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
+          >
+            <div style={{ fontSize: 28, marginBottom: 8 }}>🔍</div>
+            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 8px 0' }}>
+              文档分析
+            </h3>
+            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.6, margin: 0 }}>
+              上传文档进行总结分析、整理汇总或生成汇总台账，自动标注引用来源
+            </p>
+            <div style={{ marginTop: 12 }}>
+              <span
+                style={{
+                  display: 'inline-block',
+                  padding: '4px 12px',
+                  borderRadius: 'var(--gt-radius-sm)',
+                  fontSize: 'var(--gt-font-xs)',
+                  fontWeight: 600,
+                  color: '#fff',
+                  backgroundColor: 'var(--gt-primary)',
+                }}
+              >
+                进入分析 →
+              </span>
+            </div>
+          </div>
         </div>
 
         {/* 快速指引 */}
@@ -126,10 +167,10 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
           <h3 style={{ fontSize: 'var(--gt-font-sm)', fontWeight: 600, color: 'var(--gt-text-primary)', marginBottom: 'var(--gt-space-3)' }}>
             快速开始
           </h3>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--gt-space-3)' }}>
-            <div style={{ padding: 'var(--gt-space-2)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
-              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 3 }}>底稿复核流程</div>
-              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.5 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--gt-space-3)' }}>
+            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>底稿复核流程</div>
+              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
                 1. 上传底稿文件（Excel/Word/PDF）<br />
                 2. 选择提示词与复核维度<br />
                 3. 上传补充材料并确认<br />
@@ -143,6 +184,15 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
                 2. 确认章节大纲结构<br />
                 3. 逐章节生成与编辑<br />
                 4. 导出 Word 文档
+              </div>
+            </div>
+            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>文档分析流程</div>
+              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
+                1. 上传文档并预览编辑缓存<br />
+                2. 选择分析模式与自定义要求<br />
+                3. 确认自动生成的章节框架<br />
+                4. 逐章节生成内容（标注出处）
               </div>
             </div>
           </div>

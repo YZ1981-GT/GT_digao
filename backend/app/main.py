@@ -7,7 +7,7 @@ import os
 
 from .config import settings
 from .routers import config, document, outline, content, search, expand, knowledge
-from .routers import review, generate, prompt, template, project
+from .routers import review, generate, prompt, template, project, analysis
 
 # 创建FastAPI应用实例
 app = FastAPI(
@@ -39,6 +39,7 @@ app.include_router(generate.router)
 app.include_router(prompt.router)
 app.include_router(template.router)
 app.include_router(project.router)
+app.include_router(analysis.router)
 
 # 健康检查端点
 @app.get("/health")

@@ -536,3 +536,89 @@ export const projectApi = {
   linkTemplateToProject: (projectId: string, data: { template_id: string }) =>
     api.post(`/api/project/${projectId}/templates`, data),
 };
+
+// ─── 文档分析处理 API ───
+
+export const analysisApi = {
+  /** 上传文档 */
+  upload: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/api/analysis/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    });
+  },
+
+  /** 获取文档缓存内容 */
+  getDocument: (docId: string) =>
+    api.get(`/api/analysis/document/${docId}`),
+
+  /** 更新文档缓存内容 */
+  updateDocument: (docId: string, contentText: string) =>
+    api.put(`/api/analysis/document/${docId}`, { content_text: contentText }),
+
+  /** 删除文档 */
+  deleteDocument: (docId: string) =>
+    api.delete(`/api/analysis/document/${docId}`),
+
+  /** 创建分析项目 */
+  createProject: (documentIds: string[]) =>
+    api.post('/api/analysis/create-project', { document_ids: documentIds }),
+
+  /** 获取分析模式列表 */
+  getModes: () =>
+    api.get('/api/analysis/modes'),
+
+  /** 生成章节框架（SSE流式） */
+  generateOutline: (data: {
+    project_id: string;
+    mode: string;
+    custom_instruction?: string;
+    target_word_count: number;
+  }) =>
+    fetch(`${API_BASE_URL}/api/analysis/generate-outline`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+
+  /** 确认章节框架 */
+  confirmOutline: (data: { project_id: string; outline: Array<Record<string, any>> }) =>
+    api.put('/api/analysis/confirm-outline', data),
+
+  /** 生成单章节内容（SSE流式） */
+  generateChapter: (data: {
+    project_id: string;
+    chapter_id: string;
+    custom_instruction?: string;
+  }, signal?: AbortSignal) =>
+    fetch(`${API_BASE_URL}/api/analysis/generate-chapter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      signal,
+    }),
+
+  /** AI修改章节（SSE流式） */
+  reviseChapter: (data: {
+    project_id: string;
+    chapter_id: string;
+    current_content: string;
+    user_instruction: string;
+    selected_text?: string;
+    selection_start?: number;
+    selection_end?: number;
+    messages?: Array<{ role: string; content: string }>;
+  }, signal?: AbortSignal) =>
+    fetch(`${API_BASE_URL}/api/analysis/revise-chapter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      signal,
+    }),
+
+  /** 获取项目详情 */
+  getProject: (projectId: string) =>
+    api.get(`/api/analysis/project/${projectId}`),
+};

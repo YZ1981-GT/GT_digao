@@ -52,6 +52,7 @@ const createMarkdownComponents = (theme: {
   };
 };
 
+
 // 公共的 ReactMarkdown 组件配置
 const markdownComponents = createMarkdownComponents({
   text: 'text-gray-800', heading: 'text-gray-900', accent: 'text-gray-700',
@@ -82,7 +83,6 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
   const [localOverview, setLocalOverview] = useState(projectOverview);
   const [localRequirements, setLocalRequirements] = useState(techRequirements);
 
-  // 当父组件 props 更新时（如从 localStorage 恢复），同步本地状态
   useEffect(() => {
     setLocalOverview(projectOverview);
   }, [projectOverview]);
@@ -90,19 +90,15 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
   useEffect(() => {
     setLocalRequirements(techRequirements);
   }, [techRequirements]);
-  
 
-  // 处理换行符的函数 - 只做基本转换
   const normalizeLineBreaks = (text: string) => {
     if (!text) return text;
-    
     return text
-      .replace(/\\n/g, '\n')  // 将字符串 \n 转换为实际换行符
-      .replace(/\r\n/g, '\n') // Windows换行符
-      .replace(/\r/g, '\n');  // Mac换行符
+      .replace(/\\n/g, '\n')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n');
   };
   
-  // 流式显示状态
   const [currentAnalysisStep, setCurrentAnalysisStep] = useState<'overview' | 'requirements' | null>(null);
   const [streamingOverview, setStreamingOverview] = useState('');
   const [streamingRequirements, setStreamingRequirements] = useState('');
@@ -119,12 +115,8 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
     try {
       setUploading(true);
       setMessage(null);
-
       const response = await documentApi.uploadFile(file);
-      
       if (response.data.success && response.data.file_content) {
-        // 上传新文档：清空上一轮 localStorage（按你的需求）
-        // 注意：这会同时清掉之前保存的草稿/正文内容缓存等
         draftStorage.clearAll();
         onFileUpload(response.data.file_content);
         setMessage({ type: 'success', text: response.data.message });
@@ -143,7 +135,6 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
       setMessage({ type: 'error', text: '请先上传文档' });
       return;
     }
-
     try {
       setAnalyzing(true);
       setMessage(null);
@@ -153,64 +144,47 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
       let overviewResult = '';
       let requirementsResult = '';
 
-      // 处理流式响应的通用函数
       const processStream = async (response: Response, onChunk: (chunk: string) => void) => {
         await processSSEStream(
           response,
           (data) => {
             try {
               const parsed = JSON.parse(data);
-              if (parsed.chunk) {
-                onChunk(parsed.chunk);
-              }
-            } catch (_e) {
-              // 忽略JSON解析错误
-            }
+              if (parsed.chunk) { onChunk(parsed.chunk); }
+            } catch (_e) { }
           },
         );
       };
 
-      // 第一步：分析项目概述
       setCurrentAnalysisStep('overview');
       const overviewResponse = await documentApi.analyzeDocumentStream({
         file_content: fileContent,
         analysis_type: 'overview',
       });
-
       await processStream(overviewResponse, (chunk) => {
         overviewResult += chunk;
-        const normalizedContent = normalizeLineBreaks(overviewResult);
-        setStreamingOverview(normalizedContent);
+        setStreamingOverview(normalizeLineBreaks(overviewResult));
       });
-
       const finalOverview = normalizeLineBreaks(overviewResult);
       setLocalOverview(finalOverview);
 
-      // 第二步：分析技术评分要求
       setCurrentAnalysisStep('requirements');
       const requirementsResponse = await documentApi.analyzeDocumentStream({
         file_content: fileContent,
         analysis_type: 'requirements',
       });
-
       await processStream(requirementsResponse, (chunk) => {
         requirementsResult += chunk;
-        const normalizedContent = normalizeLineBreaks(requirementsResult);
-        setStreamingRequirements(normalizedContent);
+        setStreamingRequirements(normalizeLineBreaks(requirementsResult));
       });
-
       const finalRequirements = normalizeLineBreaks(requirementsResult);
       setLocalRequirements(finalRequirements);
 
-      // 完成后更新父组件状态（使用已规范化的结果）
       onAnalysisComplete(finalOverview, finalRequirements);
       setMessage({ type: 'success', text: '文档解析完成' });
-      
-      // 清空流式内容
       setStreamingOverview('');
       setStreamingRequirements('');
       setCurrentAnalysisStep(null);
-
     } catch (error: any) {
       setMessage({ type: 'error', text: error.message || '文档解析失败' });
       setStreamingOverview('');
@@ -226,7 +200,6 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
       {/* 文件上传区域 */}
       <div className="bg-white rounded-lg shadow p-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-4">📄 文档上传</h2>
-        
         <div 
           className="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center hover:border-gray-400 transition-colors cursor-pointer"
           onClick={() => fileInputRef.current?.click()}
@@ -240,7 +213,6 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
               支持 PDF 和 Word 文档，最大 10MB
             </p>
           </div>
-          
           <input
             ref={fileInputRef}
             type="file"
@@ -249,7 +221,6 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
             className="hidden"
           />
         </div>
-        
         {uploading && (
           <div className="mt-4 text-center">
             <div className="inline-flex items-center px-4 py-2 text-sm text-blue-600">
@@ -269,7 +240,6 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
       {fileContent && (
         <div className="bg-white rounded-lg shadow p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-4">🔍 文档分析</h2>
-          
           <div className="flex justify-center mb-6">
             <button
               onClick={handleAnalysis}
@@ -313,13 +283,9 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
             </div>
           )}
 
-
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* 项目概述 */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-3">
-                项目概述
-              </label>
+              <label className="block text-sm font-medium text-gray-700 mb-3">项目概述</label>
               <div className="w-full p-4 border border-gray-300 rounded-lg focus-within:ring-blue-500 focus-within:border-blue-500 max-h-80 overflow-y-auto bg-white shadow-sm">
                 <div className="prose prose-sm max-w-none text-gray-800">
                   <ReactMarkdown components={markdownComponents}>
@@ -328,12 +294,8 @@ const DocumentAnalysis: React.FC<DocumentAnalysisProps> = ({
                 </div>
               </div>
             </div>
-
-            {/* 技术评分要求 */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-3">
-                技术评分要求
-              </label>
+              <label className="block text-sm font-medium text-gray-700 mb-3">技术评分要求</label>
               <div className="w-full p-4 border border-gray-300 rounded-lg focus-within:ring-green-500 focus-within:border-green-500 max-h-80 overflow-y-auto bg-white shadow-sm">
                 <div className="prose prose-sm max-w-none text-gray-800">
                   <ReactMarkdown components={markdownComponents}>

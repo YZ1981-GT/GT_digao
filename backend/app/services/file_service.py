@@ -222,19 +222,71 @@ class FileService:
     
     @staticmethod
     async def _extract_pdf_with_pdfplumber(file_path: str) -> str:
-        """使用pdfplumber提取PDF文本，包含表格和图片（确保及时释放文件句柄）"""
+        """使用pdfplumber提取PDF文本，包含表格和图片OCR（确保及时释放文件句柄）
+
+        对每页嵌入的图片（截图、图表等）做 OCR，将识别文本内联插入到
+        该页文本中，保持图片内容与上下文的位置关系。
+        """
         try:
             extracted_text = []
-            image_references = []  # 存储图片引用映射
-            global_img_counter = 1
 
-            # 获取PDF文档的所有图片信息，用于后续匹配
-            all_images = FileService.extract_images_from_pdf(file_path)
-            page_images_map = {}
-            for img_data, ext, page_num, img_index in all_images:
-                if page_num not in page_images_map:
-                    page_images_map[page_num] = []
-                page_images_map[page_num].append((img_data, ext, img_index))
+            # 用 PyMuPDF 提取每页的嵌入图片数据，按页分组
+            page_images_map: Dict[int, List[Tuple[bytes, int, int]]] = {}
+            if HAS_ADVANCED_LIBS:
+                try:
+                    doc = fitz.open(file_path)
+                    for page_num in range(doc.page_count):
+                        page = doc[page_num]
+                        image_list = page.get_images(full=True)
+                        for img_idx, img_info in enumerate(image_list):
+                            try:
+                                xref = img_info[0]
+                                pix = fitz.Pixmap(doc, xref)
+                                # 跳过装饰性小图（宽或高 < 30px）
+                                if pix.width < 30 or pix.height < 30:
+                                    pix = None
+                                    continue
+                                # 转 RGB
+                                if pix.n - pix.alpha >= 4:
+                                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                                w, h = pix.width, pix.height
+                                img_data = pix.tobytes("png")
+                                pix = None
+                                # 跳过过小的图片数据（< 1KB，可能是纯色块/线条）
+                                if len(img_data) < 1000:
+                                    continue
+                                pg = page_num + 1
+                                if pg not in page_images_map:
+                                    page_images_map[pg] = []
+                                page_images_map[pg].append((img_data, w, h))
+                            except Exception:
+                                continue
+                    doc.close()
+                except Exception as e:
+                    logger.warning("PDF 图片提取失败: %s", e)
+
+            # OCR 辅助函数
+            async def _ocr_page_images(page_num: int) -> str:
+                """对指定页的嵌入图片做 OCR，返回拼接文本"""
+                images = page_images_map.get(page_num, [])
+                if not images:
+                    return ""
+                try:
+                    from .ocr_service import ocr_service, HAS_TESSERACT
+                    if not HAS_TESSERACT:
+                        return ""
+                except ImportError:
+                    return ""
+
+                ocr_texts = []
+                for img_idx, (img_data, w, h) in enumerate(images, 1):
+                    try:
+                        text = await ocr_service.ocr_image_bytes_tesseract(img_data)
+                        if text and len(text.strip()) > 3:
+                            ocr_texts.append(f"[图片{img_idx}内容: {text.strip()}]")
+                    except Exception:
+                        pass
+                return "\n".join(ocr_texts)
 
             # 使用上下文管理器，避免在Windows上产生文件锁
             with pdfplumber.open(file_path) as pdf:
@@ -245,37 +297,13 @@ class FileService:
                     # 提取普通文本
                     text = page.extract_text()
                     if text:
-                        # 检查文本中是否有图片标记
-                        img_pattern = r'----.*?(?:image|img|media).*?----'
-                        img_matches = list(re.finditer(img_pattern, text, re.IGNORECASE))
+                        extracted_text.append(text)
 
-                        if img_matches and page_num in page_images_map:
-                            # 按顺序处理页面中的图片
-                            page_images = page_images_map[page_num]
-                            processed_text = text
-
-                            for i, match in enumerate(img_matches):
-                                if i < len(page_images):
-                                    # 获取对应的图片数据
-                                    img_data, ext, img_index = page_images[i]
-                                    filename = f"pdf_page{page_num}_img{img_index}.{ext}"
-
-                                    # 上传图片
-                                    image_url = await FileService.upload_image_to_server(img_data, filename)
-
-                                    if image_url:
-                                        # 替换图片标记
-                                        old_mark = match.group()
-                                        new_mark = f"[图片{global_img_counter}]"
-                                        processed_text = processed_text.replace(old_mark, new_mark, 1)
-
-                                        # 记录图片引用
-                                        image_references.append(f"[图片{global_img_counter}]: {image_url}")
-                                        global_img_counter += 1
-
-                            extracted_text.append(processed_text)
-                        else:
-                            extracted_text.append(text)
+                    # 对该页嵌入图片做 OCR，内联插入
+                    if page_num in page_images_map:
+                        img_ocr = await _ocr_page_images(page_num)
+                        if img_ocr:
+                            extracted_text.append(f"\n{img_ocr}")
 
                     # 提取表格
                     tables = page.extract_tables()
@@ -287,11 +315,6 @@ class FileService:
                                 row_text = " | ".join([str(cell) if cell else "" for cell in row])
                                 extracted_text.append(row_text)
                         extracted_text.append("[表格结束]\n")
-
-            # 在文档末尾添加图片引用映射
-            if image_references:
-                extracted_text.append(f"\n\n--- 图片引用 ---")
-                extracted_text.extend(image_references)
 
             result = "\n".join(extracted_text).strip()
             gc.collect()
@@ -306,20 +329,80 @@ class FileService:
     
     @staticmethod
     async def _extract_pdf_with_pymupdf(file_path: str) -> str:
-        """使用PyMuPDF提取PDF文本和图片"""
+        """使用PyMuPDF提取PDF文本和图片（含内联图片OCR）"""
         try:
-            doc = fitz.open(file_path)
             extracted_text = []
-            
+
+            # 预提取每页嵌入图片，用于内联 OCR
+            page_images_map: Dict[int, List[Tuple[bytes, int, int]]] = {}
+            if HAS_ADVANCED_LIBS:
+                try:
+                    doc = fitz.open(file_path)
+                    for page_num in range(doc.page_count):
+                        page = doc[page_num]
+                        image_list = page.get_images(full=True)
+                        for img_info in image_list:
+                            try:
+                                xref = img_info[0]
+                                pix = fitz.Pixmap(doc, xref)
+                                if pix.width < 30 or pix.height < 30:
+                                    pix = None
+                                    continue
+                                if pix.n - pix.alpha >= 4:
+                                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                                w, h = pix.width, pix.height
+                                img_data = pix.tobytes("png")
+                                pix = None
+                                if len(img_data) < 1000:
+                                    continue
+                                pg = page_num + 1
+                                if pg not in page_images_map:
+                                    page_images_map[pg] = []
+                                page_images_map[pg].append((img_data, w, h))
+                            except Exception:
+                                continue
+                    doc.close()
+                except Exception as e:
+                    logger.warning("PyMuPDF 图片预提取失败: %s", e)
+
+            # OCR 辅助函数
+            async def _ocr_page_images(page_num: int) -> str:
+                images = page_images_map.get(page_num, [])
+                if not images:
+                    return ""
+                try:
+                    from .ocr_service import ocr_service, HAS_TESSERACT
+                    if not HAS_TESSERACT:
+                        return ""
+                except ImportError:
+                    return ""
+                ocr_texts = []
+                for img_idx, (img_data, w, h) in enumerate(images, 1):
+                    try:
+                        text = await ocr_service.ocr_image_bytes_tesseract(img_data)
+                        if text and len(text.strip()) > 3:
+                            ocr_texts.append(f"[图片{img_idx}内容: {text.strip()}]")
+                    except Exception:
+                        pass
+                return "\n".join(ocr_texts)
+
+            doc = fitz.open(file_path)
             for page_num in range(doc.page_count):
                 page = doc[page_num]
-                extracted_text.append(f"\n--- 第 {page_num + 1} 页 ---\n")
-                
+                pg = page_num + 1
+                extracted_text.append(f"\n--- 第 {pg} 页 ---\n")
+
                 # 提取文本
                 text = page.get_text()
                 if text:
                     extracted_text.append(text)
-                
+
+                # 内联图片 OCR
+                if pg in page_images_map:
+                    img_ocr = await _ocr_page_images(pg)
+                    if img_ocr:
+                        extracted_text.append(f"\n{img_ocr}")
+
                 # 尝试提取表格
                 try:
                     tables = page.find_tables()
@@ -332,9 +415,8 @@ class FileService:
                                 extracted_text.append(row_text)
                         extracted_text.append("[表格结束]\n")
                 except Exception:
-                    # 如果表格提取失败，跳过
                     pass
-            
+
             doc.close()
             return "\n".join(extracted_text).strip()
         except Exception as e:
