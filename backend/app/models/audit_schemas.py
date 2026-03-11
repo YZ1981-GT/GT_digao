@@ -580,6 +580,18 @@ class NoteTable(BaseModel):
     source_location: str = Field("", description="在源文档中的位置描述")
 
 
+class NoteSection(BaseModel):
+    """附注层级节点 - 按附注文档的标题层级组织"""
+    id: str = Field(..., description="节点ID")
+    title: str = Field(..., description="标题文本（如 '一、公司基本情况'）")
+    level: int = Field(..., description="层级：1=一级标题, 2=二级, 3=三级, 4=四级")
+    content_paragraphs: List[str] = Field(default_factory=list, description="该节点下的正文段落")
+    note_table_ids: List[str] = Field(default_factory=list, description="该节点下的附注表格ID")
+    children: List['NoteSection'] = Field(default_factory=list, description="子节点")
+
+NoteSection.model_rebuild()
+
+
 class ReportSheetData(BaseModel):
     """审计报告 Excel Sheet 解析数据（Req 1.1, 1.2）"""
     sheet_name: str = Field(..., description="Sheet 名称")
@@ -649,6 +661,7 @@ class ReportReviewSession(BaseModel):
     sheet_data: Dict[str, List[ReportSheetData]] = Field(default_factory=dict, description="Excel Sheet 解析数据 {file_id: [ReportSheetData]}")
     statement_items: List[StatementItem] = Field(default_factory=list)
     note_tables: List[NoteTable] = Field(default_factory=list)
+    note_sections: List[NoteSection] = Field(default_factory=list, description="附注层级结构树")
     table_structures: Dict[str, TableStructure] = Field(default_factory=dict, description="表格结构识别结果 {note_table_id: TableStructure}")
     matching_map: Optional[MatchingMap] = Field(None)
     finding_conversations: Dict[str, 'FindingConversation'] = Field(default_factory=dict, description="问题确认对话")

@@ -560,6 +560,16 @@ export interface NoteTable {
   source_location: string;
 }
 
+/** 附注层级节点 - 按附注文档的标题层级组织 */
+export interface NoteSection {
+  id: string;
+  title: string;
+  level: number;
+  content_paragraphs: string[];
+  note_table_ids: string[];
+  children: NoteSection[];
+}
+
 /** 审计报告 Excel Sheet 解析数据（Req 1.1, 1.2） */
 export interface ReportSheetData {
   sheet_name: string;
@@ -621,6 +631,7 @@ export interface ReportReviewSession {
   sheet_data: Record<string, ReportSheetData[]>;
   statement_items: StatementItem[];
   note_tables: NoteTable[];
+  note_sections: NoteSection[];
   table_structures: Record<string, TableStructure>;
   matching_map?: MatchingMap;
   finding_conversations: Record<string, FindingConversation>;

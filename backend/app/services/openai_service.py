@@ -231,7 +231,7 @@ class OpenAIService:
             if response_format is not None:
                 kwargs["response_format"] = response_format
         if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
+            kwargs["max_tokens"] = min(max_tokens, 65536)
 
         # 429 限流重试配置
         MAX_RETRIES = 5

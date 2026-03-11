@@ -333,7 +333,12 @@ class AnalysisService:
         # 每块输入最多占可用空间的 45%（留 55% 给输出，因为排版可能略增加长度）
         chunk_token_budget = int(usable * 0.45)
         # 输出 max_tokens 设为输入预算的 1.2 倍（排版可能略增加）
-        output_max_tokens = int(chunk_token_budget * 1.2)
+        # 但不能超过 API 限制的 65536
+        MAX_OUTPUT_TOKENS = 65536
+        output_max_tokens = min(int(chunk_token_budget * 1.2), MAX_OUTPUT_TOKENS)
+        # 反向约束：输入块不能超过输出上限，否则输出会被截断
+        if chunk_token_budget > output_max_tokens:
+            chunk_token_budget = int(output_max_tokens * 0.85)  # 留余量
 
         chunks = self._split_into_chunks(cleaned, chunk_token_budget)
         total_chunks = len(chunks)
@@ -396,10 +401,10 @@ class AnalysisService:
                 collected_all += chunk_result + separator
                 yield f'data: {json.dumps({"status": "streaming", "content": separator}, ensure_ascii=False)}\n\n'
 
-                # 块间停顿 3 秒，避免 API 限流
-                pause_msg = f"第 {chunk_num}/{total_chunks} 段完成，等待 3 秒后继续..."
+                # 块间停顿 5 秒，避免 API 限流
+                pause_msg = f"第 {chunk_num}/{total_chunks} 段完成，等待 5 秒后继续..."
                 yield f'data: {json.dumps({"status": "phase", "phase": "chunk_pause", "message": pause_msg}, ensure_ascii=False)}\n\n'
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
             else:
                 collected_all += chunk_result
 

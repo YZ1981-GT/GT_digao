@@ -150,6 +150,9 @@ async def upload_files(
                         word_result = await report_parser.parse_word(tmp_path)
                         note_tables = report_parser.extract_note_tables(word_result)
                         session.note_tables.extend(note_tables)
+                        # 构建附注层级结构树
+                        note_sections = report_parser.extract_note_sections(word_result, note_tables)
+                        session.note_sections.extend(note_sections)
                     else:
                         logger.info(f"Word 文件 {filename} 分类为 {file_type.value}，跳过附注提取")
 
@@ -181,6 +184,7 @@ async def upload_files(
             "template_type": template_type,
             "statement_items": len(session.statement_items),
             "note_tables": len(session.note_tables),
+            "note_sections": len(session.note_sections),
         }
     finally:
         # 清理临时文件

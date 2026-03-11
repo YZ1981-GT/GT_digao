@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..models.audit_schemas import (
+    NoteSection,
     NoteTable,
     ReportFileType,
     ReportReviewSession,
@@ -337,6 +338,100 @@ class ReportParser(WorkpaperParser):
             ))
 
         return note_tables
+
+    def extract_note_sections(self, word_result, note_tables: List[NoteTable]) -> List[NoteSection]:
+        """从 Word 解析结果中构建附注层级结构树。
+
+        按附注文档的标题层级（一、二、三...  (一)(二)...  1. 2. ...）
+        组织为树形结构，每个节点关联其下的正文段落和附注表格。
+        """
+        paragraphs = word_result.paragraphs
+
+        def detect_heading_level(para_info: Dict) -> Optional[int]:
+            """检测段落的标题级别"""
+            if 'level' in para_info and para_info['level'] is not None:
+                return para_info['level']
+            text = para_info.get('text', '').strip()
+            if not text:
+                return None
+            # 一级：一、二、三、...
+            if re.match(r'^[一二三四五六七八九十]+、', text):
+                return 1
+            # 二级：（一）（二）...
+            if re.match(r'^[（(][一二三四五六七八九十]+[）)]', text):
+                return 2
+            # 三级：1. 2. 或 1、2、
+            if re.match(r'^\d+[、.]', text):
+                return 3
+            # 四级：(1) (2) 或 ① ②
+            if re.match(r'^[（(]\d+[）)]', text) or re.match(r'^[①②③④⑤⑥⑦⑧⑨⑩]', text):
+                return 4
+            return None
+
+        # 将表格通过 table_contexts 关联到段落位置
+        table_context_to_idx: Dict[str, List[int]] = {}
+        for ti, ctx in enumerate(word_result.table_contexts):
+            if ctx:
+                table_context_to_idx.setdefault(ctx, []).append(ti)
+
+        table_after_para: Dict[int, List[int]] = {}
+        used_tables: set = set()
+        for pi, para_info in enumerate(paragraphs):
+            text = para_info.get('text', '').strip()
+            if text in table_context_to_idx:
+                for ti in table_context_to_idx[text]:
+                    if ti not in used_tables:
+                        table_after_para.setdefault(pi, []).append(ti)
+                        used_tables.add(ti)
+
+        # 构建树
+        root_sections: List[NoteSection] = []
+        stack: List[tuple] = []  # [(level, NoteSection)]
+
+        def current_section() -> Optional[NoteSection]:
+            return stack[-1][1] if stack else None
+
+        def add_table_to_current(table_idx: int):
+            if table_idx < len(note_tables):
+                sec = current_section()
+                if sec:
+                    sec.note_table_ids.append(note_tables[table_idx].id)
+
+        for pi, para_info in enumerate(paragraphs):
+            text = para_info.get('text', '').strip()
+            if not text:
+                continue
+
+            level = detect_heading_level(para_info)
+
+            if level is not None:
+                section = NoteSection(
+                    id=str(uuid.uuid4())[:8],
+                    title=text,
+                    level=level,
+                )
+                while stack and stack[-1][0] >= level:
+                    stack.pop()
+                if stack:
+                    stack[-1][1].children.append(section)
+                else:
+                    root_sections.append(section)
+                stack.append((level, section))
+            else:
+                sec = current_section()
+                if sec:
+                    sec.content_paragraphs.append(text)
+
+            if pi in table_after_para:
+                for ti in table_after_para[pi]:
+                    add_table_to_current(ti)
+
+        # 未匹配的表格添加到最后一个节点
+        for ti in range(len(word_result.tables)):
+            if ti not in used_tables:
+                add_table_to_current(ti)
+
+        return root_sections
 
     # ─── Private helpers ───
 
