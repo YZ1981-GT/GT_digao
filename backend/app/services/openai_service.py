@@ -40,6 +40,7 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     'qwen3-max': 262000, 'qwen-max': 32000, 'qwen-plus': 131000,
     'qwen-max-latest': 32000, 'qwen3-max-preview': 262000, 'qwen-plus-latest': 131000,
     'qwen-turbo': 131000, 'qwen3-235b-a22b': 128000, 'qwen-long': 10000000,
+    'qwen3.5-plus': 131000, 'qwen3.5-max': 131000,
     # DeepSeek 官方 API
     'deepseek-v3.2': 64000, 'deepseek-r1': 128000,
     'deepseek-chat': 64000, 'deepseek-reasoner': 128000,
@@ -211,7 +212,8 @@ class OpenAIService:
         self, 
         messages: list, 
         temperature: float = 0.7,
-        response_format: dict = None
+        response_format: dict = None,
+        max_tokens: int = None
     ) -> AsyncGenerator[str, None]:
         """流式聊天完成请求 - 真正的异步实现，含 429 限流自动重试"""
         # DeepSeek R1 / reasoner 等思考模型不支持 response_format 和 temperature 参数
@@ -228,6 +230,8 @@ class OpenAIService:
             kwargs["temperature"] = temperature
             if response_format is not None:
                 kwargs["response_format"] = response_format
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
 
         # 429 限流重试配置
         MAX_RETRIES = 5

@@ -8,7 +8,7 @@ import React from 'react';
 import '../styles/gt-design-tokens.css';
 
 interface WorkModeSelectorProps {
-  onSelectMode: (mode: 'review' | 'generate' | 'analysis') => void;
+  onSelectMode: (mode: 'review' | 'generate' | 'analysis' | 'report_review') => void;
 }
 
 const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => {
@@ -37,7 +37,7 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
           请选择工作模式
         </p>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-5)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-5)' }}>
           {/* 底稿复核卡片 */}
           <div
             onClick={() => onSelectMode('review')}
@@ -160,6 +160,47 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
               </span>
             </div>
           </div>
+
+          {/* 审计报告复核卡片 */}
+          <div
+            onClick={() => onSelectMode('report_review')}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === 'Enter') onSelectMode('report_review'); }}
+            style={{
+              border: '2px solid #e8e8e8',
+              borderRadius: 'var(--gt-radius-md, 8px)',
+              padding: 'var(--gt-space-5)',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              backgroundColor: '#fff',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
+          >
+            <div style={{ fontSize: 28, marginBottom: 8 }}>📊</div>
+            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 8px 0' }}>
+              审计报告复核
+            </h3>
+            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.6, margin: 0 }}>
+              上传审计报告、报表及附注，自动校验金额勾稽、正文规范性、附注完整性等
+            </p>
+            <div style={{ marginTop: 12 }}>
+              <span
+                style={{
+                  display: 'inline-block',
+                  padding: '4px 12px',
+                  borderRadius: 'var(--gt-radius-sm)',
+                  fontSize: 'var(--gt-font-xs)',
+                  fontWeight: 600,
+                  color: '#fff',
+                  backgroundColor: 'var(--gt-primary)',
+                }}
+              >
+                进入复核 →
+              </span>
+            </div>
+          </div>
         </div>
 
         {/* 快速指引 */}
@@ -167,7 +208,7 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
           <h3 style={{ fontSize: 'var(--gt-font-sm)', fontWeight: 600, color: 'var(--gt-text-primary)', marginBottom: 'var(--gt-space-3)' }}>
             快速开始
           </h3>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--gt-space-3)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--gt-space-3)' }}>
             <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
               <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>底稿复核流程</div>
               <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
@@ -193,6 +234,15 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
                 2. 选择分析模式与自定义要求<br />
                 3. 确认自动生成的章节框架<br />
                 4. 逐章节生成内容（标注出处）
+              </div>
+            </div>
+            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>审计报告复核流程</div>
+              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
+                1. 上传报告/报表/附注文件<br />
+                2. 确认科目与附注对照关系<br />
+                3. 配置复核参数并启动<br />
+                4. 逐项确认问题并导出报告
               </div>
             </div>
           </div>

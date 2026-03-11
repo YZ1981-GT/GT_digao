@@ -14,7 +14,7 @@ MAX_CACHE_DOCS = 300
 
 
 class KnowledgeService:
-    """知识库管理服务 - 管理7个审计专用知识库，缓存与文件完全同步"""
+    """知识库管理服务 - 管理8个审计专用知识库，缓存与文件完全同步"""
 
     # 知识库定义（审计底稿复核专用）
     LIBRARIES = {
@@ -25,6 +25,7 @@ class KnowledgeService:
         'audit_procedures': {'name': '审计程序库', 'desc': '各业务循环标准审计程序、穿行测试和实质性测试指引'},
         'industry_guidelines': {'name': '行业指引库', 'desc': '各行业审计特殊考虑事项、行业风险提示和审计关注要点'},
         'prompt_library': {'name': '提示词库', 'desc': '审计复核提示词模板，按会计科目分类管理预置和自定义提示词'},
+        'report_templates': {'name': '报告模板库', 'desc': '审计报告标准模板（国企版/上市版），用于报告正文和附注的模板比对复核'},
     }
 
     def __init__(self):
@@ -250,6 +251,30 @@ class KnowledgeService:
         
         return True
 
+    def update_document_content(self, library_id: str, doc_id: str, content: str) -> bool:
+        """更新文档内容"""
+        if library_id not in self.LIBRARIES:
+            return False
+        doc_id = self._validate_doc_id(doc_id)
+        content_file = os.path.join(self.base_dir, library_id, f"{doc_id}.txt")
+        if not os.path.exists(content_file):
+            return False
+        # 写入文件
+        with open(content_file, 'w', encoding='utf-8') as f:
+            f.write(content)
+        # 更新缓存
+        if library_id not in self._content_cache:
+            self._content_cache[library_id] = {}
+        self._content_cache[library_id][doc_id] = content
+        # 更新索引中的 size
+        docs = self._load_index(library_id)
+        for doc in docs:
+            if doc['id'] == doc_id:
+                doc['size'] = len(content)
+                break
+        self._save_index(library_id, docs)
+        return True
+
     def search_knowledge(self, library_ids: List[str], query: str, max_chars: int = 30000) -> str:
         """从指定知识库中搜索与query相关的内容，返回拼接文本（使用缓存）
         
@@ -271,8 +296,9 @@ class KnowledgeService:
         
         logger.info(f"[知识库搜索] 查询: {query[:50]} 关键词: {keywords[:10]}")
         
-        # 每个文档的最大展示字符数
+        # 每个文档的最大展示字符数（报告模板库不截断，保留完整内容）
         per_doc_max = 3000
+        no_truncate_libs = {'report_templates'}
         
         for lib_id in library_ids:
             if lib_id not in self.LIBRARIES:
@@ -287,8 +313,9 @@ class KnowledgeService:
                     continue
                 
                 if not keywords:
-                    # 无关键词时返回文档前部分
-                    preview = text[:per_doc_max] if len(text) > per_doc_max else text
+                    # 无关键词时返回文档前部分（报告模板库不截断）
+                    doc_max = None if lib_id in no_truncate_libs else per_doc_max
+                    preview = text if doc_max is None else (text[:doc_max] if len(text) > doc_max else text)
                     all_content.append(f"【{lib_name} - {doc['filename']}】\n{preview}")
                     continue
                 
@@ -297,28 +324,31 @@ class KnowledgeService:
                 match_count = sum(1 for kw in keywords if kw.lower() in text_lower)
                 
                 if match_count > 0:
-                    # 有匹配，提取相关段落
-                    paragraphs = text.split('\n')
-                    relevant = []
-                    total_len = 0
-                    for p in paragraphs:
-                        p = p.strip()
-                        if not p:
-                            continue
-                        # 段落中包含任意关键词
-                        if any(kw.lower() in p.lower() for kw in keywords):
-                            relevant.append(p)
-                            total_len += len(p)
-                            if total_len >= per_doc_max:
-                                break
-                    
-                    if relevant:
-                        content = '\n'.join(relevant)
-                        all_content.append(f"【{lib_name} - {doc['filename']}】(匹配{match_count}个关键词)\n{content}")
+                    # 有匹配，提取相关段落（报告模板库不截断，返回全文）
+                    if lib_id in no_truncate_libs:
+                        all_content.append(f"【{lib_name} - {doc['filename']}】(匹配{match_count}个关键词，完整内容)\n{text}")
                     else:
-                        # 文档整体包含关键词但没有单独段落匹配（关键词可能跨段落），展示文档摘要
-                        preview = text[:per_doc_max] if len(text) > per_doc_max else text
-                        all_content.append(f"【{lib_name} - {doc['filename']}】(匹配{match_count}个关键词，展示摘要)\n{preview}")
+                        paragraphs = text.split('\n')
+                        relevant = []
+                        total_len = 0
+                        for p in paragraphs:
+                            p = p.strip()
+                            if not p:
+                                continue
+                            # 段落中包含任意关键词
+                            if any(kw.lower() in p.lower() for kw in keywords):
+                                relevant.append(p)
+                                total_len += len(p)
+                                if total_len >= per_doc_max:
+                                    break
+                        
+                        if relevant:
+                            content = '\n'.join(relevant)
+                            all_content.append(f"【{lib_name} - {doc['filename']}】(匹配{match_count}个关键词)\n{content}")
+                        else:
+                            # 文档整体包含关键词但没有单独段落匹配（关键词可能跨段落），展示文档摘要
+                            preview = text[:per_doc_max] if len(text) > per_doc_max else text
+                            all_content.append(f"【{lib_name} - {doc['filename']}】(匹配{match_count}个关键词，展示摘要)\n{preview}")
                     
                     logger.info(f"[知识库搜索] 匹配文档: {doc['filename']} ({match_count}个关键词, {len(relevant)}段)")
 
@@ -330,7 +360,7 @@ class KnowledgeService:
         return combined
 
     def get_all_knowledge_summary(self, max_chars_per_lib: int = 3000) -> str:
-        """获取所有知识库的内容摘要，供AI参考"""
+        """获取所有知识库的内容摘要，供AI参考（报告模板库不截断）"""
         summaries = []
         for lib_id, info in self.LIBRARIES.items():
             docs = self._load_index(lib_id)
@@ -338,17 +368,23 @@ class KnowledgeService:
                 continue
             lib_content = []
             total_chars = 0
+            is_template_lib = lib_id == 'report_templates'
             for doc in docs:
                 # 使用缓存读取，与其他方法保持一致
                 text = self._get_cached_content(lib_id, doc['id'])
                 if text:
-                    remaining = max_chars_per_lib - total_chars
-                    if remaining <= 0:
-                        break
-                    if len(text) > remaining:
-                        text = text[:remaining] + '...'
-                    lib_content.append(f"[{doc['filename']}]\n{text}")
-                    total_chars += len(text)
+                    if is_template_lib:
+                        # 报告模板库不截断
+                        lib_content.append(f"[{doc['filename']}]\n{text}")
+                        total_chars += len(text)
+                    else:
+                        remaining = max_chars_per_lib - total_chars
+                        if remaining <= 0:
+                            break
+                        if len(text) > remaining:
+                            text = text[:remaining] + '...'
+                        lib_content.append(f"[{doc['filename']}]\n{text}")
+                        total_chars += len(text)
             if lib_content:
                 summaries.append(f"=== {info['name']} ===\n" + '\n\n'.join(lib_content))
         return '\n\n'.join(summaries)

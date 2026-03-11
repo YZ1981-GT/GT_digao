@@ -436,8 +436,44 @@ class FileService:
             raise Exception(f"PDF文件读取失败: {str(e)}")
     
     @staticmethod
+    async def _convert_doc_to_docx(file_path: str) -> str:
+        """使用 win32com (MS Word COM) 将 .doc 转换为 .docx，返回新文件路径"""
+        try:
+            import win32com.client
+            import pythoncom
+            pythoncom.CoInitialize()
+            try:
+                word = win32com.client.Dispatch("Word.Application")
+                word.Visible = False
+                word.DisplayAlerts = False
+                abs_path = os.path.abspath(file_path)
+                docx_path = abs_path + "x"  # .doc -> .docx
+                doc = word.Documents.Open(abs_path)
+                # SaveAs2 format 16 = wdFormatXMLDocument (.docx)
+                doc.SaveAs2(docx_path, FileFormat=16)
+                doc.Close()
+                word.Quit()
+                return docx_path
+            finally:
+                pythoncom.CoUninitialize()
+        except Exception as e:
+            raise Exception(f".doc 文件转换失败: {str(e)}")
+
+    @staticmethod
     async def extract_text_from_docx(file_path: str) -> str:
-        """从Word文档提取文本，支持表格内容和图片"""
+        """从Word文档提取文本，支持表格内容和图片。自动处理 .doc 格式"""
+        # 如果是 .doc 格式，先转换为 .docx
+        if file_path.lower().endswith('.doc') and not file_path.lower().endswith('.docx'):
+            try:
+                docx_path = await FileService._convert_doc_to_docx(file_path)
+                try:
+                    result = await FileService.extract_text_from_docx(docx_path)
+                    return result
+                finally:
+                    FileService._safe_file_cleanup(docx_path)
+            except Exception as e:
+                raise Exception(f"Word文档(.doc)读取失败: {str(e)}")
+
         if HAS_ADVANCED_LIBS:
             return await FileService._extract_docx_with_docx2python(file_path)
         else:
@@ -446,72 +482,99 @@ class FileService:
     
     @staticmethod
     async def _extract_docx_with_docx2python(file_path: str) -> str:
-        """使用docx2python提取Word文档内容和图片（确保及时释放文件句柄）"""
+        """使用docx2python提取Word文档内容和图片（确保及时释放文件句柄）
+
+        docx2python 返回四层嵌套列表: document[section][table][row][cell]
+        - 普通段落被包装为 1x1 表格: [[['段落文本']]]
+        - 真正的表格有多行多列: [['c1','c2'],['c3','c4']]
+        - Word 中的单列表格（常用于排版）: [['段落1'], ['段落2']] — 应还原为段落
+        需要递归展开到最内层字符串才能完整提取。
+        """
         try:
             extracted_text = []
-            image_references = []  # 存储图片引用映射
+            image_references = []
             global_img_counter = 1
 
-            # 获取Word文档的所有图片信息
             all_images = FileService.extract_images_from_docx(file_path)
 
-            # 使用上下文管理器确保文件及时关闭，避免Windows上的锁定
+            def _flatten_cell(cell) -> str:
+                """递归展开 cell 到纯文本。"""
+                if isinstance(cell, str):
+                    return cell.strip()
+                if isinstance(cell, list):
+                    parts = [_flatten_cell(c) for c in cell]
+                    return '\n'.join(p for p in parts if p)
+                return str(cell).strip()
+
+            def _max_cols(table) -> int:
+                """计算表格的最大列数。"""
+                max_c = 0
+                for row in table:
+                    if isinstance(row, list):
+                        # row 可能是 [cell, cell, ...] 或 [[subcell]]
+                        # 需要判断 row 的元素是否为 cell（str/list of str）
+                        max_c = max(max_c, len(row))
+                return max_c
+
             with docx2python(file_path) as content:
-                # 处理文档内容
                 if hasattr(content, 'document'):
                     for section in content.document:
-                        for element in section:
-                            if isinstance(element, list):
-                                # 这可能是表格
+                        for table in section:
+                            if not isinstance(table, list):
+                                text = str(table).strip()
+                                if text:
+                                    extracted_text.append(text)
+                                continue
+
+                            # 计算实际列数
+                            cols = _max_cols(table)
+
+                            if cols >= 2:
+                                # 多列 → 真正的表格
                                 extracted_text.append("\n[表格内容]")
-                                for row in element:
+                                for row in table:
                                     if isinstance(row, list):
-                                        row_text = " | ".join([str(cell).strip() for cell in row if cell])
-                                        if row_text:
+                                        cells = [_flatten_cell(c) for c in row]
+                                        row_text = " | ".join(cells)
+                                        if row_text.replace('|', '').strip():
                                             extracted_text.append(row_text)
                                     else:
-                                        extracted_text.append(str(row))
+                                        text = _flatten_cell(row)
+                                        if text:
+                                            extracted_text.append(text)
                                 extracted_text.append("[表格结束]\n")
                             else:
-                                # 普通文本，检查是否包含图片标记
-                                text = str(element).strip()
-                                if text:
-                                    # 检查文本中是否有图片标记
-                                    img_pattern = r'----.*?(?:image|img|media).*?----'
-                                    img_matches = list(re.finditer(img_pattern, text, re.IGNORECASE))
-
-                                    if img_matches and all_images:
-                                        processed_text = text
-
-                                        for match in img_matches:
-                                            if global_img_counter <= len(all_images):
-                                                # 获取对应的图片数据
-                                                img_data, ext, img_index = all_images[global_img_counter - 1]
-                                                filename = f"docx_img{global_img_counter}.{ext}"
-
-                                                # 上传图片
-                                                image_url = await FileService.upload_image_to_server(img_data, filename)
-
-                                                if image_url:
-                                                    # 替换图片标记
-                                                    old_mark = match.group()
-                                                    new_mark = f"[图片{global_img_counter}]"
-                                                    processed_text = processed_text.replace(old_mark, new_mark, 1)
-
-                                                    # 记录图片引用
-                                                    image_references.append(f"[图片{global_img_counter}]: {image_url}")
-                                                    global_img_counter += 1
-
-                                        extracted_text.append(processed_text)
-                                    else:
+                                # 单列或 1x1 → 还原为段落文本
+                                for row in table:
+                                    text = _flatten_cell(row)
+                                    if text:
                                         extracted_text.append(text)
 
-            # 在文档末尾添加图片引用映射
-            if image_references:
-                extracted_text.append(f"\n\n--- 图片引用 ---")
-                extracted_text.extend(image_references)
+                # 处理图片标记
+                img_pattern = r'----.*?(?:image|img|media).*?----'
+                final_lines = []
+                for line in extracted_text:
+                    img_matches = list(re.finditer(img_pattern, line, re.IGNORECASE))
+                    if img_matches and all_images:
+                        processed = line
+                        for match in img_matches:
+                            if global_img_counter <= len(all_images):
+                                img_data, ext, img_index = all_images[global_img_counter - 1]
+                                filename = f"docx_img{global_img_counter}.{ext}"
+                                image_url = await FileService.upload_image_to_server(img_data, filename)
+                                if image_url:
+                                    processed = processed.replace(match.group(), f"[图片{global_img_counter}]", 1)
+                                    image_references.append(f"[图片{global_img_counter}]: {image_url}")
+                                    global_img_counter += 1
+                        final_lines.append(processed)
+                    else:
+                        final_lines.append(line)
 
-            result = "\n".join(extracted_text).strip()
+            if image_references:
+                final_lines.append(f"\n\n--- 图片引用 ---")
+                final_lines.extend(image_references)
+
+            result = "\n".join(final_lines).strip()
             gc.collect()
             return result
         except Exception as e:
@@ -602,6 +665,40 @@ class FileService:
             gc.collect()
             raise Exception(f"Word文档读取失败: {str(e)}")
     
+    @staticmethod
+    async def extract_text_from_excel(file_path: str) -> str:
+        """从 Excel 文件提取文本内容（逐 Sheet 逐行拼接）。"""
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+            extracted: list[str] = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                extracted.append(f"\n=== Sheet: {sheet_name} ===")
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c).strip() if c is not None else "" for c in row]
+                    line = " | ".join(cells)
+                    if line.replace("|", "").strip():
+                        extracted.append(line)
+            wb.close()
+            return "\n".join(extracted).strip()
+        except Exception as e:
+            # 尝试 xlrd（.xls 格式）
+            try:
+                import xlrd
+                wb = xlrd.open_workbook(file_path)
+                extracted = []
+                for sheet in wb.sheets():
+                    extracted.append(f"\n=== Sheet: {sheet.name} ===")
+                    for rx in range(sheet.nrows):
+                        cells = [str(sheet.cell_value(rx, cx)).strip() for cx in range(sheet.ncols)]
+                        line = " | ".join(cells)
+                        if line.replace("|", "").strip():
+                            extracted.append(line)
+                return "\n".join(extracted).strip()
+            except Exception:
+                raise Exception(f"Excel 文件读取失败: {str(e)}")
+
     @staticmethod
     async def process_uploaded_file(file: UploadFile) -> str:
         """处理上传的文件并提取文本内容"""

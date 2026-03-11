@@ -67,6 +67,7 @@ class WorkMode(str, Enum):
     """工作模式"""
     REVIEW = "review"
     GENERATE = "generate"
+    REPORT_REVIEW = "report_review"
 
 
 class PromptSource(str, Enum):
@@ -107,6 +108,7 @@ class WordParseResult(BaseModel):
     tables: List[List[List[str]]] = Field(default_factory=list, description="表格数据")
     headings: List[Dict[str, Any]] = Field(default_factory=list, description="标题层级")
     comments: List[Dict[str, str]] = Field(default_factory=list, description="批注内容")
+    table_contexts: List[str] = Field(default_factory=list, description="每个表格前最近的段落文本（按文档顺序）")
 
 
 class PdfParseResult(BaseModel):
@@ -499,3 +501,289 @@ class ProjectReviewSummary(BaseModel):
     high_risk_count: int = Field(0, description="高风险问题数")
     medium_risk_count: int = Field(0, description="中风险问题数")
     low_risk_count: int = Field(0, description="低风险问题数")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 审计报告复核相关模型（Audit Report Review）
+# ═══════════════════════════════════════════════════════════════════
+
+# ─── 审计报告复核枚举 ───
+
+class ReportFileType(str, Enum):
+    """审计报告文件类型（Req 1.5）"""
+    AUDIT_REPORT_BODY = "audit_report_body"
+    FINANCIAL_STATEMENT = "financial_statement"
+    NOTES_TO_STATEMENTS = "notes_to_statements"
+
+
+class StatementType(str, Enum):
+    """报表类型（Req 2.5）"""
+    BALANCE_SHEET = "balance_sheet"
+    INCOME_STATEMENT = "income_statement"
+    CASH_FLOW = "cash_flow"
+    EQUITY_CHANGE = "equity_change"
+
+
+class ReportReviewFindingCategory(str, Enum):
+    """复核发现分类（Req 12.2）"""
+    AMOUNT_INCONSISTENCY = "amount_inconsistency"
+    RECONCILIATION_ERROR = "reconciliation_error"
+    CHANGE_ABNORMAL = "change_abnormal"
+    NOTE_MISSING = "note_missing"
+    REPORT_BODY_COMPLIANCE = "report_body_compliance"
+    NOTE_CONTENT = "note_content"
+    TEXT_QUALITY = "text_quality"
+
+
+class FindingConfirmationStatus(str, Enum):
+    """发现确认状态（Req 11.1-11.6）"""
+    PENDING_CONFIRMATION = "pending_confirmation"
+    CONFIRMED = "confirmed"
+    DISMISSED = "dismissed"
+
+
+class ReportTemplateType(str, Enum):
+    """审计报告模板类型（Req 1.6, Req 9）"""
+    SOE = "soe"
+    LISTED = "listed"
+
+
+class TemplateCategory(str, Enum):
+    """模板分类（Req 9.1）"""
+    REPORT_BODY = "report_body"
+    NOTES = "notes"
+
+
+# ─── 报表科目与附注数据模型 ───
+
+class StatementItem(BaseModel):
+    """报表科目条目（Req 2.1, 2.2）"""
+    id: str = Field(..., description="科目ID（UUID）")
+    account_name: str = Field(..., description="科目名称")
+    statement_type: StatementType = Field(..., description="所属报表类型")
+    sheet_name: str = Field(..., description="来源 Sheet 名称")
+    opening_balance: Optional[float] = Field(None, description="期初余额/上期金额")
+    closing_balance: Optional[float] = Field(None, description="期末余额/本期金额")
+    parent_id: Optional[str] = Field(None, description="父科目ID（其中项时指向主科目）")
+    is_sub_item: bool = Field(False, description="是否为其中项明细")
+    row_index: int = Field(..., description="在报表中的行号")
+    parse_warnings: List[str] = Field(default_factory=list, description="解析警告（Req 2.9）")
+
+
+class NoteTable(BaseModel):
+    """附注表格（Req 2.3）"""
+    id: str = Field(..., description="表格ID（UUID）")
+    account_name: str = Field(..., description="对应科目名称")
+    section_title: str = Field(..., description="附注章节标题")
+    headers: List[str] = Field(default_factory=list, description="表头行")
+    rows: List[List[Any]] = Field(default_factory=list, description="数据行")
+    source_location: str = Field("", description="在源文档中的位置描述")
+
+
+class ReportSheetData(BaseModel):
+    """审计报告 Excel Sheet 解析数据（Req 1.1, 1.2）"""
+    sheet_name: str = Field(..., description="Sheet 名称")
+    statement_type: StatementType = Field(..., description="自动识别的报表类型")
+    row_count: int = Field(0, description="数据行数")
+    headers: List[str] = Field(default_factory=list, description="表头行")
+    raw_data: List[List[Any]] = Field(default_factory=list, description="原始数据行")
+
+
+# ─── 表格结构识别模型 ───
+
+class TableStructureRow(BaseModel):
+    """表格行的语义标注（由 LLM 识别）"""
+    row_index: int = Field(..., description="行索引")
+    role: str = Field(..., description="行角色：data/total/subtotal/sub_item/header")
+    parent_row_index: Optional[int] = Field(None, description="父行索引（其中项时指向所属主项行）")
+    indent_level: int = Field(0, description="缩进层级")
+    label: str = Field("", description="行标签/科目名称")
+
+
+class TableStructureColumn(BaseModel):
+    """表格列的语义标注（由 LLM 识别）"""
+    col_index: int = Field(..., description="列索引")
+    semantic: str = Field(..., description="列语义：opening_balance/closing_balance/current_increase/current_decrease/prior_period/current_period/total/label/other")
+    period: Optional[str] = Field(None, description="所属期间")
+
+
+class TableStructure(BaseModel):
+    """附注表格语义结构（由 Table_Structure_Analyzer LLM 识别，Req 3, Req 4）"""
+    note_table_id: str = Field(..., description="对应的 NoteTable ID")
+    rows: List[TableStructureRow] = Field(default_factory=list, description="各行语义标注")
+    columns: List[TableStructureColumn] = Field(default_factory=list, description="各列语义标注")
+    has_balance_formula: bool = Field(False, description="是否含期初+增加-减少=期末结构")
+    total_row_indices: List[int] = Field(default_factory=list, description="合计行索引")
+    subtotal_row_indices: List[int] = Field(default_factory=list, description="小计行索引")
+    closing_balance_cell: Optional[str] = Field(None, description="期末余额合计单元格位置")
+    opening_balance_cell: Optional[str] = Field(None, description="期初余额合计单元格位置")
+    structure_confidence: str = Field("high", description="结构识别置信度：high/low")
+    raw_llm_response: Optional[str] = Field(None, description="LLM 原始响应（调试用）")
+
+
+# ─── 匹配映射模型 ───
+
+class MatchingEntry(BaseModel):
+    """科目匹配映射条目（Req 2.4）"""
+    statement_item_id: str = Field(..., description="报表科目ID")
+    note_table_ids: List[str] = Field(default_factory=list, description="匹配的附注表格ID列表")
+    match_confidence: float = Field(0.0, description="匹配置信度 0-1")
+    is_manual: bool = Field(False, description="是否为用户手动调整")
+
+
+class MatchingMap(BaseModel):
+    """科目匹配映射表（Req 2.4, 2.8）"""
+    entries: List[MatchingEntry] = Field(default_factory=list, description="匹配条目列表")
+    unmatched_items: List[str] = Field(default_factory=list, description="未匹配的科目ID（标记附注缺失）")
+    unmatched_notes: List[str] = Field(default_factory=list, description="未匹配的附注表格ID")
+
+
+# ─── 复核会话与结果模型 ───
+
+class ReportReviewSession(BaseModel):
+    """审计报告复核会话（Req 1.3, 1.6）"""
+    id: str = Field(..., description="会话ID（UUID）")
+    template_type: ReportTemplateType = Field(..., description="模板类型：soe/listed")
+    file_ids: List[str] = Field(default_factory=list, description="上传文件ID列表")
+    file_classifications: Dict[str, ReportFileType] = Field(default_factory=dict, description="文件分类映射")
+    sheet_data: Dict[str, List[ReportSheetData]] = Field(default_factory=dict, description="Excel Sheet 解析数据 {file_id: [ReportSheetData]}")
+    statement_items: List[StatementItem] = Field(default_factory=list)
+    note_tables: List[NoteTable] = Field(default_factory=list)
+    table_structures: Dict[str, TableStructure] = Field(default_factory=dict, description="表格结构识别结果 {note_table_id: TableStructure}")
+    matching_map: Optional[MatchingMap] = Field(None)
+    finding_conversations: Dict[str, 'FindingConversation'] = Field(default_factory=dict, description="问题确认对话")
+    status: str = Field("created", description="会话状态：created/parsed/matched/analyzing_structure/reviewing/completed")
+    created_at: str = Field(..., description="创建时间ISO格式")
+
+
+class ReportReviewFinding(BaseModel):
+    """审计报告复核发现（Req 3.4, 11.1）"""
+    id: str = Field(..., description="发现ID（UUID）")
+    category: ReportReviewFindingCategory = Field(..., description="发现分类")
+    risk_level: RiskLevel = Field(..., description="风险等级")
+    account_name: str = Field(..., description="相关科目名称")
+    statement_amount: Optional[float] = Field(None, description="报表金额")
+    note_amount: Optional[float] = Field(None, description="附注金额")
+    difference: Optional[float] = Field(None, description="差异金额")
+    location: str = Field(..., description="问题定位")
+    description: str = Field(..., description="问题描述")
+    reference: str = Field("", description="参考依据")
+    template_reference: Optional[str] = Field(None, description="模板参考文本")
+    suggestion: str = Field("", description="修改建议")
+    analysis_reasoning: Optional[str] = Field(None, description="分析推理过程")
+    confirmation_status: FindingConfirmationStatus = Field(
+        FindingConfirmationStatus.PENDING_CONFIRMATION,
+        description="确认状态"
+    )
+    status: FindingStatus = Field(FindingStatus.OPEN, description="处理状态")
+
+
+class ReportReviewConfig(BaseModel):
+    """复核配置请求（Req 5.2, Req 10）"""
+    session_id: str = Field(..., description="会话ID")
+    template_type: ReportTemplateType = Field(..., description="模板类型")
+    prompt_id: Optional[str] = Field(None, description="选择的提示词ID")
+    custom_prompt: Optional[str] = Field(None, description="自定义复核要求")
+    change_threshold: float = Field(0.3, description="变动阈值，默认30%")
+
+
+class ReportReviewResult(BaseModel):
+    """审计报告复核结果（Req 12.1, 12.2）"""
+    id: str = Field(..., description="结果ID（UUID）")
+    session_id: str = Field(..., description="会话ID")
+    findings: List[ReportReviewFinding] = Field(default_factory=list, description="已确认的 Finding 列表")
+    category_summary: Dict[str, int] = Field(default_factory=dict, description="按分类统计已确认问题")
+    risk_summary: Dict[str, int] = Field(default_factory=dict, description="按风险等级统计已确认问题")
+    reconciliation_summary: Dict[str, int] = Field(default_factory=dict, description="匹配/不匹配/未检查统计")
+    confirmation_summary: Dict[str, int] = Field(default_factory=dict, description="确认统计")
+    conclusion: str = Field(..., description="复核结论")
+    reviewed_at: str = Field(..., description="复核时间")
+
+
+class SourcePreviewData(BaseModel):
+    """源文档预览数据（Req 2.7）"""
+    file_id: str = Field(..., description="文件ID")
+    file_type: str = Field(..., description="文件类型：excel/word")
+    highlight_range: Optional[str] = Field(None, description="高亮区域")
+    content_html: str = Field("", description="渲染后的HTML预览内容")
+
+
+class ChangeAnalysis(BaseModel):
+    """科目变动分析结果（Req 5.1, 5.2）"""
+    statement_item_id: str = Field(..., description="报表科目ID")
+    account_name: str = Field(..., description="科目名称")
+    opening_balance: Optional[float] = Field(None, description="期初余额")
+    closing_balance: Optional[float] = Field(None, description="期末余额")
+    change_amount: Optional[float] = Field(None, description="变动金额")
+    change_percentage: Optional[float] = Field(None, description="变动百分比")
+    exceeds_threshold: bool = Field(False, description="是否超过阈值")
+
+
+class MatchingAnalysis(BaseModel):
+    """科目与附注表格匹配分析结果（Req 3.1）"""
+    statement_item_id: str = Field(..., description="报表科目ID")
+    note_table_id: str = Field(..., description="附注表格ID")
+    matched_cell_closing: Optional[str] = Field(None, description="附注中对应期末余额的单元格位置")
+    matched_cell_opening: Optional[str] = Field(None, description="附注中对应期初余额的单元格位置")
+    mapping_description: str = Field("", description="映射关系描述")
+    confidence: float = Field(0.0, description="匹配置信度 0-1")
+
+
+# ─── 模板相关数据模型 ───
+
+class ReportTemplateSection(BaseModel):
+    """审计报告模板章节（Req 9.2）"""
+    path: str = Field(..., description="章节路径，如 '会计政策/收入确认'")
+    level: int = Field(..., description="层级：1=H1, 2=H2, 3=H3")
+    title: str = Field(..., description="章节标题")
+    content: str = Field("", description="章节 Markdown 内容")
+
+
+class ReportTemplateDocument(BaseModel):
+    """审计报告模板文档（Req 9.1, 9.2）"""
+    template_type: ReportTemplateType = Field(..., description="模板类型")
+    template_category: TemplateCategory = Field(..., description="模板分类")
+    full_content: str = Field(..., description="完整 Markdown 内容")
+    sections: List[ReportTemplateSection] = Field(default_factory=list, description="按层级解析的章节列表")
+    version: str = Field("", description="版本标识")
+    updated_at: str = Field("", description="最后更新时间")
+
+
+class NarrativeSection(BaseModel):
+    """附注叙述性章节（Req 7.1）"""
+    id: str = Field(..., description="章节ID")
+    section_type: str = Field(..., description="章节类型：basic_info/accounting_policy/tax/related_party/other")
+    title: str = Field(..., description="章节标题")
+    content: str = Field(..., description="章节文本内容")
+    source_location: str = Field("", description="在源文档中的位置")
+
+
+class TemplateTocEntry(BaseModel):
+    """模板目录条目（Req 9.7, 9.8）"""
+    path: str = Field(..., description="章节路径")
+    level: int = Field(..., description="层级：1=H1, 2=H2, 3=H3")
+    title: str = Field(..., description="章节标题")
+    has_children: bool = Field(False, description="是否有子章节")
+
+
+# ─── 问题确认对话模型 ───
+
+class FindingConversationMessage(BaseModel):
+    """问题确认对话消息（Req 11.4, 11.6）"""
+    id: str = Field(..., description="消息ID（UUID）")
+    role: str = Field(..., description="消息角色：user/assistant")
+    content: str = Field(..., description="消息内容")
+    message_type: str = Field("chat", description="消息类型：chat/trace/edit")
+    trace_type: Optional[str] = Field(None, description="溯源类型：cross_reference/template_compare/data_drill_down")
+    created_at: str = Field(..., description="创建时间ISO格式")
+
+
+class FindingConversation(BaseModel):
+    """问题确认对话记录（Req 11.6）"""
+    finding_id: str = Field(..., description="关联的 Finding ID")
+    messages: List[FindingConversationMessage] = Field(default_factory=list, description="对话消息列表")
+    edit_history: List[Dict[str, Any]] = Field(default_factory=list, description="编辑历史")
+
+
+# 解决 ReportReviewSession 中的前向引用
+ReportReviewSession.model_rebuild()

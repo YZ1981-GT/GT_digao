@@ -264,6 +264,10 @@ export const knowledgeApi = {
   deleteDocument: (libraryId: string, docId: string) =>
     api.delete(`/api/knowledge/documents/${libraryId}/${docId}`),
 
+  // 更新文档内容
+  updateDocument: (libraryId: string, docId: string, content: string) =>
+    api.put(`/api/knowledge/documents/${libraryId}/${docId}`, { content }),
+
   // 搜索知识库
   searchKnowledge: (libraryIds: string[], query: string) =>
     api.post('/api/knowledge/search', { library_ids: libraryIds, query }),
@@ -271,6 +275,31 @@ export const knowledgeApi = {
   // 预览文档内容
   previewDocument: (libraryId: string, docId: string) =>
     api.get(`/api/knowledge/preview/${libraryId}/${docId}`),
+
+  // 上传报告模板文件夹（自动识别国企/上市）
+  uploadReportTemplateFolder: (files: File[], folderName: string) => {
+    const formData = new FormData();
+    for (const file of files) {
+      formData.append('files', file);
+    }
+    formData.append('folder_name', folderName);
+    return api.post('/api/knowledge/upload-folder/report_templates', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    });
+  },
+
+  // 本地脚本格式化文档为 Markdown
+  localFormatDocument: (libraryId: string, docId: string) =>
+    api.post(`/api/knowledge/local-format/${libraryId}/${docId}`),
+
+  // AI 精细化格式化文档为 Markdown（SSE 流式）
+  aiFormatDocument: (libraryId: string, docId: string, customInstruction?: string) =>
+    fetch(`${API_BASE_URL}/api/knowledge/ai-format/${libraryId}/${docId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ custom_instruction: customInstruction || null }),
+    }),
 };
 
 // 搜索相关API

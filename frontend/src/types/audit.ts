@@ -42,7 +42,7 @@ export type UserRole = 'partner' | 'manager' | 'auditor' | 'qc';
 export type TemplateType = 'audit_plan' | 'audit_summary' | 'due_diligence' | 'audit_report' | 'custom';
 
 /** 工作模式 */
-export type WorkMode = 'review' | 'generate';
+export type WorkMode = 'review' | 'generate' | 'report_review';
 
 /** 提示词来源 */
 export type PromptSource = 'preset' | 'user_modified' | 'user_replaced' | 'user_appended';
@@ -502,4 +502,283 @@ export const DIMENSION_LABELS: Record<ReviewDimension, string> = {
   accounting_compliance: '会计准则合规性',
   audit_procedure: '审计程序完整性',
   evidence_sufficiency: '审计证据充分性',
+};
+
+
+// ═══════════════════════════════════════════════════════════════════
+// 审计报告复核相关类型（Audit Report Review）
+// ═══════════════════════════════════════════════════════════════════
+
+/** 审计报告文件类型（Req 1.5） */
+export type ReportFileType = 'audit_report_body' | 'financial_statement' | 'notes_to_statements';
+
+/** 报表类型（Req 2.5） */
+export type StatementType = 'balance_sheet' | 'income_statement' | 'cash_flow' | 'equity_change';
+
+/** 复核发现分类（Req 12.2） */
+export type ReportReviewFindingCategory =
+  | 'amount_inconsistency'
+  | 'reconciliation_error'
+  | 'change_abnormal'
+  | 'note_missing'
+  | 'report_body_compliance'
+  | 'note_content'
+  | 'text_quality';
+
+/** 发现确认状态（Req 11.1-11.6） */
+export type FindingConfirmationStatus = 'pending_confirmation' | 'confirmed' | 'dismissed';
+
+/** 审计报告模板类型（Req 1.6, Req 9） */
+export type ReportTemplateType = 'soe' | 'listed';
+
+/** 模板分类（Req 9.1） */
+export type ReportTemplateCategory = 'report_body' | 'notes';
+
+// ─── 报表科目与附注 ───
+
+/** 报表科目条目（Req 2.1, 2.2） */
+export interface StatementItem {
+  id: string;
+  account_name: string;
+  statement_type: StatementType;
+  sheet_name: string;
+  opening_balance?: number;
+  closing_balance?: number;
+  parent_id?: string;
+  is_sub_item: boolean;
+  row_index: number;
+  parse_warnings: string[];
+}
+
+/** 附注表格（Req 2.3） */
+export interface NoteTable {
+  id: string;
+  account_name: string;
+  section_title: string;
+  headers: string[];
+  rows: any[][];
+  source_location: string;
+}
+
+/** 审计报告 Excel Sheet 解析数据（Req 1.1, 1.2） */
+export interface ReportSheetData {
+  sheet_name: string;
+  statement_type: StatementType;
+  row_count: number;
+  headers: string[];
+}
+
+// ─── 表格结构识别 ───
+
+export interface TableStructureRow {
+  row_index: number;
+  role: 'data' | 'total' | 'subtotal' | 'sub_item' | 'header';
+  parent_row_index?: number;
+  indent_level: number;
+  label: string;
+}
+
+export interface TableStructureColumn {
+  col_index: number;
+  semantic: string;
+  period?: string;
+}
+
+export interface TableStructure {
+  note_table_id: string;
+  rows: TableStructureRow[];
+  columns: TableStructureColumn[];
+  has_balance_formula: boolean;
+  total_row_indices: number[];
+  subtotal_row_indices: number[];
+  closing_balance_cell?: string;
+  opening_balance_cell?: string;
+  structure_confidence: 'high' | 'low';
+}
+
+// ─── 匹配映射 ───
+
+export interface MatchingEntry {
+  statement_item_id: string;
+  note_table_ids: string[];
+  match_confidence: number;
+  is_manual: boolean;
+}
+
+export interface MatchingMap {
+  entries: MatchingEntry[];
+  unmatched_items: string[];
+  unmatched_notes: string[];
+}
+
+// ─── 复核会话与结果 ───
+
+export interface ReportReviewSession {
+  id: string;
+  template_type: ReportTemplateType;
+  file_ids: string[];
+  file_classifications: Record<string, ReportFileType>;
+  sheet_data: Record<string, ReportSheetData[]>;
+  statement_items: StatementItem[];
+  note_tables: NoteTable[];
+  table_structures: Record<string, TableStructure>;
+  matching_map?: MatchingMap;
+  finding_conversations: Record<string, FindingConversation>;
+  status: 'created' | 'parsed' | 'matched' | 'analyzing_structure' | 'reviewing' | 'completed';
+  created_at: string;
+}
+
+export interface ReportReviewFinding {
+  id: string;
+  category: ReportReviewFindingCategory;
+  risk_level: RiskLevel;
+  account_name: string;
+  statement_amount?: number;
+  note_amount?: number;
+  difference?: number;
+  location: string;
+  description: string;
+  reference: string;
+  template_reference?: string;
+  suggestion: string;
+  analysis_reasoning?: string;
+  confirmation_status: FindingConfirmationStatus;
+  status: FindingStatus;
+}
+
+export interface ReportReviewConfig {
+  session_id: string;
+  template_type: ReportTemplateType;
+  prompt_id?: string;
+  custom_prompt?: string;
+  change_threshold: number;
+}
+
+export interface ReportReviewResult {
+  id: string;
+  session_id: string;
+  findings: ReportReviewFinding[];
+  category_summary: Record<ReportReviewFindingCategory, number>;
+  risk_summary: { high: number; medium: number; low: number };
+  reconciliation_summary: { matched: number; mismatched: number; unchecked: number };
+  confirmation_summary: { pending: number; confirmed: number; dismissed: number };
+  conclusion: string;
+  reviewed_at: string;
+}
+
+export interface SourcePreviewData {
+  file_id: string;
+  file_type: 'excel' | 'word';
+  highlight_range?: string;
+  content_html: string;
+}
+
+export interface ChangeAnalysis {
+  statement_item_id: string;
+  account_name: string;
+  opening_balance?: number;
+  closing_balance?: number;
+  change_amount?: number;
+  change_percentage?: number;
+  exceeds_threshold: boolean;
+}
+
+export interface MatchingAnalysis {
+  statement_item_id: string;
+  note_table_id: string;
+  matched_cell_closing?: string;
+  matched_cell_opening?: string;
+  mapping_description: string;
+  confidence: number;
+}
+
+// ─── 模板相关 ───
+
+export interface ReportTemplateSection {
+  path: string;
+  level: number;
+  title: string;
+  content: string;
+}
+
+export interface ReportTemplateDocument {
+  template_type: ReportTemplateType;
+  template_category: ReportTemplateCategory;
+  full_content: string;
+  sections: ReportTemplateSection[];
+  version: string;
+  updated_at: string;
+}
+
+export interface NarrativeSection {
+  id: string;
+  section_type: 'basic_info' | 'accounting_policy' | 'tax' | 'related_party' | 'other';
+  title: string;
+  content: string;
+  source_location: string;
+}
+
+export interface TemplateTocEntry {
+  path: string;
+  level: number;
+  title: string;
+  has_children: boolean;
+}
+
+// ─── 问题确认对话 ───
+
+export interface FindingConversationMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  message_type: 'chat' | 'trace' | 'edit';
+  trace_type?: 'cross_reference' | 'template_compare' | 'data_drill_down';
+  created_at: string;
+}
+
+export interface FindingConversation {
+  finding_id: string;
+  messages: FindingConversationMessage[];
+  edit_history: Array<{ field: string; old_value: string; new_value: string; edited_at: string }>;
+}
+
+
+// ─── 审计报告复核常量映射 ───
+
+export const STATEMENT_TYPE_LABELS: Record<StatementType, string> = {
+  balance_sheet: '资产负债表',
+  income_statement: '利润表',
+  cash_flow: '现金流量表',
+  equity_change: '所有者权益变动表',
+};
+
+export const FINDING_CATEGORY_LABELS: Record<ReportReviewFindingCategory, string> = {
+  amount_inconsistency: '金额不一致',
+  reconciliation_error: '勾稽错误',
+  change_abnormal: '变动异常',
+  note_missing: '附注缺失',
+  report_body_compliance: '正文规范性',
+  note_content: '附注内容',
+  text_quality: '文本质量',
+};
+
+export const FINDING_CATEGORY_COLORS: Record<ReportReviewFindingCategory, string> = {
+  amount_inconsistency: 'var(--gt-danger)',
+  reconciliation_error: 'var(--gt-coral)',
+  change_abnormal: 'var(--gt-warning)',
+  note_missing: 'var(--gt-info)',
+  report_body_compliance: 'var(--gt-primary)',
+  note_content: 'var(--gt-water-blue)',
+  text_quality: 'var(--gt-medium-gray)',
+};
+
+export const REPORT_TEMPLATE_TYPE_LABELS: Record<ReportTemplateType, string> = {
+  soe: '国企版',
+  listed: '上市版',
+};
+
+export const CONFIRMATION_STATUS_LABELS: Record<FindingConfirmationStatus, string> = {
+  pending_confirmation: '待确认',
+  confirmed: '已确认',
+  dismissed: '已忽略',
 };

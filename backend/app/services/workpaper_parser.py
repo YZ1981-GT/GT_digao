@@ -210,13 +210,32 @@ class WorkpaperParser:
 
             paragraphs.append(para_info)
 
-        # 表格
+        # 表格数据提取
         for table in doc.tables:
             table_data: List[List[str]] = []
             for row in table.rows:
                 row_data = [cell.text.strip() for cell in row.cells]
                 table_data.append(row_data)
             tables.append(table_data)
+
+        # 按文档顺序记录每个表格前最近的段落上下文
+        table_contexts: List[str] = []
+        from docx.oxml.ns import qn
+        last_para_text = ""
+        tbl_idx = 0
+        for element in doc.element.body:
+            if element.tag == qn('w:p'):
+                text_parts = []
+                for run in element.findall('.//' + qn('w:t')):
+                    if run.text:
+                        text_parts.append(run.text)
+                text = ''.join(text_parts).strip()
+                if text:
+                    last_para_text = text
+            elif element.tag == qn('w:tbl'):
+                if tbl_idx < len(tables):
+                    table_contexts.append(last_para_text)
+                tbl_idx += 1
 
         # 批注（python-docx 不直接支持批注 API，通过 XML 解析）
         try:
@@ -244,6 +263,7 @@ class WorkpaperParser:
             tables=tables,
             headings=headings,
             comments=comments,
+            table_contexts=table_contexts,
         )
 
     async def _parse_doc_legacy(self, file_path: str) -> WordParseResult:

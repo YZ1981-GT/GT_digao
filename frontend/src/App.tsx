@@ -12,11 +12,12 @@ import WorkModeSelector from './components/WorkModeSelector';
 import ReviewWorkflow from './components/ReviewWorkflow';
 import GenerateWorkflow from './components/GenerateWorkflow';
 import AnalysisWorkflow from './components/AnalysisWorkflow';
+import AuditReportWorkflow from './components/AuditReportWorkflow';
 import './App.css';
 import './styles/gt-design-tokens.css';
 
 /** 工作模式类型：select=模式选择首页, review=底稿复核, generate=文档生成, analysis=文档分析, bid=文档写作(原有) */
-type WorkMode = 'select' | 'review' | 'generate' | 'analysis' | 'bid';
+type WorkMode = 'select' | 'review' | 'generate' | 'analysis' | 'bid' | 'report_review';
 
 const API_BASE_URL =
   process.env.REACT_APP_API_URL ||
@@ -158,7 +159,7 @@ function App() {
     if (el) el.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
-  const handleSelectMode = useCallback((mode: 'review' | 'generate' | 'analysis') => {
+  const handleSelectMode = useCallback((mode: 'review' | 'generate' | 'analysis' | 'report_review') => {
     setWorkMode(mode);
   }, []);
 
@@ -221,7 +222,7 @@ function App() {
         }}
       >
         <span style={{ fontWeight: 600, fontSize: 'var(--gt-font-base)' }}>
-          {workMode === 'review' ? '底稿复核' : workMode === 'generate' ? '文档生成' : '文档分析'}
+          {workMode === 'review' ? '底稿复核' : workMode === 'generate' ? '文档生成' : workMode === 'report_review' ? '审计报告复核' : '文档分析'}
         </span>
         <button
           style={{
@@ -242,7 +243,7 @@ function App() {
 
       {/* 工作流内容 */}
       <div className="flex-1 overflow-y-auto">
-        {workMode === 'review' ? <ReviewWorkflow /> : workMode === 'generate' ? <GenerateWorkflow /> : <AnalysisWorkflow />}
+        {workMode === 'review' ? <ReviewWorkflow /> : workMode === 'generate' ? <GenerateWorkflow /> : workMode === 'report_review' ? <AuditReportWorkflow /> : <AnalysisWorkflow />}
       </div>
     </div>
   );
@@ -462,7 +463,7 @@ function App() {
     );
   }
 
-  if (workMode === 'review' || workMode === 'generate' || workMode === 'analysis') {
+  if (workMode === 'review' || workMode === 'generate' || workMode === 'analysis' || workMode === 'report_review') {
     return (
       <>
         {renderAuditMode()}

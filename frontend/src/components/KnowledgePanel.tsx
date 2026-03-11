@@ -3,6 +3,7 @@
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { knowledgeApi } from '../services/api';
+import { processSSEStream } from '../utils/sseParser';
 
 interface Library {
   id: string;
@@ -40,6 +41,10 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
   const [previewContent, setPreviewContent] = useState<string>('');
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewInfo, setPreviewInfo] = useState<{ total: number; truncated: boolean } | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editContent, setEditContent] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [formatting, setFormatting] = useState<'local' | 'ai' | null>(null);
 
   // 拖拽和调整大小相关状态
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -161,7 +166,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
     }
   };
 
-  const SUPPORTED_EXTS = ['.txt', '.md', '.markdown', '.pdf', '.doc', '.docx'];
+  const SUPPORTED_EXTS = ['.txt', '.md', '.markdown', '.pdf', '.doc', '.docx', '.xlsx', '.xls'];
 
   const isSupportedFile = (name: string) => {
     const ext = name.substring(name.lastIndexOf('.')).toLowerCase();
@@ -217,6 +222,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
       let successCount = 0;
       let failCount = 0;
       const results: Array<{ name: string; success: boolean; message?: string }> = [];
+      const uploadedDocs: Array<{ id: string; name: string }> = [];
 
       for (let i = 0; i < totalFiles; i++) {
         const file = files[i];
@@ -227,6 +233,10 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
           if (response.data.success) {
             successCount++;
             results.push({ name: file.name, success: true, message: response.data.message });
+            // 收集上传成功的文档 ID，用于后续自动 AI 排版
+            if (response.data.document?.id) {
+              uploadedDocs.push({ id: response.data.document.id, name: file.name });
+            }
           } else {
             failCount++;
             results.push({ name: file.name, success: false, message: response.data.message });
@@ -250,6 +260,13 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
 
       loadDocuments(selectedLib);
       loadLibraries();
+
+      // 上传完成后自动触发 AI 排版
+      if (uploadedDocs.length > 0) {
+        setTimeout(() => {
+          autoAiFormatAfterUpload(selectedLib!, uploadedDocs);
+        }, 1000);
+      }
     } catch (error) {
       console.error('上传文档失败:', error);
       setMessage({ type: 'error', text: '上传文档失败' });
@@ -269,13 +286,71 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
     const files = Array.from(rawFiles).filter((f) => isSupportedFile(f.name));
 
     if (files.length === 0) {
-      setMessage({ type: 'error', text: '没有找到支持的文档格式（.txt, .md, .pdf, .doc, .docx）' });
+      setMessage({ type: 'error', text: '没有找到支持的文档格式（.txt, .md, .pdf, .doc, .docx, .xlsx, .xls）' });
       setTimeout(() => setMessage(null), 5000);
       e.target.value = '';
       return;
     }
 
+    // 报告模板库 + 文件夹上传：使用专用接口，自动识别国企/上市
+    if (selectedLib === 'report_templates' && files.length > 0 && (files[0] as any).webkitRelativePath) {
+      const relativePath = (files[0] as any).webkitRelativePath as string;
+      const folderName = relativePath.split('/')[0] || '';
+      if (folderName) {
+        await doUploadReportTemplateFolder(files, folderName);
+        return;
+      }
+    }
+
     await doUploadFiles(files);
+  };
+
+  // 报告模板文件夹专用上传
+  const doUploadReportTemplateFolder = async (files: File[], folderName: string) => {
+    try {
+      setUploading(true);
+      setMessage({ type: 'success', text: `正在上传文件夹 "${folderName}"（${files.length} 个文件）...` });
+      setUploadProgress({ current: 0, total: files.length, currentFile: folderName, results: [] });
+
+      const response = await knowledgeApi.uploadReportTemplateFolder(files, folderName);
+      const data = response.data;
+
+      const results = (data.results || []).map((r: any) => ({
+        name: r.name,
+        success: r.success,
+        message: r.message,
+      }));
+      setUploadProgress({ current: files.length, total: files.length, currentFile: '', results });
+
+      if (data.success) {
+        setMessage({ type: 'success', text: data.message || `已导入 ${data.processed} 个文件` });
+      } else {
+        setMessage({ type: 'error', text: data.message || '导入失败' });
+      }
+
+      if (selectedLib) {
+        loadDocuments(selectedLib);
+        loadLibraries();
+      }
+
+      // 收集成功上传的文档 ID，自动触发 AI 排版
+      const uploadedDocs = (data.results || [])
+        .filter((r: any) => r.success && r.doc_id)
+        .map((r: any) => ({ id: r.doc_id, name: r.name }));
+      if (uploadedDocs.length > 0) {
+        setTimeout(() => {
+          autoAiFormatAfterUpload('report_templates', uploadedDocs);
+        }, 1000);
+      }
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail || error.message || '上传失败';
+      setMessage({ type: 'error', text: `文件夹上传失败: ${detail}` });
+    } finally {
+      setUploading(false);
+      setTimeout(() => setUploadProgress(null), 3000);
+      if (folderInputRef.current) folderInputRef.current.value = '';
+    }
+    setTimeout(() => setMessage(null), 5000);
   };
 
   // 拖拽上传处理（支持多文件夹+多文件混合）
@@ -288,11 +363,34 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
     const items = e.dataTransfer.items;
     if (!items || items.length === 0) return;
 
+    // 报告模板库：检测拖入的文件夹名称
+    if (selectedLib === 'report_templates') {
+      let folderName = '';
+      for (let i = 0; i < items.length; i++) {
+        const entry = items[i].webkitGetAsEntry?.();
+        if (entry?.isDirectory) {
+          folderName = entry.name;
+          break;
+        }
+      }
+      if (folderName) {
+        setMessage({ type: 'success', text: '正在扫描文件...' });
+        const files = await readAllEntries(items);
+        if (files.length === 0) {
+          setMessage({ type: 'error', text: '没有找到支持的文档格式' });
+          setTimeout(() => setMessage(null), 5000);
+          return;
+        }
+        await doUploadReportTemplateFolder(files, folderName);
+        return;
+      }
+    }
+
     setMessage({ type: 'success', text: '正在扫描文件...' });
     const files = await readAllEntries(items);
 
     if (files.length === 0) {
-      setMessage({ type: 'error', text: '没有找到支持的文档格式（.txt, .md, .pdf, .doc, .docx）' });
+      setMessage({ type: 'error', text: '没有找到支持的文档格式（.txt, .md, .pdf, .doc, .docx, .xlsx, .xls）' });
       setTimeout(() => setMessage(null), 5000);
       return;
     }
@@ -333,6 +431,107 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  };
+
+  // 自动 AI 排版（上传后自动触发，后台静默执行并保存）
+  const autoAiFormatAfterUpload = async (libraryId: string, docIds: Array<{ id: string; name: string }>) => {
+    if (docIds.length === 0) return;
+    setFormatting('ai');
+    for (let i = 0; i < docIds.length; i++) {
+      const { id: docId, name } = docIds[i];
+      setMessage({ type: 'success', text: `AI排版中 (${i + 1}/${docIds.length}): ${name}` });
+      try {
+        const response = await knowledgeApi.aiFormatDocument(libraryId, docId);
+        let collected = '';
+        await processSSEStream(
+          response,
+          (data) => {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.status === 'streaming' && parsed.content) {
+                collected += parsed.content;
+              } else if (parsed.status === 'completed' && parsed.content) {
+                collected = parsed.content;
+              } else if (parsed.status === 'phase' && parsed.message) {
+                setMessage({ type: 'success', text: `[${i + 1}/${docIds.length}] ${parsed.message}` });
+              }
+            } catch (_e) { /* ignore */ }
+          },
+        );
+        // 保存 AI 排版结果
+        if (collected && collected.length > 100) {
+          try {
+            await knowledgeApi.updateDocument(libraryId, docId, collected);
+          } catch (_e) { /* ignore save error */ }
+        }
+      } catch (e: any) {
+        console.error(`AI排版失败: ${name}`, e);
+      }
+    }
+    setFormatting(null);
+    setMessage({ type: 'success', text: `AI排版全部完成 (${docIds.length} 个文档)` });
+    if (selectedLib) {
+      loadDocuments(selectedLib);
+    }
+    setTimeout(() => setMessage(null), 5000);
+  };
+
+  // 本地脚本格式化
+  const handleLocalFormat = async () => {
+    if (!selectedLib || !previewDoc) return;
+    setFormatting('local');
+    try {
+      const response = await knowledgeApi.localFormatDocument(selectedLib, previewDoc.id);
+      if (response.data.success) {
+        setEditContent(response.data.content);
+        setMessage({ type: 'success', text: '本地排版处理完成' });
+      } else {
+        setMessage({ type: 'error', text: '本地排版处理失败' });
+      }
+    } catch (e: any) {
+      setMessage({ type: 'error', text: `本地排版失败: ${e.message}` });
+    }
+    setFormatting(null);
+    setTimeout(() => setMessage(null), 3000);
+  };
+
+  // AI 精细化格式化
+  const handleAiFormat = async () => {
+    if (!selectedLib || !previewDoc) return;
+    setFormatting('ai');
+    try {
+      const response = await knowledgeApi.aiFormatDocument(selectedLib, previewDoc.id);
+      let collected = '';
+      await processSSEStream(
+        response,
+        (data) => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.status === 'streaming' && parsed.content) {
+              collected += parsed.content;
+              setEditContent(collected);
+            } else if (parsed.status === 'completed' && parsed.content) {
+              collected = parsed.content;
+              setEditContent(collected);
+            } else if (parsed.status === 'phase') {
+              // 显示分块进度信息
+              if (parsed.message) {
+                setMessage({ type: 'success', text: parsed.message });
+              }
+            } else if (parsed.status === 'error') {
+              setMessage({ type: 'error', text: `AI处理失败: ${parsed.message}` });
+            }
+          } catch (_e) { /* ignore parse errors */ }
+        },
+      );
+      if (collected) {
+        setMessage({ type: 'success', text: 'AI排版处理完成' });
+      }
+    } catch (e: any) {
+      setMessage({ type: 'error', text: `AI排版失败: ${e.message}` });
+    }
+    setFormatting(null);
+    setTimeout(() => setMessage(null), 3000);
   };
 
   if (!isOpen) return null;
@@ -465,7 +664,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
                       ref={fileInputRef}
                       type="file"
                       onChange={handleUpload}
-                      accept=".txt,.md,.markdown,.pdf,.doc,.docx"
+                      accept=".txt,.md,.markdown,.pdf,.doc,.docx,.xlsx,.xls"
                       multiple
                       className="hidden"
                       id="file-upload"
@@ -484,7 +683,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
                       ref={folderInputRef}
                       type="file"
                       onChange={handleUpload}
-                      accept=".txt,.md,.markdown,.pdf,.doc,.docx"
+                      accept=".txt,.md,.markdown,.pdf,.doc,.docx,.xlsx,.xls"
                       className="hidden"
                       id="folder-upload"
                       {...{ webkitdirectory: '', directory: '' } as any}
@@ -509,8 +708,13 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
                   >
                     <div className="text-4xl mb-2">📭</div>
                     <div>暂无文档，点击此处上传</div>
-                    <div className="text-xs mt-2">支持 .txt, .md, .pdf, .doc, .docx 格式</div>
+                    <div className="text-xs mt-2">支持 .txt, .md, .pdf, .doc, .docx, .xlsx, .xls 格式</div>
                     <div className="text-xs text-blue-600">支持多文件上传，可拖拽多个文件夹到此处</div>
+                    {selectedLib === 'report_templates' && (
+                      <div className="text-xs text-purple-600 mt-2 font-medium">
+                        💡 上传文件夹时，文件夹名称需包含"国企"或"上市"关键字以自动识别模板类型
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -552,23 +756,89 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
             )}
           </div>
 
-          {/* 预览面板 */}
+          {/* 预览/编辑面板 */}
           {previewDoc && (
-            <div className="w-80 border-l border-gray-200 flex flex-col bg-gray-50">
-              <div className="p-3 border-b border-gray-200 flex justify-between items-center">
-                <div className="font-medium text-gray-900 truncate text-sm" title={previewDoc.filename}>
+            <div className="w-96 border-l border-gray-200 flex flex-col bg-gray-50">
+              <div className="p-3 border-b border-gray-200 flex justify-between items-center gap-2">
+                <div className="font-medium text-gray-900 truncate text-sm flex-1" title={previewDoc.filename}>
                   📄 {previewDoc.filename}
                 </div>
-                <button
-                  onClick={() => setPreviewDoc(null)}
-                  className="text-gray-400 hover:text-gray-600"
-                >
-                  ×
-                </button>
+                <div className="flex items-center gap-1">
+                  {isEditing ? (
+                    <>
+                      <button
+                        onClick={handleLocalFormat}
+                        disabled={saving || formatting !== null}
+                        className="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400"
+                        title="使用本地脚本清洗排版（不调用AI，速度快）"
+                      >
+                        {formatting === 'local' ? '处理中...' : '📝 本地排版'}
+                      </button>
+                      <button
+                        onClick={handleAiFormat}
+                        disabled={saving || formatting !== null}
+                        className="text-xs px-2 py-1 bg-orange-600 text-white rounded hover:bg-orange-700 disabled:bg-gray-400"
+                        title="使用AI精细化整理为标准Markdown格式"
+                      >
+                        {formatting === 'ai' ? '🤖 AI处理中...' : '🤖 AI排版'}
+                      </button>
+                      <button
+                        onClick={async () => {
+                          if (!selectedLib || !previewDoc) return;
+                          setSaving(true);
+                          try {
+                            await knowledgeApi.updateDocument(selectedLib, previewDoc.id, editContent);
+                            setPreviewContent(editContent);
+                            setPreviewInfo(prev => prev ? { ...prev, total: editContent.length } : null);
+                            setIsEditing(false);
+                            setMessage({ type: 'success', text: '文档已保存' });
+                            loadDocuments(selectedLib);
+                            loadLibraries();
+                          } catch (e: any) {
+                            setMessage({ type: 'error', text: `保存失败: ${e.message}` });
+                          }
+                          setSaving(false);
+                          setTimeout(() => setMessage(null), 3000);
+                        }}
+                        disabled={saving || formatting !== null}
+                        className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400"
+                      >
+                        {saving ? '保存中...' : '💾 保存'}
+                      </button>
+                      <button
+                        onClick={() => { setIsEditing(false); setEditContent(''); setFormatting(null); }}
+                        disabled={formatting !== null}
+                        className="text-xs px-2 py-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 disabled:bg-gray-100"
+                      >
+                        取消
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => { setIsEditing(true); setEditContent(previewContent); }}
+                      className="text-xs px-2 py-1 bg-purple-600 text-white rounded hover:bg-purple-700"
+                    >
+                      ✏️ 编辑
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { setPreviewDoc(null); setIsEditing(false); }}
+                    className="text-gray-400 hover:text-gray-600 ml-1"
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
-              <div className="flex-1 p-3 overflow-y-auto">
+              <div className="flex-1 p-3 overflow-y-auto min-h-0">
                 {previewLoading ? (
                   <div className="text-center text-gray-500 py-8">加载中...</div>
+                ) : isEditing ? (
+                  <textarea
+                    value={editContent}
+                    onChange={e => setEditContent(e.target.value)}
+                    className="w-full h-full text-xs text-gray-700 font-sans leading-relaxed border border-gray-300 rounded p-2 resize-none focus:outline-none focus:border-blue-400"
+                    style={{ minHeight: '100%' }}
+                  />
                 ) : (
                   <pre className="text-xs text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">
                     {previewContent}
@@ -577,8 +847,8 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
               </div>
               {previewInfo && (
                 <div className="p-2 border-t border-gray-200 text-xs text-gray-500 text-center">
-                  总字符数: {previewInfo.total.toLocaleString()}
-                  {previewInfo.truncated && ' (已截断)'}
+                  总字符数: {(isEditing ? editContent.length : previewInfo.total).toLocaleString()}
+                  {!isEditing && previewInfo.truncated && ' (已截断)'}
                 </div>
               )}
             </div>
@@ -588,6 +858,9 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
         {/* 底部说明 */}
         <div className="px-6 py-3 border-t border-gray-200 bg-gray-50 text-sm text-gray-500 rounded-b-lg">
           💡 上传的文档会在AI生成内容时自动检索，作为参考资料优先使用。支持拖拽多个文件夹到文档区域批量上传。
+          {selectedLib === 'report_templates' && (
+            <span className="text-purple-600"> 报告模板库支持上传文件夹，通过文件夹名称（含"国企"或"上市"）自动识别模板类型。</span>
+          )}
         </div>
 
         {/* 调整大小手柄 */}

@@ -306,8 +306,14 @@ class AnalysisService:
     ) -> AsyncGenerator[str, None]:
         """将 OCR 识别后的原始文本整理为标准 Markdown 格式。
 
-        策略：先用本地脚本做基础清洗排版，再用 LLM 做精细化整理。
+        策略：
+        1. 先用本地脚本做基础清洗排版
+        2. 按章节/段落智能切分为多个块
+        3. 逐块调用 LLM 做精细化整理，块间停顿 3-5 秒避免限流
+        4. 流式拼接返回完整结果
         """
+        import asyncio
+
         yield f'data: {json.dumps({"status": "streaming", "content": ""}, ensure_ascii=False)}\n\n'
 
         # ─── 第一步：本地脚本清洗 ───
@@ -318,44 +324,183 @@ class AnalysisService:
             logger.warning("本地排版处理异常，跳过: %s", e)
             cleaned = content_text
 
-        # ─── 第二步：LLM 精细化整理 ───
-        user_prompt = f"请将以下经过初步清洗的文档内容进一步整理为标准 Markdown 格式：\n\n文档名称：{filename}\n\n"
-        if custom_instruction:
-            user_prompt += f"额外排版要求：{custom_instruction}\n\n"
-        user_prompt += f"文档内容：\n{cleaned}"
-
+        # ─── 第二步：智能切分 ───
         context_limit = _get_context_limit(self._openai.model_name)
-        reserve = int(context_limit * OUTPUT_RESERVE_RATIO)
-        available = context_limit - reserve
-        user_prompt = truncate_to_token_limit(user_prompt, available - 500)
+        # 排版任务：输出长度 ≈ 输入长度，所以输入+输出要一起算进上下文
+        # 留 system prompt 开销，剩余空间对半分给输入和输出
+        system_tokens = estimate_token_count(_FORMAT_MD_SYSTEM_PROMPT) + 800
+        usable = context_limit - system_tokens
+        # 每块输入最多占可用空间的 45%（留 55% 给输出，因为排版可能略增加长度）
+        chunk_token_budget = int(usable * 0.45)
+        # 输出 max_tokens 设为输入预算的 1.2 倍（排版可能略增加）
+        output_max_tokens = int(chunk_token_budget * 1.2)
 
-        messages = [
-            {"role": "system", "content": _FORMAT_MD_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
+        chunks = self._split_into_chunks(cleaned, chunk_token_budget)
+        total_chunks = len(chunks)
 
-        collected = ""
-        async for chunk in self._openai.stream_chat_completion(messages, temperature=0.3):
-            collected += chunk
-            yield f'data: {json.dumps({"status": "streaming", "content": chunk}, ensure_ascii=False)}\n\n'
+        logger.info("AI排版: 文档 %s 共 %d 字符, 切分为 %d 块 (输入≤%d tokens, 输出≤%d tokens)",
+                     filename, len(cleaned), total_chunks, chunk_token_budget, output_max_tokens)
 
-        yield f'data: {json.dumps({"status": "completed", "content": collected}, ensure_ascii=False)}\n\n'
+        if total_chunks == 1:
+            # 单块，直接处理（不需要分块提示）
+            yield f'data: {json.dumps({"status": "phase", "phase": "ai_start", "message": f"文档较短，整体 AI 排版中..."}, ensure_ascii=False)}\n\n'
+
+            user_prompt = f"请将以下经过初步清洗的文档内容进一步整理为标准 Markdown 格式：\n\n文档名称：{filename}\n\n"
+            if custom_instruction:
+                user_prompt += f"额外排版要求：{custom_instruction}\n\n"
+            user_prompt += f"文档内容：\n{chunks[0]}"
+
+            messages = [
+                {"role": "system", "content": _FORMAT_MD_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            collected = ""
+            async for chunk_text in self._openai.stream_chat_completion(messages, temperature=0.3, max_tokens=output_max_tokens):
+                collected += chunk_text
+                yield f'data: {json.dumps({"status": "streaming", "content": chunk_text}, ensure_ascii=False)}\n\n'
+
+            yield f'data: {json.dumps({"status": "completed", "content": collected}, ensure_ascii=False)}\n\n'
+            return
+
+        # ─── 多块逐块处理 ───
+        collected_all = ""
+        for idx, chunk_content in enumerate(chunks):
+            chunk_num = idx + 1
+            progress_msg = f"正在处理第 {chunk_num}/{total_chunks} 段..."
+            yield f'data: {json.dumps({"status": "phase", "phase": "chunk_progress", "message": progress_msg, "chunk": chunk_num, "total": total_chunks}, ensure_ascii=False)}\n\n'
+
+            # 构建分块提示
+            user_prompt = (
+                f"请将以下文档片段整理为标准 Markdown 格式。"
+                f"这是文档「{filename}」的第 {chunk_num}/{total_chunks} 段。\n"
+                f"请严格保留原文内容，只做格式整理。直接输出整理后的 Markdown，不要添加说明文字。\n\n"
+            )
+            if custom_instruction:
+                user_prompt += f"额外排版要求：{custom_instruction}\n\n"
+            user_prompt += f"文档片段内容：\n{chunk_content}"
+
+            messages = [
+                {"role": "system", "content": _FORMAT_MD_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            chunk_result = ""
+            async for chunk_text in self._openai.stream_chat_completion(messages, temperature=0.3, max_tokens=output_max_tokens):
+                chunk_result += chunk_text
+                yield f'data: {json.dumps({"status": "streaming", "content": chunk_text}, ensure_ascii=False)}\n\n'
+
+            # 块间分隔（非最后一块时加换行）
+            if chunk_num < total_chunks:
+                separator = "\n\n"
+                collected_all += chunk_result + separator
+                yield f'data: {json.dumps({"status": "streaming", "content": separator}, ensure_ascii=False)}\n\n'
+
+                # 块间停顿 3 秒，避免 API 限流
+                pause_msg = f"第 {chunk_num}/{total_chunks} 段完成，等待 3 秒后继续..."
+                yield f'data: {json.dumps({"status": "phase", "phase": "chunk_pause", "message": pause_msg}, ensure_ascii=False)}\n\n'
+                await asyncio.sleep(3)
+            else:
+                collected_all += chunk_result
+
+        yield f'data: {json.dumps({"status": "completed", "content": collected_all}, ensure_ascii=False)}\n\n'
+
+    @staticmethod
+    def _split_into_chunks(text: str, max_tokens_per_chunk: int) -> list[str]:
+        """智能切分文档为多个块，尽量在章节/段落边界切分。
+
+        切分优先级：
+        1. 一级标题（# ）
+        2. 二级标题（## ）
+        3. 三级标题（### ）
+        4. 空行（段落边界）
+        5. 硬切（按 token 预算强制切分）
+        """
+        total_tokens = estimate_token_count(text)
+        if total_tokens <= max_tokens_per_chunk:
+            return [text]
+
+        lines = text.split('\n')
+        chunks: list[str] = []
+        current_lines: list[str] = []
+        current_tokens = 0
+
+        for line in lines:
+            line_tokens = estimate_token_count(line + '\n')
+
+            # 如果当前块加上这行会超限
+            if current_tokens + line_tokens > max_tokens_per_chunk and current_lines:
+                # 检查是否在好的切分点
+                is_good_break = (
+                    line.startswith('# ')
+                    or line.startswith('## ')
+                    or line.startswith('### ')
+                    or line.strip() == ''
+                )
+
+                if is_good_break or current_tokens > max_tokens_per_chunk * 0.8:
+                    # 在此处切分
+                    chunks.append('\n'.join(current_lines))
+                    current_lines = []
+                    current_tokens = 0
+
+            current_lines.append(line)
+            current_tokens += line_tokens
+
+            # 安全阀：如果单块已经远超预算（1.2倍），强制切分
+            if current_tokens > max_tokens_per_chunk * 1.2 and len(current_lines) > 1:
+                chunks.append('\n'.join(current_lines))
+                current_lines = []
+                current_tokens = 0
+
+        # 最后一块
+        if current_lines:
+            chunks.append('\n'.join(current_lines))
+
+        # 如果切出来的块太小（< 500 tokens），合并到前一块
+        merged_chunks: list[str] = []
+        for chunk in chunks:
+            if merged_chunks and estimate_token_count(chunk) < 500:
+                merged_chunks[-1] += '\n' + chunk
+            else:
+                merged_chunks.append(chunk)
+
+        return merged_chunks if merged_chunks else [text]
 
     @staticmethod
     def _local_format_to_markdown(text: str) -> str:
-        """本地脚本：对 OCR 原始文本做基础清洗和 Markdown 排版。
+        """本地脚本：对 OCR / docx 提取的原始文本做基础清洗和 Markdown 排版。
 
         处理内容：
-        1. 去除页码标记（--- 第 X 页 ---）
-        2. 去除多余空行（连续 3+ 空行合并为 2 行）
-        3. 去除行首行尾多余空格
-        4. 识别标题行（短行、无标点结尾、可能有编号前缀）
-        5. 识别列表项（数字序号、字母序号、项目符号）
-        6. 表格行保留原格式
-        7. HTML 表格转 Markdown 表格（复用 fix_md_tables 逻辑）
+        1. 预处理 [表格内容]...[表格结束] 块：合并连续同结构表格行、拆分段落
+        2. 去除页码标记（--- 第 X 页 ---）
+        3. 清理多余空格：中文之间的空格、行首缩进空格、连续空格
+        4. 合并多余空行（连续 2+ 空行合并为 1 行）
+        5. 识别标题行（短行、无标点结尾、编号前缀、Markdown 标题）
+        6. 识别列表项（数字序号、字母序号、项目符号）
+        7. 表格行保留原格式
+        8. HTML 表格转 Markdown 表格
         """
         if not text:
             return ""
+
+        # ─── 空格清理辅助函数 ───
+        def _clean_spaces(s: str) -> str:
+            """清理行内多余空格。"""
+            s = s.strip()
+            if not s:
+                return ''
+            s = re.sub(r'[ \t]+', ' ', s)
+            # 去除两个中文字符/标点之间的空格（多轮）
+            for _ in range(3):
+                s = re.sub(
+                    r'([\u4e00-\u9fff，。；：、！？""''（）【】《》])\s+'
+                    r'([\u4e00-\u9fff，。；：、！？""''（）【】《》])',
+                    r'\1\2', s)
+            return s
+
+        # ─── 第 0 步：预处理 [表格内容]...[表格结束] 块 ───
+        text = AnalysisService._preprocess_table_blocks(text, _clean_spaces)
 
         lines = text.split('\n')
         result_lines: list[str] = []
@@ -367,78 +512,88 @@ class AnalysisService:
             # 去除页码标记
             if re.match(r'^-{2,}\s*第\s*\d+\s*页\s*-{2,}$', stripped):
                 continue
-
-            # 去除纯页码行
             if re.match(r'^\d{1,4}$', stripped) and len(stripped) <= 4:
                 continue
-
-            # 去除 OCR 噪声行（纯符号/极短乱码）
+            # 去除 OCR 噪声行
             if stripped and len(stripped) <= 2 and re.match(r'^[^\w\u4e00-\u9fff]+$', stripped):
                 continue
 
-            # 空行保留（后面统一合并）
             if not stripped:
                 result_lines.append('')
                 continue
 
-            # 识别标题行：短行 + 无标点结尾 + 可能有编号前缀
-            is_title = False
-            if len(stripped) <= 60 and not stripped.endswith(('。', '；', '，', '、', '：', ':', '.', ',', ';')):
-                # 一级标题：如 "第一章 xxx"、"一、xxx"
-                if re.match(r'^(第[一二三四五六七八九十百]+[章节篇部])\s*', stripped):
-                    result_lines.append(f'\n# {stripped}')
-                    is_title = True
-                # 二级标题：如 "（一）xxx"、"一、xxx"
-                elif re.match(r'^[（(][一二三四五六七八九十]+[）)]\s*', stripped):
-                    result_lines.append(f'\n## {stripped}')
-                    is_title = True
-                elif re.match(r'^[一二三四五六七八九十]+[、.]\s*', stripped):
-                    result_lines.append(f'\n## {stripped}')
-                    is_title = True
-                # 三级标题：如 "1. xxx"、"1、xxx"（短行）
-                elif re.match(r'^\d{1,2}[、.．]\s*\S', stripped) and len(stripped) <= 40:
-                    result_lines.append(f'\n### {stripped}')
-                    is_title = True
+            # Markdown 表格行（含 |）保留
+            if '|' in stripped and stripped.count('|') >= 2:
+                result_lines.append(stripped)
+                continue
 
+            # 清理空格
+            cleaned = _clean_spaces(stripped)
+            if not cleaned:
+                continue
+
+            # ─── 已有 Markdown 标题标记 ───
+            md_heading = re.match(r'^(#{1,6})\s+(.+)', cleaned)
+            if md_heading:
+                level = md_heading.group(1)
+                title_text = _clean_spaces(md_heading.group(2))
+                result_lines.append(f'\n{level} {title_text}')
+                continue
+
+            # ─── 识别标题行 ───
+            is_title = False
+            if len(cleaned) <= 80 and not cleaned.endswith(('。', '；', '，', '、', '：', ':', '.', ',', ';')):
+                if re.match(r'^第[一二三四五六七八九十百]+[章节篇部]\s*', cleaned):
+                    result_lines.append(f'\n# {cleaned}')
+                    is_title = True
+                elif re.match(r'^[（(][一二三四五六七八九十]+[）)]\s*', cleaned):
+                    result_lines.append(f'\n## {cleaned}')
+                    is_title = True
+                elif re.match(r'^[一二三四五六七八九十]+[、.]\s*', cleaned):
+                    result_lines.append(f'\n## {cleaned}')
+                    is_title = True
+                elif re.match(r'^\d{1,2}[、.．]\s*\S', cleaned) and len(cleaned) <= 50:
+                    result_lines.append(f'\n### {cleaned}')
+                    is_title = True
+                elif re.match(r'^[（(]\d{1,2}[）)]\s*\S', cleaned) and len(cleaned) <= 50:
+                    result_lines.append(f'\n#### {cleaned}')
+                    is_title = True
             if is_title:
                 continue
 
-            # 识别有序列表项：如 "1. xxx"、"（1）xxx"
-            list_match = re.match(r'^(\d{1,2})[、.．]\s+(.+)', stripped)
-            if list_match and len(stripped) > 40:
-                # 长行当正文段落，不做列表处理
-                result_lines.append(stripped)
+            # ─── 识别有序列表项 ───
+            list_match = re.match(r'^(\d{1,2})[、.．]\s+(.+)', cleaned)
+            if list_match and len(cleaned) > 50:
+                result_lines.append(cleaned)
                 continue
             if list_match:
                 result_lines.append(f'{list_match.group(1)}. {list_match.group(2)}')
                 continue
 
-            paren_list = re.match(r'^[（(](\d{1,2})[）)]\s*(.+)', stripped)
+            paren_list = re.match(r'^[（(](\d{1,2})[）)]\s*(.+)', cleaned)
+            if paren_list and len(cleaned) > 50:
+                result_lines.append(cleaned)
+                continue
             if paren_list:
                 result_lines.append(f'{paren_list.group(1)}. {paren_list.group(2)}')
                 continue
 
-            # 识别无序列表项
-            bullet_match = re.match(r'^[·•●◆◇▪▸►]\s*(.+)', stripped)
+            # 无序列表项
+            bullet_match = re.match(r'^[·•●◆◇▪▸►-]\s*(.+)', cleaned)
             if bullet_match:
                 result_lines.append(f'- {bullet_match.group(1)}')
                 continue
 
-            # 表格行保留
-            if '|' in stripped and stripped.count('|') >= 2:
-                result_lines.append(stripped)
-                continue
-
             # 普通文本行
-            result_lines.append(stripped)
+            result_lines.append(cleaned)
 
-        # ─── 合并多余空行 ───
+        # ─── 合并多余空行：连续空行最多保留 1 行 ───
         merged: list[str] = []
         blank_count = 0
         for line in result_lines:
             if line == '':
                 blank_count += 1
-                if blank_count <= 2:
+                if blank_count <= 1:
                     merged.append('')
             else:
                 blank_count = 0
@@ -446,7 +601,7 @@ class AnalysisService:
 
         text_out = '\n'.join(merged).strip()
 
-        # ─── HTML 表格转 Markdown（如果有） ───
+        # ─── HTML 表格转 Markdown ───
         if '<table>' in text_out.lower():
             try:
                 from pathlib import Path
@@ -464,6 +619,201 @@ class AnalysisService:
                 logger.warning("HTML 表格转换失败: %s", e)
 
         return text_out
+
+    @staticmethod
+    def _preprocess_table_blocks(text: str, clean_fn) -> str:
+        """预处理 [表格内容]...[表格结束] 块。
+
+        docx2python 经常把 Word 文档中的每一行都包装成独立的 [表格内容]...[表格结束]，
+        导致：
+        - 空块（无内容）
+        - 单行文本被包在表格标记里（实际是段落）
+        - 连续多个同列数的单行块（实际是一个表格的多行）
+        - 段落文本用 | 分隔（实际是 docx2python 对单元格的拼接）
+
+        本方法：
+        1. 解析所有 [表格内容]...[表格结束] 块
+        2. 删除空块
+        3. 单行无 | 的块 → 还原为普通段落
+        4. 单行有 | 但内容是长段落文本 → 按 | 拆分为多个段落
+        5. 连续多个同列数的块 → 合并为一个 Markdown 表格
+        """
+        TAG_START = '[表格内容]'
+        TAG_END = '[表格结束]'
+
+        if TAG_START not in text:
+            return text
+
+        lines = text.split('\n')
+        # 解析为 segments: 每个 segment 是 ('text', [...lines]) 或 ('table', [...lines])
+        segments: list = []
+        current_text_lines: list[str] = []
+        in_table = False
+        table_lines: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped == TAG_START:
+                # 把之前积累的文本行存起来
+                if current_text_lines:
+                    segments.append(('text', current_text_lines))
+                    current_text_lines = []
+                in_table = True
+                table_lines = []
+            elif stripped == TAG_END and in_table:
+                in_table = False
+                segments.append(('table', table_lines))
+                table_lines = []
+            elif in_table:
+                table_lines.append(stripped)
+            else:
+                current_text_lines.append(line)
+
+        if current_text_lines:
+            segments.append(('text', current_text_lines))
+        if in_table and table_lines:
+            # 未闭合的表格块，当文本处理
+            segments.append(('text', table_lines))
+
+        # ─── 处理 table segments ───
+        processed_segments: list = []
+
+        def _col_count(line: str) -> int:
+            """计算 | 分隔的列数。"""
+            return line.count('|') + 1 if '|' in line else 0
+
+        def _is_paragraph_line(line: str) -> bool:
+            """判断一行是否更像段落而非表格行。
+            长文本中的 | 通常是 docx2python 拼接段落的分隔符。
+            """
+            if '|' not in line:
+                return True
+            # 如果 | 分隔的各段都很长（平均 > 40 字符），更可能是段落拼接
+            parts = [p.strip() for p in line.split('|') if p.strip()]
+            if not parts:
+                return True
+            avg_len = sum(len(p) for p in parts) / len(parts)
+            # 段落特征：段数少且平均长度大
+            if len(parts) <= 3 and avg_len > 40:
+                return True
+            # 如果某段包含句号等段落标点，也是段落
+            if any(p.endswith(('。', '；', '：', '）', '】')) for p in parts):
+                if avg_len > 25:
+                    return True
+            return False
+
+        i = 0
+        while i < len(segments):
+            seg_type, seg_lines = segments[i]
+
+            if seg_type == 'text':
+                processed_segments.append(('text', seg_lines))
+                i += 1
+                continue
+
+            # table segment
+            # 过滤空行
+            content_lines = [l for l in seg_lines if l.strip()]
+
+            if not content_lines:
+                # 空块，跳过
+                i += 1
+                continue
+
+            # 单行块
+            if len(content_lines) == 1:
+                line = content_lines[0]
+
+                if _is_paragraph_line(line):
+                    # 按 | 拆分为多个段落（如果有 |）
+                    if '|' in line:
+                        parts = [clean_fn(p) for p in line.split('|') if p.strip()]
+                        processed_segments.append(('text', parts))
+                    else:
+                        processed_segments.append(('text', [line]))
+                    i += 1
+                    continue
+
+                # 看后续是否有同列数的连续单行表格块，合并为一个表格
+                cols = _col_count(line)
+                table_rows = [line]
+                j = i + 1
+                while j < len(segments):
+                    next_type, next_lines = segments[j]
+                    if next_type == 'text':
+                        # 跳过空行 text segment
+                        if all(not l.strip() for l in next_lines):
+                            j += 1
+                            continue
+                        break
+                    # next is table
+                    next_content = [l for l in next_lines if l.strip()]
+                    if not next_content:
+                        j += 1
+                        continue
+                    if len(next_content) == 1:
+                        nc = _col_count(next_content[0])
+                        # 同列数或无 | 的行（可能是表格中的纯文本行）
+                        if nc == cols or nc == 0:
+                            table_rows.append(next_content[0])
+                            j += 1
+                            continue
+                    break
+
+                if len(table_rows) >= 2:
+                    # 合并为 Markdown 表格
+                    md_table = AnalysisService._rows_to_md_table(table_rows, cols)
+                    processed_segments.append(('text', md_table))
+                    i = j
+                else:
+                    # 单行表格行，保留为文本
+                    processed_segments.append(('text', [line]))
+                    i += 1
+            else:
+                # 多行块 → 真正的表格
+                cols = max(_col_count(l) for l in content_lines)
+                if cols >= 2:
+                    md_table = AnalysisService._rows_to_md_table(content_lines, cols)
+                    processed_segments.append(('text', md_table))
+                else:
+                    # 无 | 的多行 → 段落
+                    processed_segments.append(('text', content_lines))
+                i += 1
+
+        # 重新拼接
+        output_lines: list[str] = []
+        for seg_type, seg_lines in processed_segments:
+            output_lines.extend(seg_lines)
+            output_lines.append('')  # 段间空行
+
+        return '\n'.join(output_lines)
+
+    @staticmethod
+    def _rows_to_md_table(rows: list[str], expected_cols: int) -> list[str]:
+        """将多行文本转换为 Markdown 表格格式。"""
+        if not rows or expected_cols < 2:
+            return rows
+
+        md_lines: list[str] = []
+        for idx, row in enumerate(rows):
+            if '|' in row:
+                cells = [c.strip() for c in row.split('|')]
+            else:
+                cells = [row.strip()]
+
+            # 补齐列数
+            while len(cells) < expected_cols:
+                cells.append('')
+
+            md_line = '| ' + ' | '.join(cells[:expected_cols]) + ' |'
+            md_lines.append(md_line)
+
+            # 第一行后加分隔行
+            if idx == 0:
+                sep = '| ' + ' | '.join(['---'] * expected_cols) + ' |'
+                md_lines.append(sep)
+
+        return md_lines
 
     @staticmethod
     def _find_excerpt_at(doc_text: str, generated_text: str, tag_pos: int) -> str:
