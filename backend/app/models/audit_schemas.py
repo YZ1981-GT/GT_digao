@@ -109,6 +109,7 @@ class WordParseResult(BaseModel):
     headings: List[Dict[str, Any]] = Field(default_factory=list, description="标题层级")
     comments: List[Dict[str, str]] = Field(default_factory=list, description="批注内容")
     table_contexts: List[str] = Field(default_factory=list, description="每个表格前最近的段落文本（按文档顺序）")
+    table_after_para_idx: List[int] = Field(default_factory=list, description="每个表格前最近的段落索引（精确位置关联）")
 
 
 class PdfParseResult(BaseModel):

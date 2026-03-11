@@ -169,8 +169,87 @@ class WorkpaperParser:
         # .docx 使用 python-docx — 在线程池中执行以避免阻塞事件循环
         return await asyncio.to_thread(self._parse_docx_sync, file_path)
 
+    # ── 从 docx_to_md 移植的增强标题检测逻辑 ──
+
+    # 财务报表附注中常见的描述性标题行模式
+    _NOTE_TITLE_PATTERNS = re.compile('|'.join([
+        r'^按.{1,20}(计提|分类|归集|划分|披露)',
+        r'^组合计提项目[：:]',
+        r'^期末本公司',
+        r'^本期计提',
+        r'^转回或收回',
+        r'^本期实际核销',
+        r'^重要的.{2,30}$',
+        r'^按单项计提',
+        r'^按组合计提',
+        r'^按坏账计提',
+        r'^按(预付|欠款方)归集',
+        r'^作为(承租人|出租人)',
+        r'^外币货币性项目$',
+        r'^境外经营实体$',
+    ]))
+
+    @staticmethod
+    def _detect_heading_level_enhanced(para, style_name: str, text: str,
+                                        next_is_table: bool = False) -> Optional[int]:
+        """增强的标题级别检测（融合 docx_to_md 的多种检测策略）。
+
+        检测顺序：
+        1. Word 内置 Heading / 标题 样式
+        2. 自定义样式模糊匹配（如"标题3的样式"）
+        3. outlineLvl XML 属性
+        4. 加粗短段落 → 子标题
+        5. 财务报表附注模式匹配标题
+        6. 表格前描述性短段落 → 子标题
+        """
+        if not text:
+            return None
+
+        # 1. Word 内置样式
+        if style_name.startswith("Heading"):
+            try:
+                return int(style_name.replace("Heading", "").strip())
+            except ValueError:
+                pass
+        if style_name.startswith("标题"):
+            try:
+                return int(style_name.replace("标题", "").strip())
+            except ValueError:
+                pass
+
+        # 2. 自定义样式模糊匹配
+        if style_name:
+            m = re.search(r'标题\s*([1-9])', style_name)
+            if m:
+                return int(m.group(1))
+
+        # 3. outlineLvl XML 属性
+        from docx.oxml.ns import qn
+        pPr = para._element.find(qn('w:pPr'))
+        if pPr is not None:
+            outlineLvl = pPr.find(qn('w:outlineLvl'))
+            if outlineLvl is not None:
+                val = outlineLvl.get(qn('w:val'))
+                if val is not None:
+                    lvl = int(val) + 1
+                    if 1 <= lvl <= 6:
+                        return lvl
+
+        # 4. 加粗短段落 → 子标题
+        runs = [r for r in para.runs if r.text.strip()]
+        is_all_bold = runs and all(r.bold for r in runs)
+        if is_all_bold and len(text) <= 80 and text[-1] not in '。；;':
+            # 不把括号包裹的内容当标题
+            if not ((text.startswith('（') and text.endswith('）')) or
+                    (text.startswith('(') and text.endswith(')'))):
+                return None  # 标记为 bold_title，由调用方处理
+
+        # 返回 None 表示非标题
+        return None
+
     def _parse_docx_sync(self, file_path: str) -> WordParseResult:
-        """同步解析 .docx 文件（在线程池中调用）。"""
+        """同步解析 .docx 文件（在线程池中调用）。
+        融合 docx_to_md.py 的增强标题检测能力。"""
         if not HAS_DOCX:
             raise RuntimeError("python-docx 未安装，无法解析 docx 文件")
 
@@ -184,58 +263,101 @@ class WorkpaperParser:
         tables: List[List[List[str]]] = []
         comments: List[Dict[str, str]] = []
 
-        # 段落与标题
-        for para in doc.paragraphs:
-            style_name = para.style.name if para.style else ""
-            level = None
-            if style_name.startswith("Heading"):
-                try:
-                    level = int(style_name.replace("Heading", "").strip())
-                except ValueError:
-                    level = None
-            elif style_name.startswith("标题"):
-                # 中文样式名支持："标题 1" → level 1
-                try:
-                    level = int(style_name.replace("标题", "").strip())
-                except ValueError:
-                    level = None
-
-            para_info: Dict[str, Any] = {
-                "text": para.text,
-                "style": style_name,
-            }
-            if level is not None:
-                para_info["level"] = level
-                headings.append({"text": para.text, "level": level})
-
-            paragraphs.append(para_info)
-
-        # 表格数据提取
-        for table in doc.tables:
-            table_data: List[List[str]] = []
-            for row in table.rows:
-                row_data = [cell.text.strip() for cell in row.cells]
-                table_data.append(row_data)
-            tables.append(table_data)
-
-        # 按文档顺序记录每个表格前最近的段落上下文
-        table_contexts: List[str] = []
+        # ── 按文档 body 元素顺序统一遍历段落和表格 ──
         from docx.oxml.ns import qn
-        last_para_text = ""
-        tbl_idx = 0
+        from docx.table import Table as DocxTable
+        from docx.text.paragraph import Paragraph as DocxParagraph
+
+        # 先收集所有 body 元素，以便前瞻判断（如"下一个是否为表格"）
+        body_elements = []
         for element in doc.element.body:
-            if element.tag == qn('w:p'):
-                text_parts = []
-                for run in element.findall('.//' + qn('w:t')):
-                    if run.text:
-                        text_parts.append(run.text)
-                text = ''.join(text_parts).strip()
-                if text:
-                    last_para_text = text
-            elif element.tag == qn('w:tbl'):
-                if tbl_idx < len(tables):
-                    table_contexts.append(last_para_text)
-                tbl_idx += 1
+            tag = element.tag
+            if tag == qn('w:p'):
+                body_elements.append(('para', DocxParagraph(element, doc)))
+            elif tag == qn('w:tbl'):
+                body_elements.append(('table', DocxTable(element, doc)))
+
+        table_after_para_idx: List[int] = []
+        para_idx = -1
+        current_heading_level = 0
+
+        for idx, (etype, obj) in enumerate(body_elements):
+            if etype == 'para':
+                para = obj
+                style_name = para.style.name if para.style else ""
+                text = para.text.strip()
+
+                # 前瞻：下一个非空元素是否为表格
+                next_is_table = False
+                for j in range(idx + 1, min(idx + 4, len(body_elements))):
+                    ntype, nobj = body_elements[j]
+                    if ntype == 'table':
+                        next_is_table = True
+                        break
+                    if ntype == 'para' and nobj.text.strip():
+                        break
+
+                level = self._detect_heading_level_enhanced(para, style_name, text, next_is_table)
+
+                # 补充检测：加粗短段落 / 模式匹配标题 / 表格前描述行
+                if level is None and text:
+                    runs = [r for r in para.runs if r.text.strip()]
+                    is_all_bold = runs and all(r.bold for r in runs)
+                    is_short = len(text) <= 80 and text[-1] not in '。；;'
+                    not_wrapped = not ((text.startswith('（') and text.endswith('）')) or
+                                       (text.startswith('(') and text.endswith(')')))
+
+                    if is_all_bold and is_short and not_wrapped:
+                        # 加粗短段落 → 当前标题级别 + 1
+                        level = min(current_heading_level + 1, 6) if current_heading_level else 4
+
+                    elif self._NOTE_TITLE_PATTERNS.search(text) and is_short and not_wrapped:
+                        # 财务报表附注模式匹配标题
+                        level = min(current_heading_level + 1, 6) if current_heading_level else 4
+
+                    elif (next_is_table and len(text) <= 60 and
+                          text[-1] not in '。；;.' and not_wrapped and
+                          not re.match(r'^续[（(：:]', text) and text != '续' and
+                          not re.match(r'^[①②③④⑤⑥⑦⑧⑨⑩]', text)):
+                        # 表格前描述性短段落 → 子标题
+                        level = min(current_heading_level + 1, 6) if current_heading_level else 4
+
+                para_info: Dict[str, Any] = {
+                    "text": para.text,
+                    "style": style_name,
+                }
+                if level is not None:
+                    para_info["level"] = level
+                    headings.append({"text": para.text, "level": level})
+                    current_heading_level = level
+
+                paragraphs.append(para_info)
+                para_idx = len(paragraphs) - 1
+
+            elif etype == 'table':
+                tbl = obj
+                table_data: List[List[str]] = []
+                for row in tbl.rows:
+                    # 去重合并单元格
+                    seen_cells: set = set()
+                    row_data: List[str] = []
+                    for cell in row.cells:
+                        cell_id = id(cell._tc)
+                        if cell_id in seen_cells:
+                            continue
+                        seen_cells.add(cell_id)
+                        row_data.append(cell.text.strip())
+                    table_data.append(row_data)
+                tables.append(table_data)
+                table_after_para_idx.append(para_idx)
+
+        # 兼容旧字段 table_contexts
+        table_contexts: List[str] = []
+        for tpi in table_after_para_idx:
+            if 0 <= tpi < len(paragraphs):
+                table_contexts.append(paragraphs[tpi].get('text', '').strip())
+            else:
+                table_contexts.append("")
 
         # 批注（python-docx 不直接支持批注 API，通过 XML 解析）
         try:
@@ -264,6 +386,7 @@ class WorkpaperParser:
             headings=headings,
             comments=comments,
             table_contexts=table_contexts,
+            table_after_para_idx=table_after_para_idx,
         )
 
     async def _parse_doc_legacy(self, file_path: str) -> WordParseResult:

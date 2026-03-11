@@ -368,21 +368,30 @@ class ReportParser(WorkpaperParser):
                 return 4
             return None
 
-        # 将表格通过 table_contexts 关联到段落位置
-        table_context_to_idx: Dict[str, List[int]] = {}
-        for ti, ctx in enumerate(word_result.table_contexts):
-            if ctx:
-                table_context_to_idx.setdefault(ctx, []).append(ti)
-
+        # 使用精确的段落索引关联表格（优先使用 table_after_para_idx）
         table_after_para: Dict[int, List[int]] = {}
         used_tables: set = set()
-        for pi, para_info in enumerate(paragraphs):
-            text = para_info.get('text', '').strip()
-            if text in table_context_to_idx:
-                for ti in table_context_to_idx[text]:
-                    if ti not in used_tables:
-                        table_after_para.setdefault(pi, []).append(ti)
-                        used_tables.add(ti)
+
+        if hasattr(word_result, 'table_after_para_idx') and word_result.table_after_para_idx:
+            # 新方式：直接使用段落索引
+            for ti, pi in enumerate(word_result.table_after_para_idx):
+                if pi >= 0:
+                    table_after_para.setdefault(pi, []).append(ti)
+                    used_tables.add(ti)
+        else:
+            # 旧方式兼容：通过 table_contexts 文本匹配
+            table_context_to_idx: Dict[str, List[int]] = {}
+            for ti, ctx in enumerate(word_result.table_contexts):
+                if ctx:
+                    table_context_to_idx.setdefault(ctx, []).append(ti)
+
+            for pi, para_info in enumerate(paragraphs):
+                text = para_info.get('text', '').strip()
+                if text in table_context_to_idx:
+                    for ti in table_context_to_idx[text]:
+                        if ti not in used_tables:
+                            table_after_para.setdefault(pi, []).append(ti)
+                            used_tables.add(ti)
 
         # 构建树
         root_sections: List[NoteSection] = []
@@ -400,6 +409,10 @@ class ReportParser(WorkpaperParser):
         for pi, para_info in enumerate(paragraphs):
             text = para_info.get('text', '').strip()
             if not text:
+                # 即使空段落，也要检查是否有表格跟在后面
+                if pi in table_after_para:
+                    for ti in table_after_para[pi]:
+                        add_table_to_current(ti)
                 continue
 
             level = detect_heading_level(para_info)
