@@ -42,6 +42,9 @@ def get_heading_level(para):
     cn_heading_map = {
         '标题 1': 1, '标题 2': 2, '标题 3': 3, '标题 4': 4, '标题 5': 5,
         '标题1': 1, '标题2': 2, '标题3': 3, '标题4': 4, '标题5': 5,
+        # 自定义样式映射
+        '样式2': 4,       # "同一控制下的企业合并"等子标题
+        '附注三级': 3,    # 附注三级标题
     }
     raw_style = para.style.name or ''
     if raw_style in cn_heading_map:
@@ -271,6 +274,21 @@ def convert_docx_to_md(docx_path, output_path=None):
     md_lines = []
     current_heading_level = 0
 
+    # 层级归一化：记录已出现的层级，防止跳级
+    # 例如 H1 -> H3 应该归一化为 H1 -> H2
+    heading_stack = []  # 记录当前的标题层级栈
+
+    def normalize_heading_level(raw_level):
+        """归一化标题层级，防止跳级"""
+        nonlocal heading_stack
+        # 弹出栈中 >= raw_level 的层级
+        while heading_stack and heading_stack[-1] >= raw_level:
+            heading_stack.pop()
+        # 归一化后的层级 = 栈深度 + 1
+        normalized = len(heading_stack) + 1
+        heading_stack.append(raw_level)
+        return min(normalized, 6)
+
     for i, block in enumerate(blocks):
         if isinstance(block, Paragraph):
             text = block.text.strip()
@@ -281,9 +299,10 @@ def convert_docx_to_md(docx_path, output_path=None):
             heading_level = get_heading_level(block)
 
             if heading_level:
-                # Word 标题样式
-                current_heading_level = heading_level
-                prefix = '#' * min(heading_level, 6)
+                # Word 标题样式 -> 归一化层级
+                normalized = normalize_heading_level(heading_level)
+                current_heading_level = normalized
+                prefix = '#' * normalized
                 md_lines.append(f'{prefix} {text}')
                 md_lines.append('')
             elif is_bold_paragraph(block) and is_short_title_like(text):
