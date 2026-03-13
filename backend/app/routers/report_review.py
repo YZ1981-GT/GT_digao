@@ -145,16 +145,37 @@ async def upload_files(
                         session.statement_items.extend(items)
 
                 elif ext in ('.docx', '.doc'):
-                    # 只有附注文件才提取 note_tables，审计报告正文不提取
+                    word_result = await report_parser.parse_word(tmp_path)
+                    # 用解析后的文本重新分类（上面分类时 content_text 为空）
+                    word_text = ' '.join(
+                        p.get('text', '') for p in word_result.paragraphs[:50]
+                    )
+                    file_type = report_parser.classify_report_file(filename, word_text)
+                    session.file_classifications[file_id] = file_type
+
                     if file_type == ReportFileType.NOTES_TO_STATEMENTS:
-                        word_result = await report_parser.parse_word(tmp_path)
+                        # 附注文件：提取表格和层级结构
                         note_tables = report_parser.extract_note_tables(word_result)
                         session.note_tables.extend(note_tables)
-                        # 构建附注层级结构树
                         note_sections = report_parser.extract_note_sections(word_result, note_tables)
                         session.note_sections.extend(note_sections)
+                    elif file_type == ReportFileType.AUDIT_REPORT_BODY:
+                        # 审计报告正文：提取段落内容
+                        for para in word_result.paragraphs:
+                            text = para.get('text', '').strip()
+                            if not text:
+                                # 保留空行用于段落分隔
+                                session.audit_report_content.append({
+                                    'text': '', 'level': None, 'style': '',
+                                })
+                                continue
+                            session.audit_report_content.append({
+                                'text': text,
+                                'level': para.get('level'),
+                                'style': para.get('style', ''),
+                            })
                     else:
-                        logger.info(f"Word 文件 {filename} 分类为 {file_type.value}，跳过附注提取")
+                        logger.info(f"Word 文件 {filename} 分类为 {file_type.value}")
 
                 elif ext == '.pdf':
                     pdf_result = await report_parser.parse_pdf(tmp_path)

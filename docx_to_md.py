@@ -161,6 +161,41 @@ def is_table_title_candidate(text):
     return True
 
 
+def clean_heading_title(title: str) -> str:
+    """清理标题中的括号注释/使用说明。
+
+    如 '股份支付（不适用的一定删除）' -> '股份支付'
+    但保留属于标题本身的括号内容，如 '公司（企业）基本情况' 不变。
+    """
+    # 指示性关键词：出现在括号中说明这是编辑指引而非标题内容
+    _INSTRUCTION_KW = [
+        '删除', '不适用', '披露', '填列', '除外', '格式', '描述',
+        '可选', '续', '注：', '注:', '如无', '仅限', '不包括',
+        '参考', '划分为持有待售',
+    ]
+
+    def _is_instruction(inner: str) -> bool:
+        return any(kw in inner for kw in _INSTRUCTION_KW)
+
+    # 匹配中文括号和英文括号
+    result = title
+    for pat in [r'（([^（）]+)）', r'\(([^()]+)\)']:
+        parts = []
+        last = 0
+        for m in re.finditer(pat, result):
+            inner = m.group(1)
+            if _is_instruction(inner):
+                parts.append(result[last:m.start()])
+                last = m.end()
+            else:
+                parts.append(result[last:m.end()])
+                last = m.end()
+        parts.append(result[last:])
+        result = ''.join(parts)
+
+    return result.strip()
+
+
 def runs_to_md(para):
     """将段落的 runs 转为 Markdown 行内格式"""
     parts = []
@@ -303,25 +338,25 @@ def convert_docx_to_md(docx_path, output_path=None):
                 normalized = normalize_heading_level(heading_level)
                 current_heading_level = normalized
                 prefix = '#' * normalized
-                md_lines.append(f'{prefix} {text}')
+                md_lines.append(f'{prefix} {clean_heading_title(text)}')
                 md_lines.append('')
             elif is_bold_paragraph(block) and is_short_title_like(text):
                 # 整体加粗的短段落 -> 子标题
                 level = determine_sub_heading_level(current_heading_level)
                 prefix = '#' * level
-                md_lines.append(f'{prefix} {text}')
+                md_lines.append(f'{prefix} {clean_heading_title(text)}')
                 md_lines.append('')
             elif is_pattern_title(text):
                 # 模式匹配的描述性标题行 -> 子标题
                 level = determine_sub_heading_level(current_heading_level)
                 prefix = '#' * level
-                md_lines.append(f'{prefix} {text}')
+                md_lines.append(f'{prefix} {clean_heading_title(text)}')
                 md_lines.append('')
             elif is_table_title_candidate(text) and _next_is_table(blocks, i):
                 # 紧跟表格的描述性短段落 -> 子标题
                 level = determine_sub_heading_level(current_heading_level)
                 prefix = '#' * level
-                md_lines.append(f'{prefix} {text}')
+                md_lines.append(f'{prefix} {clean_heading_title(text)}')
                 md_lines.append('')
             else:
                 content = runs_to_md(block)

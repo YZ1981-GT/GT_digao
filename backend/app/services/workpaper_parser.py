@@ -535,39 +535,51 @@ class WorkpaperParser:
             raise RuntimeError("openpyxl 未安装，无法解析 xlsx 文件")
 
         try:
-            wb = openpyxl.load_workbook(file_path, data_only=False, read_only=False)
+            # 打开两次：data_only=True 获取计算后的值，data_only=False 获取公式
+            wb_val = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+            wb_fmt = openpyxl.load_workbook(file_path, data_only=False, read_only=False)
         except Exception as e:
             raise RuntimeError(f"Excel 文件打开失败：{e}")
 
         sheets: List[SheetData] = []
-        sheet_names: List[str] = list(wb.sheetnames)
+        sheet_names: List[str] = list(wb_fmt.sheetnames)
 
-        for ws in wb.worksheets:
+        for ws_fmt in wb_fmt.worksheets:
+            ws_val = wb_val[ws_fmt.title] if ws_fmt.title in wb_val.sheetnames else None
             cells: List[CellData] = []
-            merged_ranges = [str(mr) for mr in ws.merged_cells.ranges]
+            merged_ranges = [str(mr) for mr in ws_fmt.merged_cells.ranges]
 
-            for row in ws.iter_rows():
+            for row in ws_fmt.iter_rows():
                 for cell in row:
-                    if cell.value is not None or cell.data_type == 'f':
+                    raw_value = cell.value
+                    if raw_value is not None or cell.data_type == 'f':
                         formula = None
-                        value = cell.value
-                        if isinstance(value, str) and value.startswith('='):
-                            formula = value
+                        if isinstance(raw_value, str) and raw_value.startswith('='):
+                            formula = raw_value
+                            # 优先使用 data_only 工作簿中的计算值
+                            if ws_val is not None:
+                                try:
+                                    calc_val = ws_val.cell(row=cell.row, column=cell.column).value
+                                    if calc_val is not None:
+                                        raw_value = calc_val
+                                except Exception:
+                                    pass
                         cells.append(CellData(
                             row=cell.row,
                             col=cell.column,
-                            value=self._safe_cell_value(value),
+                            value=self._safe_cell_value(raw_value),
                             formula=formula,
-                            is_merged=self._is_in_merged(cell.row, cell.column, ws.merged_cells.ranges),
+                            is_merged=self._is_in_merged(cell.row, cell.column, ws_fmt.merged_cells.ranges),
                         ))
 
             sheets.append(SheetData(
-                name=ws.title,
+                name=ws_fmt.title,
                 cells=cells,
                 merged_ranges=merged_ranges,
             ))
 
-        wb.close()
+        wb_val.close()
+        wb_fmt.close()
         return ExcelParseResult(sheets=sheets, sheet_names=sheet_names)
 
     def _parse_xls(self, file_path: str) -> ExcelParseResult:

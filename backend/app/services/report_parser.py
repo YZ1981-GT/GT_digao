@@ -143,15 +143,30 @@ class ReportParser(WorkpaperParser):
         """
         text = (filename + " " + content[:2000]).lower()
 
-        # 按优先级匹配：附注 > 审计报告正文 > 财务报表
-        # 附注通常包含"附注"关键词
-        for keyword in self.FILE_CLASSIFY_KEYWORDS[ReportFileType.NOTES_TO_STATEMENTS]:
-            if keyword.lower() in text:
-                return ReportFileType.NOTES_TO_STATEMENTS
+        # 先按文件名精确匹配
+        fn_lower = filename.lower()
 
-        for keyword in self.FILE_CLASSIFY_KEYWORDS[ReportFileType.AUDIT_REPORT_BODY]:
-            if keyword.lower() in text:
-                return ReportFileType.AUDIT_REPORT_BODY
+        # 文件名包含"附注"且不包含"审计报告" -> 附注
+        if any(kw.lower() in fn_lower for kw in ['附注', 'notes']):
+            return ReportFileType.NOTES_TO_STATEMENTS
+
+        # 文件名包含"审计报告" -> 审计报告正文
+        if any(kw.lower() in fn_lower for kw in ['审计报告', '审计意见', '独立审计']):
+            return ReportFileType.AUDIT_REPORT_BODY
+
+        # 文件名无法判断时，按内容特征分类
+        # 审计报告正文特征：包含"审计意见""我们审计了""注册会计师"等
+        audit_body_signals = ['审计意见', '我们审计了', '注册会计师', '审计报告', '独立审计']
+        # 附注特征：包含"会计政策""报表附注""财务报表主要项目"等
+        notes_signals = ['会计政策', '报表附注', '财务报表主要项目', '会计估计']
+
+        body_score = sum(1 for kw in audit_body_signals if kw in text)
+        notes_score = sum(1 for kw in notes_signals if kw in text)
+
+        if body_score > notes_score:
+            return ReportFileType.AUDIT_REPORT_BODY
+        if notes_score > 0:
+            return ReportFileType.NOTES_TO_STATEMENTS
 
         # Excel 文件默认归类为财务报表
         ext = os.path.splitext(filename)[1].lower()
@@ -347,6 +362,34 @@ class ReportParser(WorkpaperParser):
         """
         paragraphs = word_result.paragraphs
 
+        # 指示性关键词：出现在括号中说明这是编辑指引而非标题内容
+        _INSTRUCTION_KW = [
+            '删除', '不适用', '披露', '填列', '除外', '格式', '描述',
+            '可选', '续', '注：', '注:', '如无', '仅限', '不包括',
+            '参考', '划分为持有待售',
+        ]
+
+        def _is_instruction(inner: str) -> bool:
+            return any(kw in inner for kw in _INSTRUCTION_KW)
+
+        def clean_heading_title(title: str) -> str:
+            """清理标题中的括号注释/使用说明"""
+            result = title
+            for pat in [r'（([^（）]+)）', r'\(([^()]+)\)']:
+                parts = []
+                last = 0
+                for m in re.finditer(pat, result):
+                    inner = m.group(1)
+                    if _is_instruction(inner):
+                        parts.append(result[last:m.start()])
+                        last = m.end()
+                    else:
+                        parts.append(result[last:m.end()])
+                        last = m.end()
+                parts.append(result[last:])
+                result = ''.join(parts)
+            return result.strip()
+
         def detect_heading_level(para_info: Dict) -> Optional[int]:
             """检测段落的标题级别"""
             if 'level' in para_info and para_info['level'] is not None:
@@ -393,9 +436,18 @@ class ReportParser(WorkpaperParser):
                             table_after_para.setdefault(pi, []).append(ti)
                             used_tables.add(ti)
 
-        # 构建树
+        # 构建树（含层级归一化，防止 H1→H3 跳级）
         root_sections: List[NoteSection] = []
-        stack: List[tuple] = []  # [(level, NoteSection)]
+        stack: List[tuple] = []  # [(raw_level, NoteSection)]
+        heading_stack: List[int] = []  # 用于归一化的原始层级栈
+
+        def normalize_level(raw_level: int) -> int:
+            """归一化标题层级，防止跳级（如 H1→H3 归一化为 H1→H2）"""
+            while heading_stack and heading_stack[-1] >= raw_level:
+                heading_stack.pop()
+            normalized = len(heading_stack) + 1
+            heading_stack.append(raw_level)
+            return min(normalized, 6)
 
         def current_section() -> Optional[NoteSection]:
             return stack[-1][1] if stack else None
@@ -418,18 +470,19 @@ class ReportParser(WorkpaperParser):
             level = detect_heading_level(para_info)
 
             if level is not None:
+                norm_level = normalize_level(level)
                 section = NoteSection(
                     id=str(uuid.uuid4())[:8],
-                    title=text,
-                    level=level,
+                    title=clean_heading_title(text),
+                    level=norm_level,
                 )
-                while stack and stack[-1][0] >= level:
+                while stack and stack[-1][0] >= norm_level:
                     stack.pop()
                 if stack:
                     stack[-1][1].children.append(section)
                 else:
                     root_sections.append(section)
-                stack.append((level, section))
+                stack.append((norm_level, section))
             else:
                 sec = current_section()
                 if sec:

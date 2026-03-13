@@ -663,6 +663,7 @@ class ReportReviewSession(BaseModel):
     statement_items: List[StatementItem] = Field(default_factory=list)
     note_tables: List[NoteTable] = Field(default_factory=list)
     note_sections: List[NoteSection] = Field(default_factory=list, description="附注层级结构树")
+    audit_report_content: List[Dict[str, Any]] = Field(default_factory=list, description="审计报告正文段落 [{text, level, is_bold}]")
     table_structures: Dict[str, TableStructure] = Field(default_factory=dict, description="表格结构识别结果 {note_table_id: TableStructure}")
     matching_map: Optional[MatchingMap] = Field(None)
     finding_conversations: Dict[str, 'FindingConversation'] = Field(default_factory=dict, description="问题确认对话")

@@ -632,6 +632,7 @@ export interface ReportReviewSession {
   statement_items: StatementItem[];
   note_tables: NoteTable[];
   note_sections: NoteSection[];
+  audit_report_content: Array<{ text: string; level?: number; is_bold?: boolean }>;
   table_structures: Record<string, TableStructure>;
   matching_map?: MatchingMap;
   finding_conversations: Record<string, FindingConversation>;
