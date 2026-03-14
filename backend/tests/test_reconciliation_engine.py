@@ -210,6 +210,33 @@ class TestBalanceFormula:
         findings = engine.check_balance_formula(note, ts)
         assert len(findings) == 0
 
+    def test_sub_item_rows_skipped_in_formula(self):
+        """余额变动公式校验应跳过其中项行，避免误报。"""
+        note = _note(
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["固定资产", 1000, 200, 50, 1150],
+                ["其中：房屋", 600, 100, 0, 700],  # 其中项不一定满足公式
+                ["其中：设备", 400, 50, 50, 450],   # 400+50-50=400≠450，但不应报错
+                ["合计", 1000, 200, 50, 1150],
+            ],
+        )
+        ts = _ts(note.id, rows=[
+            TableStructureRow(row_index=0, role="data", label="固定资产"),
+            TableStructureRow(row_index=1, role="sub_item", label="其中：房屋", parent_row_index=0, indent_level=1),
+            TableStructureRow(row_index=2, role="sub_item", label="其中：设备", parent_row_index=0, indent_level=1),
+            TableStructureRow(row_index=3, role="total", label="合计"),
+        ], columns=[
+            TableStructureColumn(col_index=0, semantic="label"),
+            TableStructureColumn(col_index=1, semantic="opening_balance"),
+            TableStructureColumn(col_index=2, semantic="current_increase"),
+            TableStructureColumn(col_index=3, semantic="current_decrease"),
+            TableStructureColumn(col_index=4, semantic="closing_balance"),
+        ], has_balance=True)
+        findings = engine.check_balance_formula(note, ts)
+        # 只有 data 行和 total 行参与公式校验，sub_item 行应被跳过
+        assert len(findings) == 0, f"其中项行不应参与余额变动公式校验，但发现 {len(findings)} 个问题"
+
 
 # ─── 其中项校验 ───
 
@@ -290,3 +317,74 @@ class TestPureFunction:
         for f1, f2 in zip(r1, r2):
             assert f1.difference == f2.difference
             assert f1.description == f2.description
+
+
+# ─── 多段合计行（期末+期初各有合计行）───
+
+class TestMultiSectionTotal:
+    """表格含多段合计行时，每段只累加本段数据行。"""
+
+    def test_two_totals_each_section_independent(self):
+        """期末余额段和期初余额段各有合计行，不应跨段累加。
+
+        模拟"按坏账计提方法分类"表格：
+        - 行0: 按组合计提坏账准备  112623142.41
+        - 行1: 合计（期末）        112623142.41
+        - 行2: 按组合计提坏账准备  112623142.41  （期初段）
+        - 行3: 合计（期初）        112623142.41
+        """
+        note = _note("按坏账计提方法分类", rows=[
+            ["按组合计提坏账准备", 112623142.41],
+            ["合计", 112623142.41],
+            ["按组合计提坏账准备", 112623142.41],
+            ["合计", 112623142.41],
+        ])
+        ts = TableStructure(
+            note_table_id=note.id,
+            rows=[
+                TableStructureRow(row_index=0, role="data", label="按组合计提坏账准备"),
+                TableStructureRow(row_index=1, role="total", label="合计"),
+                TableStructureRow(row_index=2, role="data", label="按组合计提坏账准备"),
+                TableStructureRow(row_index=3, role="total", label="合计"),
+            ],
+            columns=[
+                TableStructureColumn(col_index=0, semantic="label"),
+                TableStructureColumn(col_index=1, semantic="closing_balance"),
+            ],
+            total_row_indices=[1, 3],
+            closing_balance_cell="R1C1",
+            opening_balance_cell="R3C1",
+            structure_confidence="high",
+        )
+        findings = engine.check_note_table_integrity(note, ts)
+        # 两段各自数据行之和等于各自合计行，不应有 finding
+        assert len(findings) == 0, f"不应有误报，但发现 {len(findings)} 个: {[f.description for f in findings]}"
+
+    def test_second_total_wrong_still_detected(self):
+        """第二段合计行数值错误时仍能检出。"""
+        note = _note("测试", rows=[
+            ["A", 100],
+            ["合计", 100],
+            ["B", 200],
+            ["合计", 999],  # 错误：应为200
+        ])
+        ts = TableStructure(
+            note_table_id=note.id,
+            rows=[
+                TableStructureRow(row_index=0, role="data", label="A"),
+                TableStructureRow(row_index=1, role="total", label="合计"),
+                TableStructureRow(row_index=2, role="data", label="B"),
+                TableStructureRow(row_index=3, role="total", label="合计"),
+            ],
+            columns=[
+                TableStructureColumn(col_index=0, semantic="label"),
+                TableStructureColumn(col_index=1, semantic="closing_balance"),
+            ],
+            total_row_indices=[1, 3],
+            closing_balance_cell="R1C1",
+            structure_confidence="high",
+        )
+        findings = engine.check_note_table_integrity(note, ts)
+        # 第一段正确，第二段应检出1个不一致
+        assert len(findings) == 1
+        assert "999" in findings[0].description or "200" in findings[0].description

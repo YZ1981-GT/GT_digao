@@ -139,6 +139,45 @@ class TestDetectNoteTableHeaders:
         for row in header_rows:
             assert len(row) == 5, f"Row has {len(row)} cols: {row}"
 
+    def test_aging_table_with_gap_column(self, parser):
+        """账龄分析表 - 子行有空列分隔符
+        
+        Word 去重后：
+        row0: ["账龄", "期末余额", "上年年末余额"]  (3列)
+        row1: ["金额", "比例(%)", "", "金额", "比例(%)"]  (5列，中间有空列分隔)
+        row2: ["1年以内", "16029217.98", "89.42", "", "18152612.23", "100.00"]  (6列)
+        
+        期末余额应展开2列，上年年末余额应展开2列，中间保留空列分隔符。
+        """
+        table = [
+            ["账龄", "期末余额", "上年年末余额"],
+            ["金额", "比例(%)", "", "金额", "比例(%)"],
+            ["1年以内", "16029217.98", "89.42", "", "18152612.23", "100.00"],
+            ["1至2年", "1895686.38", "10.58", "", "", ""],
+            ["合计", "17924904.36", "100.00", "", "18152612.23", "100.00"],
+        ]
+        header_rows, data_start = parser._detect_note_table_headers(table)
+        assert len(header_rows) == 2
+        assert data_start == 2
+        for row in header_rows:
+            assert len(row) == 6, f"Row has {len(row)} cols: {row}"
+        
+        # 第一行：账龄(1) + 期末余额(2) + 空列(1) + 上年年末余额(2)
+        assert header_rows[0][0] == "账龄"
+        assert header_rows[0][1] == "期末余额"
+        assert header_rows[0][2] == "期末余额"
+        assert header_rows[0][3] == ""  # 空列分隔符
+        assert header_rows[0][4] == "上年年末余额"
+        assert header_rows[0][5] == "上年年末余额"
+        
+        # 第二行：空(1) + 金额 + 比例(%) + 空 + 金额 + 比例(%)
+        assert header_rows[1][0] == ""
+        assert header_rows[1][1] == "金额"
+        assert header_rows[1][2] == "比例(%)"
+        assert header_rows[1][3] == ""
+        assert header_rows[1][4] == "金额"
+        assert header_rows[1][5] == "比例(%)"
+
     def test_simple_two_col_table(self, parser):
         """简单两列表格不应误判"""
         table = [

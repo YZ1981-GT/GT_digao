@@ -125,6 +125,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   const [error, setError] = useState<string | null>(null);
   const [templateType, setTemplateType] = useState<string>('soe');
   const [parentPresetAccounts, setParentPresetAccounts] = useState<Array<{ name: string; keywords: string[]; order: number }>>([]);
+  const [consolidatedPresetAccounts, setConsolidatedPresetAccounts] = useState<Array<{ name: string; keywords: string[]; order: number }>>([]);
 
   const [activeTopTab, setActiveTopTab] = useState<string>('notes');
   const [activeSheetTab, setActiveSheetTab] = useState(0);
@@ -194,6 +195,17 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       .catch(() => {});
   }, [templateType]);
 
+  // ─── 加载合并附注预设科目 ───
+  useEffect(() => {
+    if (!templateType) return;
+    fetch(`${API}/api/report-review/consolidated-accounts/${templateType}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.accounts) setConsolidatedPresetAccounts(data.accounts);
+      })
+      .catch(() => {});
+  }, [templateType]);
+
   const noteMap = useMemo(() => new Map(notes.map(n => [n.id, n])), [notes]);
 
   // ─── 报表科目映射：noteTableId → StatementItem（反向索引） ───
@@ -201,37 +213,119 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   const noteToStmtMap = useMemo(() => {
     const m = new Map<string, StatementItem>();
     if (!matching) return m;
+    // 报表类型优先级：利润表 > 现金流量表 > 资产负债表
+    // 附注中的科目（如投资收益、资产减值损失）应优先匹配利润表而非资产负债表
+    const stmtTypePriority = (t: string) =>
+      t === 'income_statement' ? 2 : t === 'cash_flow' ? 1 : 0;
     for (const entry of matching.entries) {
       const item = stmtItemMap.get(entry.statement_item_id);
       if (!item) continue;
       for (const nid of entry.note_table_ids) {
-        // 一个 note_table 可能被多个 statement_item 匹配，取第一个
-        if (!m.has(nid)) m.set(nid, item);
+        const note = noteMap.get(nid);
+        const noteAcct = note?.account_name?.replace(/[\s（()）]/g, '') ?? '';
+        const itemAcct = item.account_name.replace(/[\s（()）]/g, '');
+        const existing = m.get(nid);
+        if (!existing) {
+          m.set(nid, item);
+        } else {
+          const existAcct = existing.account_name.replace(/[\s（()）]/g, '');
+          // 精确匹配优先：如果新 item 名称与附注科目完全一致，替换
+          const newExact = noteAcct === itemAcct;
+          const oldExact = noteAcct === existAcct;
+          if (newExact && !oldExact) {
+            m.set(nid, item);
+          } else if (newExact && oldExact) {
+            // 都精确匹配时，优先利润表科目
+            if (stmtTypePriority(item.statement_type) > stmtTypePriority(existing.statement_type)) {
+              m.set(nid, item);
+            }
+          } else if (!newExact && !oldExact) {
+            // 都不精确时，优先利润表科目，其次选择有余额的科目
+            if (stmtTypePriority(item.statement_type) > stmtTypePriority(existing.statement_type)) {
+              m.set(nid, item);
+            } else if (stmtTypePriority(item.statement_type) === stmtTypePriority(existing.statement_type)) {
+              if (
+                (existing.closing_balance == null && existing.opening_balance == null)
+                && (item.closing_balance != null || item.opening_balance != null)
+              ) {
+                m.set(nid, item);
+              }
+            }
+          }
+        }
       }
     }
     return m;
-  }, [matching, stmtItemMap]);
+  }, [matching, stmtItemMap, noteMap]);
 
   // 通过 section 的 note_table_ids 找到对应的报表科目
   const findStmtForSection = useCallback((sec: NoteSection): StatementItem | null => {
-    // 先在自身的 note_table_ids 中查找
+    // 清洗科目名：去除编号、标点、括号及其内容
+    const cleanAcctName = (s: string) => {
+      // 先去除括号及其内容（中英文括号）
+      let r = s.replace(/[（(][^）)]*[）)]/g, '');
+      // 再去除编号、空白、标点
+      r = r.replace(/[\s一二三四五六七八九十、.\d]/g, '');
+      return r;
+    };
+    const secName = cleanAcctName(sec.title);
+    const stmtPri = (t: string) => t === 'income_statement' ? 2 : t === 'cash_flow' ? 1 : 0;
+
+    // ① 最高优先：section 名称与报表科目精确匹配（如"投资收益"→利润表投资收益）
+    let exactMatch: StatementItem | null = null;
+    for (const si of statementItems) {
+      if (si.is_sub_item) continue;
+      const siName = cleanAcctName(si.account_name);
+      if (secName === siName) {
+        if (!exactMatch || stmtPri(si.statement_type) > stmtPri(exactMatch.statement_type)) {
+          exactMatch = si;
+        }
+      }
+    }
+    if (exactMatch) return exactMatch;
+
+    // ② 通过 noteToStmtMap 查找（自身表格 → 子节点表格）
     for (const nid of sec.note_table_ids) {
       const item = noteToStmtMap.get(nid);
       if (item) return item;
     }
-    // 再在子节点中递归查找
     for (const child of sec.children) {
-      const item = findStmtForSection(child);
-      if (item) return item;
+      for (const nid of child.note_table_ids) {
+        const item = noteToStmtMap.get(nid);
+        if (item) return item;
+      }
+      for (const gc of child.children) {
+        for (const nid of gc.note_table_ids) {
+          const item = noteToStmtMap.get(nid);
+          if (item) return item;
+        }
+      }
     }
-    // 最后尝试通过科目名称直接匹配
-    const secName = sec.title.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
+
+    // ③ 包含匹配回退
+    let bestMatch: StatementItem | null = null;
+    let bestMatchLen = 0;
     for (const si of statementItems) {
       if (si.is_sub_item) continue;
-      const siName = si.account_name.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
-      if (secName.includes(siName) || siName.includes(secName)) return si;
+      const siName = cleanAcctName(si.account_name);
+      if (secName.includes(siName) || siName.includes(secName)) {
+        const matchLen = siName.length;
+        if (matchLen > bestMatchLen) {
+          bestMatch = si;
+          bestMatchLen = matchLen;
+        } else if (matchLen === bestMatchLen && bestMatch) {
+          if (stmtPri(si.statement_type) > stmtPri(bestMatch.statement_type)) {
+            bestMatch = si;
+          } else if (stmtPri(si.statement_type) === stmtPri(bestMatch.statement_type)) {
+            if (bestMatch.closing_balance == null && bestMatch.opening_balance == null
+              && (si.closing_balance != null || si.opening_balance != null)) {
+              bestMatch = si;
+            }
+          }
+        }
+      }
     }
-    return null;
+    return bestMatch;
   }, [noteToStmtMap, statementItems]);
 
   // ─── 附注分组：前段 / 主项目注释 / 其他专项披露 / 母公司 / 后段 ───
@@ -332,11 +426,11 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
 
   // ─── 折叠标题行 ───
   const renderCollapseHeader = (
-    id: string, title: string, level: number, hasContent: boolean, seqNo?: string,
+    id: string, title: string, level: number, hasContent: boolean, seqNo?: string, warn?: boolean,
   ) => {
     const isCollapsed = collapsedIds.has(id);
-    const tc = lvlColor(level);
-    const bg = lvlTitleBg(level);
+    const tc = warn ? GT.danger : lvlColor(level);
+    const bg = warn ? '#fdf0ef' : lvlTitleBg(level);
     const bc = lvlBorder(level);
     return (
       <div
@@ -525,11 +619,10 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
 
 
   // ─── 从附注表格中提取合计行金额 ───
-  const extractNoteTotals = useCallback((sec: NoteSection): { closing?: number; opening?: number } => {
-    // 取第一个表格的合计行
+  // subColumnHint: 可选，用于多子列表格（如"收入"/"成本"）中定位正确的子列
+  const extractNoteTotals = useCallback((sec: NoteSection, subColumnHint?: string): { closing?: number; opening?: number } => {
+    // 尝试从 section 下所有表格中提取合计金额
     if (sec.note_table_ids.length === 0) return {};
-    const nt = noteMap.get(sec.note_table_ids[0]);
-    if (!nt || nt.rows.length === 0) return {};
 
     const parse = (v: any): number | undefined => {
       if (v == null) return undefined;
@@ -539,13 +632,292 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       return isNaN(n) ? undefined : n;
     };
 
-    // 找合计行（从后往前找）
+    // 辅助：从单个表格中提取合计行
+    // 对于含"减：一年内到期"等扣减行的表格，优先取"小计"行（对应资产负债表金额）
+    const extractFromTable = (nt: NoteTable): { totalRow: any[] | null; nt: NoteTable } => {
+      if (!nt || nt.rows.length === 0) return { totalRow: null, nt };
+
+      // 找"合计"/"总计"行
+      let totalIdx = -1;
+      for (let ri = 0; ri < nt.rows.length; ri++) {
+        const first = (String(nt.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
+        if (first === '合计' || first === '总计') {
+          totalIdx = ri;
+        }
+      }
+
+      // 默认：找"合计"行
+      if (totalIdx >= 0) {
+        return { totalRow: nt.rows[totalIdx], nt };
+      }
+      for (let ri = nt.rows.length - 1; ri >= 0; ri--) {
+        const first = (String(nt.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
+        if (first === '合计' || first === '总计') {
+          return { totalRow: nt.rows[ri], nt };
+        }
+      }
+      return { totalRow: null, nt };
+    };
+
+    // 遍历所有表格，找到第一个有合计行的
     let totalRow: any[] | null = null;
-    for (let ri = nt.rows.length - 1; ri >= 0; ri--) {
-      const first = (String(nt.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
-      if (first === '合计') { totalRow = nt.rows[ri]; break; }
+    let nt: NoteTable | null = null;
+
+    // ── 特殊表格：未分配利润 ──
+    // 该表格没有合计行，而是通过特定行名标识期末/期初：
+    // "期末未分配利润" → 本期发生额列 = 期末数
+    // "调整后 期初未分配利润" → 本期发生额列 = 期初数
+    for (const nid of sec.note_table_ids) {
+      const table = noteMap.get(nid);
+      if (!table || table.rows.length === 0) continue;
+      let closingVal: number | undefined;
+      let openingVal: number | undefined;
+      let hasPattern = false;
+      for (let ri = 0; ri < table.rows.length; ri++) {
+        const first = (String(table.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
+        if (first.includes('期末未分配利润') || first.includes('期末未分配')) {
+          hasPattern = true;
+          // 取第一个有值的数值列（本期发生额）
+          for (let ci = 1; ci < table.rows[ri].length; ci++) {
+            const v = parse(table.rows[ri][ci]);
+            if (v != null) { closingVal = v; break; }
+          }
+        }
+        // "调整后 期初未分配利润" — 必须含"调整后"，排除"调整 期初未分配利润合计数"
+        if (first.includes('调整后') && (first.includes('期初未分配利润') || first.includes('期初未分配'))) {
+          hasPattern = true;
+          for (let ci = 1; ci < table.rows[ri].length; ci++) {
+            const v = parse(table.rows[ri][ci]);
+            if (v != null) { openingVal = v; break; }
+          }
+        }
+      }
+      if (hasPattern && (closingVal != null || openingVal != null)) {
+        return { closing: closingVal, opening: openingVal };
+      }
     }
-    if (!totalRow) return {};
+
+    for (const nid of sec.note_table_ids) {
+      const table = noteMap.get(nid);
+      if (!table) continue;
+      const result = extractFromTable(table);
+      if (result.totalRow) {
+        totalRow = result.totalRow;
+        nt = result.nt;
+        break;
+      }
+      if (!nt) nt = table; // 记住第一个表格作为 fallback
+    }
+
+    // 如果没有合计行，尝试从子节点的表格中查找
+    if (!totalRow && sec.children.length > 0) {
+      for (const child of sec.children) {
+        for (const nid of child.note_table_ids) {
+          const table = noteMap.get(nid);
+          if (!table) continue;
+          const result = extractFromTable(table);
+          if (result.totalRow) {
+            totalRow = result.totalRow;
+            nt = result.nt;
+            break;
+          }
+        }
+        if (totalRow) break;
+      }
+    }
+
+    // 如果仍然没有合计行，尝试单行表格回退：
+    // 只有一行数据时，该行即为期末/期初数值，直接用于核对
+    if (!totalRow && nt && nt.rows.length === 1) {
+      totalRow = nt.rows[0];
+    }
+
+    // 如果仍然没有合计行，尝试"账面价值"/"账面净值"行（投资性房地产/固定资产等）
+    if (!totalRow && nt && nt.rows.length > 0) {
+      const BOOK_VALUE_KW = ['账面价值', '账面净值', '净值'];
+      // 先确定"合计"列索引（多列表格中优先取合计列的值）
+      let bookValTotalCol = -1;
+      {
+        const allHdrs = nt.headers || [];
+        for (let ci = allHdrs.length - 1; ci >= 1; ci--) {
+          const h = (String(allHdrs[ci] ?? '')).replace(/\s+/g, '');
+          if (h === '合计' || h === '总计') { bookValTotalCol = ci; break; }
+        }
+      }
+      // 辅助：从行中提取金额，优先合计列，否则取最后一个有值的列
+      const pickRowVal = (row: any[]): number | undefined => {
+        if (bookValTotalCol > 0) {
+          const v = parse(row?.[bookValTotalCol]);
+          if (v != null) return v;
+        }
+        for (let ci = row.length - 1; ci >= 1; ci--) {
+          const v = parse(row[ci]);
+          if (v != null) return v;
+        }
+        return undefined;
+      };
+
+      // 策略A：分别找"期末账面价值"和"期初账面价值"行
+      {
+        let closingVal: number | undefined;
+        let openingVal: number | undefined;
+        for (let ri = 0; ri < nt.rows.length; ri++) {
+          const first = (String(nt.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
+          // 行标签同时包含"期末/年末"和"账面价值"
+          if ((first.includes('期末') || first.includes('年末')) && BOOK_VALUE_KW.some(kw => first.includes(kw))) {
+            closingVal = pickRowVal(nt.rows[ri]);
+          }
+          // 行标签同时包含"期初/年初"和"账面价值"
+          if ((first.includes('期初') || first.includes('年初')) && BOOK_VALUE_KW.some(kw => first.includes(kw))) {
+            openingVal = pickRowVal(nt.rows[ri]);
+          }
+        }
+        if (closingVal != null || openingVal != null) {
+          return { closing: closingVal, opening: openingVal };
+        }
+      }
+      // 策略B：在"账面价值"标题行之后，找"期末"和"期初"子行
+      {
+        let inBookValueSection = false;
+        let closingVal: number | undefined;
+        let openingVal: number | undefined;
+        for (let ri = 0; ri < nt.rows.length; ri++) {
+          const first = (String(nt.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
+          // 检测"四、账面价值"等标题行（可能有数值但不应直接使用）
+          if (BOOK_VALUE_KW.some(kw => first.includes(kw)) && !first.includes('期末') && !first.includes('期初') && !first.includes('年末') && !first.includes('年初')) {
+            inBookValueSection = true;
+            continue;
+          }
+          if (inBookValueSection) {
+            if (first.includes('期末') || first.includes('年末')) {
+              closingVal = pickRowVal(nt.rows[ri]);
+            }
+            if (first.includes('期初') || first.includes('年初')) {
+              openingVal = pickRowVal(nt.rows[ri]);
+            }
+            // 遇到新的大类标题（如"五、..."）则退出
+            if (/^[一二三四五六七八九十]+[、.]/.test(first) && !BOOK_VALUE_KW.some(kw => first.includes(kw))) {
+              break;
+            }
+          }
+        }
+        if (closingVal != null || openingVal != null) {
+          return { closing: closingVal, opening: openingVal };
+        }
+      }
+      // 策略C：最后兜底 — 找包含"账面价值"且有数值的行
+      for (let ri = nt.rows.length - 1; ri >= 0; ri--) {
+        const first = (String(nt.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
+        if (BOOK_VALUE_KW.some(kw => first.includes(kw))) {
+          // 优先取合计列
+          if (bookValTotalCol > 0) {
+            const v = parse(nt.rows[ri]?.[bookValTotalCol]);
+            if (v != null) {
+              // 单行账面价值 — 只有期末
+              return { closing: v };
+            }
+          }
+          // 否则取所有数值
+          const rowNums: number[] = [];
+          for (let ci = 1; ci < nt.rows[ri].length; ci++) {
+            const v = parse(nt.rows[ri][ci]);
+            if (v != null) rowNums.push(v);
+          }
+          if (rowNums.length >= 2) {
+            return { closing: rowNums[0], opening: rowNums[1] };
+          }
+          if (rowNums.length === 1) {
+            return { closing: rowNums[0] };
+          }
+        }
+      }
+
+      // 策略D：无形资产等表格 — 无"账面价值"行，需从 原值-累计摊销-减值准备 计算
+      // 表格结构：一、原价/原值 → 二、累计摊销 → 三、减值准备（无四、账面价值）
+      // 在每个大类中找"期末余额/期末金额"和"期初余额/期初金额"行，
+      // 然后用"合计"列（最后一个有数值的列）的值计算账面价值
+      {
+        const COST_KW = ['原价', '原值', '账面原值'];
+        const AMORT_KW = ['累计摊销', '累计折旧'];
+        const IMPAIR_KW = ['减值准备'];
+        // 检测表格是否有这种分段结构
+        const sectionPattern = /^[一二三四五六七八九十]+[、.]/;
+        let hasCostSection = false;
+        let hasAmortSection = false;
+        for (let ri = 0; ri < nt.rows.length; ri++) {
+          const first = (String(nt.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
+          if (sectionPattern.test(first)) {
+            if (COST_KW.some(kw => first.includes(kw))) hasCostSection = true;
+            if (AMORT_KW.some(kw => first.includes(kw))) hasAmortSection = true;
+          }
+        }
+        if (hasCostSection && hasAmortSection) {
+          // 找"合计"列索引（表头中最后一个含"合计"的列，或最后一列）
+          let totalColIdx = -1;
+          const allHeaders = nt.headers || [];
+          for (let ci = allHeaders.length - 1; ci >= 1; ci--) {
+            const h = (String(allHeaders[ci] ?? '')).replace(/\s+/g, '');
+            if (h === '合计' || h === '总计') { totalColIdx = ci; break; }
+          }
+          // 如果表头没有"合计"列，取最后一列
+          if (totalColIdx < 0 && allHeaders.length > 1) {
+            totalColIdx = allHeaders.length - 1;
+          }
+
+          if (totalColIdx > 0) {
+            // 按大类分段，提取每段的期末/期初值
+            type SectionVals = { closing?: number; opening?: number };
+            let currentSection = '';
+            const sectionVals: Record<string, SectionVals> = {};
+
+            for (let ri = 0; ri < nt.rows.length; ri++) {
+              const first = (String(nt.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
+              if (sectionPattern.test(first)) {
+                if (COST_KW.some(kw => first.includes(kw))) currentSection = 'cost';
+                else if (AMORT_KW.some(kw => first.includes(kw))) currentSection = 'amort';
+                else if (IMPAIR_KW.some(kw => first.includes(kw))) currentSection = 'impair';
+                else currentSection = '';
+                continue;
+              }
+              if (!currentSection) continue;
+              // 找"期末余额/期末金额"行
+              if (first.includes('期末') || first.includes('年末')) {
+                const v = parse(nt.rows[ri]?.[totalColIdx]);
+                if (v != null) {
+                  if (!sectionVals[currentSection]) sectionVals[currentSection] = {};
+                  sectionVals[currentSection].closing = v;
+                }
+              }
+              // 找"期初余额/期初金额"行
+              if (first.includes('期初') || first.includes('年初')) {
+                const v = parse(nt.rows[ri]?.[totalColIdx]);
+                if (v != null) {
+                  if (!sectionVals[currentSection]) sectionVals[currentSection] = {};
+                  sectionVals[currentSection].opening = v;
+                }
+              }
+            }
+
+            const costV = sectionVals['cost'];
+            const amortV = sectionVals['amort'];
+            const impairV = sectionVals['impair'];
+            if (costV) {
+              const closingBV = costV.closing != null
+                ? costV.closing - (amortV?.closing ?? 0) - (impairV?.closing ?? 0)
+                : undefined;
+              const openingBV = costV.opening != null
+                ? costV.opening - (amortV?.opening ?? 0) - (impairV?.opening ?? 0)
+                : undefined;
+              if (closingBV != null || openingBV != null) {
+                return { closing: closingBV, opening: openingBV };
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (!totalRow || !nt) return {};
 
     // 提取合计行中所有数值及其列索引
     const nums: { idx: number; val: number }[] = [];
@@ -555,8 +927,31 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     }
     if (nums.length === 0) return {};
 
-    // ── 简单表格（≤2个数值列）：第一个=期末，第二个=期初 ──
+    // ── 简单表格（≤2个数值列）：根据表头语义分配期末/期初 ──
     if (nums.length <= 2) {
+      // 尝试通过表头关键词确定每个数值列的语义
+      const hdrs = (nt.header_rows && nt.header_rows.length > 0 ? nt.header_rows[0] : nt.headers)
+        .map(h => (h || '').replace(/\s/g, ''));
+      const CLOSING_KW = ['期末', '年末', '本期', '本年'];
+      const OPENING_KW = ['期初', '年初', '上期', '上年'];
+      let closingVal: number | undefined;
+      let openingVal: number | undefined;
+      for (const n of nums) {
+        const h = hdrs[n.idx] || '';
+        // 先检查 OPENING_KW — "上年年末金额"同时含"年末"和"上年"，应归为期初
+        const isOpening = OPENING_KW.some(kw => h.includes(kw));
+        const isClosing = CLOSING_KW.some(kw => h.includes(kw));
+        if (isOpening) {
+          openingVal = n.val;
+        } else if (isClosing) {
+          closingVal = n.val;
+        }
+      }
+      // 如果通过表头成功分配了至少一个值，使用语义分配
+      if (closingVal != null || openingVal != null) {
+        return { closing: closingVal, opening: openingVal };
+      }
+      // 表头无法识别时，回退到位置分配：第一个=期末，第二个=期初
       return { closing: nums[0]?.val, opening: nums[1]?.val };
     }
 
@@ -666,11 +1061,22 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       }
 
       // 策略B：在最后一行表头中找"期末余额"/"期初余额"或"期末数"/"期初数"
-      const closingColsLast = findColsByKeyword('期末', hRows.length - 1)
-        .concat(findColsByKeyword('本期', hRows.length - 1));
-      const openingColsLast = findColsByKeyword('期初', hRows.length - 1)
-        .concat(findColsByKeyword('上期', hRows.length - 1))
-        .concat(findColsByKeyword('上年', hRows.length - 1));
+      // 排除变动列（本期增加/本期减少等）
+      const MOVE_KW = ['增加', '减少', '增减', '转入', '转出', '摊销', '折旧', '计提', '处置', '变动'];
+      const filterMoveCols = (cols: number[]): number[] =>
+        cols.filter(ci => {
+          const h = (hRows[hRows.length - 1][ci] || '').replace(/\s/g, '');
+          return !MOVE_KW.some(kw => h.includes(kw));
+        });
+      const closingColsLast = filterMoveCols(
+        findColsByKeyword('期末', hRows.length - 1)
+          .concat(findColsByKeyword('本期', hRows.length - 1))
+      );
+      const openingColsLast = filterMoveCols(
+        findColsByKeyword('期初', hRows.length - 1)
+          .concat(findColsByKeyword('上期', hRows.length - 1))
+          .concat(findColsByKeyword('上年', hRows.length - 1))
+      );
       if (closingColsLast.length > 0 || openingColsLast.length > 0) {
         return {
           closing: closingColsLast.length > 0 ? parse(totalRow[closingColsLast[0]]) : undefined,
@@ -679,21 +1085,33 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       }
 
       // 策略C：在第一行表头中找"期末"/"期初"父列，然后在子行中定位金额列
+      // 排除变动列
       let closingParentCol = -1, openingParentCol = -1;
       for (let ci = 0; ci < firstRow.length; ci++) {
         const h = (firstRow[ci] || '').replace(/\s/g, '');
         if (!h) continue;
+        if (MOVE_KW.some(kw => h.includes(kw))) continue;
         if (closingParentCol < 0 && (h.includes('期末') || h.includes('本期'))) closingParentCol = ci;
         if (openingParentCol < 0 && (h.includes('期初') || h.includes('上期') || h.includes('上年'))) openingParentCol = ci;
       }
 
       // 在子列范围内找最佳金额值：
+      // 0. 如果有 subColumnHint，优先匹配子列表头
       // 1. 优先找"账面价值"列直接取值
       // 2. 如果有"账面余额/原值"和"减值准备"列，计算 原值-准备
       // 3. 其次找"金额"/"余额"列（排除"比例"/%列）
       // 4. 最后取范围内第一个有数值的非比例列
       const pickAmountValue = (start: number, end: number): number | undefined => {
         const tr = totalRow!;
+        // 如果有 subColumnHint，在子列表头中精确匹配
+        if (subColumnHint) {
+          for (let ci = start; ci < end; ci++) {
+            const h = (lastRow[ci] || '').replace(/\s/g, '');
+            if (h.includes(subColumnHint)) return parse(tr[ci]);
+          }
+          // hint 未匹配到，返回 undefined（避免取到错误的列）
+          return undefined;
+        }
         // 优先：账面价值
         for (let ci = start; ci < end; ci++) {
           const h = (lastRow[ci] || '').replace(/\s/g, '');
@@ -764,12 +1182,32 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       };
     }
 
-    // 找"期末"/"期初"关键词
+    // 找"期末"/"期初"关键词（排除变动列如"本期增加"/"本期减少"等）
+    const MOVEMENT_KW = ['增加', '减少', '增减', '转入', '转出', '摊销', '折旧', '计提', '处置', '变动'];
+    const isMovementCol = (h: string) => MOVEMENT_KW.some(kw => h.includes(kw));
+    const OPEN_KW_ALL = ['期初', '年初', '上期', '上年'];
     let closingIdx = -1, openingIdx = -1;
+    // 第一轮：优先找"期末"/"年末"（精确匹配余额列）
+    // 注意：如果表头同时含期初/上年关键词（如"上年年末金额"），应归为期初而非期末
     for (let ci = 0; ci < headers.length; ci++) {
       const h = headers[ci];
-      if (closingIdx < 0 && (h.includes('期末') || h.includes('本期') || h.includes('本年'))) closingIdx = ci;
-      if (openingIdx < 0 && (h.includes('期初') || h.includes('上期') || h.includes('上年'))) openingIdx = ci;
+      if (isMovementCol(h)) continue;
+      const hasOpenKw = OPEN_KW_ALL.some(kw => h.includes(kw));
+      if (closingIdx < 0 && (h.includes('期末') || h.includes('年末')) && !hasOpenKw) closingIdx = ci;
+      if (openingIdx < 0 && (h.includes('期初') || h.includes('年初') || hasOpenKw)) openingIdx = ci;
+    }
+    // 第二轮：如果没找到，再尝试"本期"/"上期"（但排除变动列）
+    if (closingIdx < 0) {
+      for (let ci = 0; ci < headers.length; ci++) {
+        const h = headers[ci];
+        if ((h.includes('本期') || h.includes('本年')) && !isMovementCol(h) && !OPEN_KW_ALL.some(kw => h.includes(kw))) { closingIdx = ci; break; }
+      }
+    }
+    if (openingIdx < 0) {
+      for (let ci = 0; ci < headers.length; ci++) {
+        const h = headers[ci];
+        if ((h.includes('上期') || h.includes('上年')) && !isMovementCol(h)) { openingIdx = ci; break; }
+      }
     }
     if (closingIdx >= 0 || openingIdx >= 0) {
       return {
@@ -782,54 +1220,112 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     return { closing: nums[0]?.val, opening: nums[nums.length - 1]?.val };
   }, [noteMap]);
 
+  // ─── 计算各附注页签是否存在勾稽不一致 ───
+  const tabMismatchKeys = useMemo(() => {
+    const TOL = 0.5;
+    const warnKeys = new Set<string>();
+
+    const checkSec = (sec: NoteSection, mode: 'consolidated' | 'parent') => {
+      const isContainer = (c: NoteSection) =>
+        c.children.length > 0 && c.note_table_ids.length === 0 &&
+        c.content_paragraphs.filter(p => p.trim()).length === 0;
+      let displayChildren = sec.children;
+      if (sec.children.length >= 1 && sec.children.every(isContainer)) {
+        displayChildren = [];
+        for (const container of sec.children) {
+          displayChildren.push(...container.children);
+        }
+      }
+      const allSecs = displayChildren.length > 0 ? displayChildren : [sec];
+      for (const child of allSecs) {
+        const si = findStmtForSection(child);
+        if (!si) continue;
+        const stmtClosing = mode === 'parent' ? (si.company_closing_balance ?? si.closing_balance) : si.closing_balance;
+        const stmtOpening = mode === 'parent' ? (si.company_opening_balance ?? si.opening_balance) : si.opening_balance;
+        const noteTotals = extractNoteTotals(child);
+        if (stmtClosing != null && noteTotals.closing != null && Math.abs(stmtClosing - noteTotals.closing) > TOL) return true;
+        if (stmtOpening != null && noteTotals.opening != null && Math.abs(stmtOpening - noteTotals.opening) > TOL) return true;
+      }
+      return false;
+    };
+
+    if (noteGroups.mainSec && checkSec(noteGroups.mainSec, 'consolidated')) warnKeys.add('main');
+    if (noteGroups.parentSec && checkSec(noteGroups.parentSec, 'parent')) warnKeys.add('parent');
+    return warnKeys;
+  }, [noteGroups, findStmtForSection, extractNoteTotals]);
+
   // ─── 渲染报表金额提示条 ───
   const renderStmtAmountBar = (item: StatementItem, mode: 'consolidated' | 'parent', sec: NoteSection) => {
     const fmt = (v?: number) => v != null ? v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
-    // 根据模式选择金额
-    const stmtClosing = mode === 'parent' ? (item.company_closing_balance ?? item.closing_balance) : item.closing_balance;
-    const stmtOpening = mode === 'parent' ? (item.company_opening_balance ?? item.opening_balance) : item.opening_balance;
-    const label = mode === 'parent' ? '母公司报表' : item.sheet_name;
-
-    // 提取附注合计行金额进行比对
-    const noteTotals = extractNoteTotals(sec);
     const TOL = 0.5;
-    // closingMatch / openingMatch: true=一致, false=不一致, null=无法比对
-    const closingMatch = (stmtClosing != null && noteTotals.closing != null)
-      ? Math.abs(stmtClosing - noteTotals.closing) <= TOL : null;
-    const openingMatch = (stmtOpening != null && noteTotals.opening != null)
-      ? Math.abs(stmtOpening - noteTotals.opening) <= TOL : null;
 
-    return (
-      <div style={{
-        margin: '4px 0 8px 0', borderRadius: GT.radiusSm,
-        border: `1px solid ${GT.primary}40`, overflow: 'hidden',
-      }}>
-        {/* 报表金额行 */}
-        <div style={{
-          padding: '7px 14px',
-          background: `linear-gradient(135deg, ${GT.primaryBg} 0%, ${GT.primaryBgDeep} 100%)`,
-          fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '4px 20px',
-          alignItems: 'center',
-        }}>
-          <span style={{ fontWeight: 700, color: GT.primary, fontSize: 12 }}>📊 {label}</span>
-          <span style={{ color: GT.primary, fontWeight: 600 }}>
-            期末/本期：<span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(stmtClosing)}</span>
-          </span>
-          <span style={{ color: GT.primary, fontWeight: 600 }}>
-            期初/上期：<span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(stmtOpening)}</span>
-          </span>
-        </div>
-        {/* 勾稽校验行 */}
-        {(closingMatch !== null || openingMatch !== null) && (
+    // 检测是否为"营业收入和营业成本"合并附注
+    const secTitle = sec.title.replace(/\s+/g, '');
+    const isCombinedRevenueCost = secTitle.includes('营业收入') && secTitle.includes('营业成本');
+
+    // 构建需要校验的科目列表：[{ item, subHint, label }]
+    type CheckEntry = { si: StatementItem; subHint?: string; label: string };
+    const entries: CheckEntry[] = [];
+
+    if (isCombinedRevenueCost) {
+      // 找到营业收入和营业成本两个报表科目
+      const revenueItem = statementItems.find(si =>
+        !si.is_sub_item && si.account_name === '营业收入'
+      ) || statementItems.find(si =>
+        !si.is_sub_item && si.account_name.includes('营业收入') && !si.account_name.includes('成本')
+      );
+      const costItem = statementItems.find(si =>
+        !si.is_sub_item && si.account_name === '营业成本'
+      ) || statementItems.find(si =>
+        !si.is_sub_item && si.account_name.includes('营业成本') && !si.account_name.includes('收入')
+      );
+      if (revenueItem) entries.push({ si: revenueItem, subHint: '收入', label: '营业收入' });
+      if (costItem) entries.push({ si: costItem, subHint: '成本', label: '营业成本' });
+      // 如果都没找到，回退到原始 item
+      if (entries.length === 0) entries.push({ si: item, label: item.account_name });
+    } else {
+      entries.push({ si: item, label: mode === 'parent' ? '母公司报表' : item.sheet_name });
+    }
+
+    // 渲染单个科目的报表金额行 + 勾稽校验行
+    const renderEntry = (entry: CheckEntry, idx: number) => {
+      const stmtClosing = mode === 'parent' ? (entry.si.company_closing_balance ?? entry.si.closing_balance) : entry.si.closing_balance;
+      const stmtOpening = mode === 'parent' ? (entry.si.company_opening_balance ?? entry.si.opening_balance) : entry.si.opening_balance;
+      const noteTotals = extractNoteTotals(sec, entry.subHint);
+      const closingMatch = (stmtClosing != null && noteTotals.closing != null)
+        ? Math.abs(stmtClosing - noteTotals.closing) <= TOL : null;
+      const openingMatch = (stmtOpening != null && noteTotals.opening != null)
+        ? Math.abs(stmtOpening - noteTotals.opening) <= TOL : null;
+
+      return (
+        <div key={idx}>
+          {/* 报表金额行 */}
+          <div style={{
+            padding: '7px 14px',
+            background: `linear-gradient(135deg, ${GT.primaryBg} 0%, ${GT.primaryBgDeep} 100%)`,
+            fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '4px 20px',
+            alignItems: 'center',
+            borderTop: idx > 0 ? `1px solid ${GT.primary}30` : undefined,
+          }}>
+            <span style={{ fontWeight: 700, color: GT.primary, fontSize: 12 }}>📊 {entry.label}</span>
+            <span style={{ color: GT.primary, fontWeight: 600 }}>
+              期末/本期：<span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(stmtClosing)}</span>
+            </span>
+            <span style={{ color: GT.primary, fontWeight: 600 }}>
+              期初/上期：<span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(stmtOpening)}</span>
+            </span>
+          </div>
+          {/* 勾稽校验行 */}
           <div style={{
             padding: '5px 14px',
-            background: (closingMatch === false || openingMatch === false) ? '#fdf0ef' : '#eafaf1',
+            background: (closingMatch === false || openingMatch === false) ? '#fdf0ef'
+              : (closingMatch !== null || openingMatch !== null) ? '#eafaf1' : '#f8f8f8',
             borderTop: `1px solid ${GT.primary}20`,
             fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '4px 20px',
             alignItems: 'center',
           }}>
             <span style={{ fontWeight: 600, color: GT.textSecondary, fontSize: 11 }}>勾稽校验</span>
-            {closingMatch !== null && (
+            {closingMatch !== null ? (
               <span style={{
                 color: closingMatch ? GT.success : GT.danger,
                 fontWeight: closingMatch ? 400 : 700,
@@ -837,12 +1333,14 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
                 {closingMatch ? '✓' : '✗'} 期末
                 {!closingMatch && noteTotals.closing != null && (
                   <span style={{ fontSize: 11, marginLeft: 4 }}>
-                    （附注：{fmt(noteTotals.closing)}）
+                    （附注：{fmt(noteTotals.closing)}，差异：{fmt(stmtClosing != null && noteTotals.closing != null ? stmtClosing - noteTotals.closing : undefined)}）
                   </span>
                 )}
               </span>
-            )}
-            {openingMatch !== null && (
+            ) : stmtClosing != null ? (
+              <span style={{ color: GT.textMuted, fontSize: 11 }}>— 期末：未提取到附注合计</span>
+            ) : null}
+            {openingMatch !== null ? (
               <span style={{
                 color: openingMatch ? GT.success : GT.danger,
                 fontWeight: openingMatch ? 400 : 700,
@@ -850,13 +1348,24 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
                 {openingMatch ? '✓' : '✗'} 期初
                 {!openingMatch && noteTotals.opening != null && (
                   <span style={{ fontSize: 11, marginLeft: 4 }}>
-                    （附注：{fmt(noteTotals.opening)}）
+                    （附注：{fmt(noteTotals.opening)}，差异：{fmt(stmtOpening != null && noteTotals.opening != null ? stmtOpening - noteTotals.opening : undefined)}）
                   </span>
                 )}
               </span>
-            )}
+            ) : stmtOpening != null ? (
+              <span style={{ color: GT.textMuted, fontSize: 11 }}>— 期初：未提取到附注合计</span>
+            ) : null}
           </div>
-        )}
+        </div>
+      );
+    };
+
+    return (
+      <div style={{
+        margin: '4px 0 8px 0', borderRadius: GT.radiusSm,
+        border: `1px solid ${GT.primary}40`, overflow: 'hidden',
+      }}>
+        {entries.map((entry, idx) => renderEntry(entry, idx))}
       </div>
     );
   };
@@ -876,6 +1385,19 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       : null;
     let amountBarInserted = false;
 
+    // 检测是否为"多表多科目"模式：section 有多个表格且映射到不同的报表科目
+    // 典型场景：现金流量表项目注释下的子节点，每个表格对应不同的现金流科目
+    const perTableMode = (() => {
+      if (!showAmountBar || sec.note_table_ids.length <= 1) return false;
+      const itemIds = new Set<string>();
+      for (const nid of sec.note_table_ids) {
+        const mapped = noteToStmtMap.get(nid);
+        if (mapped) itemIds.add(mapped.id);
+      }
+      // 如果映射到多个不同的报表科目，启用逐表模式
+      return itemIds.size > 1;
+    })();
+
     return (
       <div style={{ padding: '2px 0' }}>
         {filteredParas.length > 0 && (
@@ -893,7 +1415,19 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
             shownLabels.add(rawLabel);
           }
           const tableEl = renderNoteTable(nt, label, sec.level);
-          // 只在顶层科目节点的第一个表格之后插入报表金额条
+
+          if (perTableMode) {
+            // 逐表模式：每个表格独立查找报表科目并显示金额条
+            const tableStmtItem = noteToStmtMap.get(id);
+            if (tableStmtItem) {
+              // 构造只含当前表格的虚拟 section 用于提取合计值
+              const virtualSec: NoteSection = { ...sec, note_table_ids: [id], children: [] };
+              return <React.Fragment key={id}>{tableEl}{renderStmtAmountBar(tableStmtItem, mode, virtualSec)}</React.Fragment>;
+            }
+            return tableEl;
+          }
+
+          // 单科目模式：只在第一个表格之后插入报表金额条
           if (stmtItem && !amountBarInserted && idx === 0) {
             amountBarInserted = true;
             return <React.Fragment key={id}>{tableEl}{renderStmtAmountBar(stmtItem, mode, sec)}</React.Fragment>;
@@ -910,19 +1444,54 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     const hasContent = sec.content_paragraphs.length > 0 || sec.note_table_ids.length > 0 || sec.children.length > 0;
     const cBg = lvlBodyBg(sec.level);
 
-    // 如果是顶层科目节点但自身没有表格，把金额条下传给第一个有表格的子节点
+    // 如果是顶层科目节点但自身没有表格，把金额条下传给子节点
     const selfHasTables = sec.note_table_ids.length > 0;
     const needPassDown = isTopLevel && !selfHasTables;
 
-    // 提前找好报表科目（在父级层面找，避免子节点标题不匹配）
-    const parentStmtItem = needPassDown ? findStmtForSection(sec) : null;
-    const firstChildWithTable = needPassDown
+    // 判断是否有多个子节点各自拥有表格且映射到不同的报表科目
+    // （如现金流量表项目注释下的多个子类别，每个对应不同的现金流科目）
+    const multiChildMode = (() => {
+      if (!needPassDown) return false;
+      const childStmtIds = new Set<string>();
+      for (const c of sec.children) {
+        for (const nid of c.note_table_ids) {
+          const mapped = noteToStmtMap.get(nid);
+          if (mapped) childStmtIds.add(mapped.id);
+        }
+        // 也检查孙节点
+        for (const gc of c.children) {
+          for (const nid of gc.note_table_ids) {
+            const mapped = noteToStmtMap.get(nid);
+            if (mapped) childStmtIds.add(mapped.id);
+          }
+        }
+      }
+      return childStmtIds.size > 1;
+    })();
+
+    // 单子节点模式：只传给第一个有表格的子节点（原有逻辑）
+    const parentStmtItem = (needPassDown && !multiChildMode) ? findStmtForSection(sec) : null;
+    const firstChildWithTable = (needPassDown && !multiChildMode)
       ? sec.children.findIndex(c => c.note_table_ids.length > 0)
       : -1;
 
+    // 顶层科目节点：检测勾稽是否不一致，用于标题变色
+    const headerWarn = (() => {
+      if (!isTopLevel) return false;
+      const TOL = 0.5;
+      const si = findStmtForSection(sec);
+      if (!si) return false;
+      const stmtClosing = mode === 'parent' ? (si.company_closing_balance ?? si.closing_balance) : si.closing_balance;
+      const stmtOpening = mode === 'parent' ? (si.company_opening_balance ?? si.opening_balance) : si.opening_balance;
+      const noteTotals = extractNoteTotals(sec);
+      if (stmtClosing != null && noteTotals.closing != null && Math.abs(stmtClosing - noteTotals.closing) > TOL) return true;
+      if (stmtOpening != null && noteTotals.opening != null && Math.abs(stmtOpening - noteTotals.opening) > TOL) return true;
+      return false;
+    })();
+
     return (
       <div key={sec.id} style={{ marginBottom: 8 }}>
-        {renderCollapseHeader(sec.id, sec.title, sec.level, hasContent, seqNo)}
+        {renderCollapseHeader(sec.id, sec.title, sec.level, hasContent, seqNo, headerWarn)}
         {!isCollapsed && hasContent && (
           <div style={{
             background: cBg, padding: '4px 14px',
@@ -930,9 +1499,13 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
           }}>
             {renderSectionContent(sec, mode, isTopLevel && selfHasTables)}
             {sec.children.map((child, ci) => {
-              if (needPassDown && ci === firstChildWithTable && parentStmtItem) {
-                // 子节点需要显示金额条，传入父级找到的报表科目
+              if (needPassDown && !multiChildMode && ci === firstChildWithTable && parentStmtItem) {
+                // 单子节点模式：传入父级找到的报表科目
                 return renderSectionTreeWithStmt(child, seqNo ? `${seqNo}.${ci + 1}` : `${ci + 1}`, mode, parentStmtItem);
+              }
+              if (multiChildMode) {
+                // 多子节点模式：每个子节点独立查找自己的报表科目并显示金额条
+                return renderSectionTree(child, seqNo ? `${seqNo}.${ci + 1}` : `${ci + 1}`, mode, true);
               }
               return renderSectionTree(child, seqNo ? `${seqNo}.${ci + 1}` : `${ci + 1}`, mode, false);
             })}
@@ -987,41 +1560,162 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     sec.children.forEach(walk);
     // 也检查 sec 自身
     allTitles.push(sec.title);
+    // 也收集全部 sections 的标题（防止某些科目被分到其他分组）
+    sections.forEach(walk);
+
+    // 同时收集附注表格的 account_name 和 section_title（补充匹配源）
+    const noteNames: string[] = notes.map(n => n.account_name).concat(notes.map(n => n.section_title));
+
+    // 构建 matching map 中已匹配的科目名称集合
+    const matchedAcctNames = new Set<string>();
+    if (matching) {
+      const itemMap = new Map(statementItems.map(i => [i.id, i]));
+      for (const entry of matching.entries) {
+        if (entry.note_table_ids.length > 0) {
+          const item = itemMap.get(entry.statement_item_id);
+          if (item) matchedAcctNames.add(item.account_name);
+        }
+      }
+    }
 
     const normalize = (s: string) => s.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
 
     const coverage = parentPresetAccounts.map(acct => {
-      const found = allTitles.some(t => {
+      const foundInSections = allTitles.some(t => {
         const nt = normalize(t);
         return (acct.keywords as string[]).some(kw => nt.includes(kw));
       });
-      return { ...acct, found };
+      const foundInNotes = noteNames.some(n => {
+        const nn = normalize(n || '');
+        return (acct.keywords as string[]).some(kw => nn.includes(kw));
+      });
+      // 在 matching map 中查找（后端已匹配的科目）
+      const foundInMatching = matchedAcctNames.has(acct.name);
+      const found = foundInSections || foundInNotes || foundInMatching;
+      const hasBalance = statementItems.some(item => {
+        const itemNorm = normalize(item.account_name);
+        const acctNorm = normalize(acct.name);
+        return (itemNorm === acctNorm || itemNorm.includes(acctNorm) || acctNorm.includes(itemNorm))
+          && ((item.closing_balance != null && item.closing_balance !== 0) || (item.opening_balance != null && item.opening_balance !== 0));
+      });
+      return { ...acct, found, hasBalance };
     });
 
     const foundCount = coverage.filter(c => c.found).length;
     const total = coverage.length;
     const allFound = foundCount === total;
+    const realMissing = coverage.filter(c => !c.found && c.hasBalance).length;
 
     return (
       <div style={{
         margin: '0 0 12px 0', padding: '10px 14px',
-        background: allFound ? GT.successBg : GT.warningBg,
+        background: (allFound || realMissing === 0) ? GT.successBg : GT.warningBg,
         borderRadius: GT.radiusSm,
-        border: `1px solid ${allFound ? GT.success : GT.warning}`,
+        border: `1px solid ${(allFound || realMissing === 0) ? GT.success : GT.warning}`,
         fontSize: 13,
       }}>
-        <div style={{ fontWeight: 600, marginBottom: 6, color: allFound ? GT.success : GT.warning }}>
+        <div style={{ fontWeight: 600, marginBottom: 6, color: (allFound || realMissing === 0) ? GT.success : GT.warning }}>
           模板预设科目覆盖：{foundCount}/{total}
-          {allFound ? ' ✓ 全部覆盖' : ' — 部分科目缺失'}
+          {allFound ? ' ✓ 全部覆盖' : realMissing === 0 ? ' ✓ 有余额科目全部覆盖' : ` — ${realMissing} 个有余额科目缺失附注`}
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px' }}>
           {coverage.map((c, i) => (
             <span key={i} style={{
               display: 'inline-flex', alignItems: 'center', gap: 4,
-              color: c.found ? GT.success : GT.danger,
-              fontWeight: c.found ? 400 : 600,
+              color: c.found ? GT.success : c.hasBalance ? GT.danger : GT.textMuted,
+              fontWeight: c.found ? 400 : c.hasBalance ? 600 : 400,
             }}>
-              <span style={{ fontSize: 11 }}>{c.found ? '✓' : '✗'}</span>
+              <span style={{ fontSize: 11 }}>{c.found ? '✓' : c.hasBalance ? '✗' : '—'}</span>
+              {c.name}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── 合并附注预设科目覆盖率面板 ───
+  const renderConsolidatedCoveragePanel = (sec: NoteSection) => {
+    if (consolidatedPresetAccounts.length === 0) return null;
+
+    // 收集所有附注章节标题（递归，包括 mainSec 及所有子节点）
+    const allTitles: string[] = [];
+    const walk = (s: NoteSection) => {
+      allTitles.push(s.title);
+      s.children.forEach(walk);
+    };
+    sec.children.forEach(walk);
+    allTitles.push(sec.title);
+    // 也收集全部 sections 的标题（防止某些科目被分到其他分组）
+    sections.forEach(walk);
+
+    // 同时收集附注表格的 account_name 和 section_title（补充匹配源）
+    const noteNames: string[] = notes.map(n => n.account_name).concat(notes.map(n => n.section_title));
+
+    // 构建 matching map 中已匹配的科目名称集合
+    const matchedAcctNames = new Set<string>();
+    if (matching) {
+      const itemMap = new Map(statementItems.map(i => [i.id, i]));
+      for (const entry of matching.entries) {
+        if (entry.note_table_ids.length > 0) {
+          const item = itemMap.get(entry.statement_item_id);
+          if (item) matchedAcctNames.add(item.account_name);
+        }
+      }
+    }
+
+    const normalize = (s: string) => s.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
+
+    const coverage = consolidatedPresetAccounts.map(acct => {
+      // 在章节标题中查找
+      const foundInSections = allTitles.some(t => {
+        const nt = normalize(t);
+        return (acct.keywords as string[]).some(kw => nt.includes(kw));
+      });
+      // 在附注表格名称中查找
+      const foundInNotes = noteNames.some(n => {
+        const nn = normalize(n || '');
+        return (acct.keywords as string[]).some(kw => nn.includes(kw));
+      });
+      // 在 matching map 中查找（后端已匹配的科目）
+      const foundInMatching = matchedAcctNames.has(acct.name);
+      const found = foundInSections || foundInNotes || foundInMatching;
+      // 检查该科目在报表中是否有余额（无余额时缺失附注是正常的）
+      const hasBalance = statementItems.some(item => {
+        const itemNorm = normalize(item.account_name);
+        const acctNorm = normalize(acct.name);
+        return (itemNorm === acctNorm || itemNorm.includes(acctNorm) || acctNorm.includes(itemNorm))
+          && ((item.closing_balance != null && item.closing_balance !== 0) || (item.opening_balance != null && item.opening_balance !== 0));
+      });
+      return { ...acct, found, hasBalance };
+    });
+
+    const foundCount = coverage.filter(c => c.found).length;
+    const total = coverage.length;
+    const allFound = foundCount === total;
+    // 真正缺失 = 未找到 且 有余额
+    const realMissing = coverage.filter(c => !c.found && c.hasBalance).length;
+
+    return (
+      <div style={{
+        margin: '0 0 12px 0', padding: '10px 14px',
+        background: (allFound || realMissing === 0) ? GT.successBg : GT.warningBg,
+        borderRadius: GT.radiusSm,
+        border: `1px solid ${(allFound || realMissing === 0) ? GT.success : GT.warning}`,
+        fontSize: 13,
+      }}>
+        <div style={{ fontWeight: 600, marginBottom: 6, color: (allFound || realMissing === 0) ? GT.success : GT.warning }}>
+          模板预设科目覆盖：{foundCount}/{total}
+          {allFound ? ' ✓ 全部覆盖' : realMissing === 0 ? ' ✓ 有余额科目全部覆盖' : ` — ${realMissing} 个有余额科目缺失附注`}
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px' }}>
+          {coverage.map((c, i) => (
+            <span key={i} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              color: c.found ? GT.success : c.hasBalance ? GT.danger : GT.textMuted,
+              fontWeight: c.found ? 400 : c.hasBalance ? 600 : 400,
+            }}>
+              <span style={{ fontSize: 11 }}>{c.found ? '✓' : c.hasBalance ? '✗' : '—'}</span>
               {c.name}
             </span>
           ))}
@@ -1356,6 +2050,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     active: string | number,
     setActive: (v: any) => void,
     size: 'lg' | 'sm' = 'sm',
+    warnKeys?: Set<string>,
   ) => (
     <div style={{
       display: 'flex', gap: 2, flexWrap: 'wrap',
@@ -1364,26 +2059,29 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     }}>
       {tabs.map(tab => {
         const isActive = active === tab.key;
+        const isWarn = warnKeys?.has(String(tab.key));
+        const activeColor = isWarn ? GT.danger : GT.primary;
         return (
           <button key={tab.key} onClick={() => setActive(tab.key)}
             style={{
               padding: size === 'lg' ? '11px 28px' : '8px 18px',
               border: 'none',
-              background: isActive ? GT.primaryBg : 'transparent',
+              background: isActive ? (isWarn ? '#fdf0ef' : GT.primaryBg) : 'transparent',
               cursor: 'pointer',
               fontSize: size === 'lg' ? 15 : 13,
               fontWeight: isActive ? 700 : 500,
               borderRadius: '6px 6px 0 0',
               transition: 'all 0.15s',
               borderBottom: isActive
-                ? `${size === 'lg' ? 3 : 2}px solid ${GT.primary}`
+                ? `${size === 'lg' ? 3 : 2}px solid ${activeColor}`
                 : `${size === 'lg' ? 3 : 2}px solid transparent`,
-              color: isActive ? GT.primary : GT.textMuted,
+              color: isActive ? activeColor : isWarn ? GT.danger : GT.textMuted,
               marginBottom: -2,
               maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}
             title={tab.label}>
             {tab.label}
+            {isWarn && <span style={{ marginLeft: 4, fontSize: 10 }}>⚠</span>}
           </button>
         );
       })}
@@ -1672,9 +2370,16 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
                   const idx = noteTabs.findIndex(t => t.key === key);
                   if (idx >= 0) setActiveNoteTab(idx);
                 },
+                'sm',
+                tabMismatchKeys,
               )}
               {noteTabs[activeNoteTab]?.key === 'before' && renderSectionsPage(noteGroups.before)}
-              {noteTabs[activeNoteTab]?.key === 'main' && noteGroups.mainSec && renderStatementNotes(noteGroups.mainSec, 'consolidated')}
+              {noteTabs[activeNoteTab]?.key === 'main' && noteGroups.mainSec && (
+                <div>
+                  {renderConsolidatedCoveragePanel(noteGroups.mainSec)}
+                  {renderStatementNotes(noteGroups.mainSec, 'consolidated')}
+                </div>
+              )}
               {noteTabs[activeNoteTab]?.key === 'parent' && noteGroups.parentSec && (
                 <div>
                   {renderParentCoveragePanel(noteGroups.parentSec)}

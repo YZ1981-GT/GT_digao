@@ -71,7 +71,8 @@ class TestRuleBasedAnalysis:
         nt = _make_note_table()
         result = _run(analyzer.analyze_table_structure(nt))
         assert isinstance(result, TableStructure)
-        assert result.structure_confidence == "low"
+        # 含合计行+语义列（期初余额、期末余额）→ high 置信度
+        assert result.structure_confidence == "high"
         assert 2 in result.total_row_indices  # "合计" 在第3行(index=2)
         analyzer.clear_cache()
 
@@ -214,7 +215,8 @@ class TestLLMAnalysis:
         mock_service.stream_chat_completion = mock_stream
 
         result = _run(analyzer.analyze_table_structure(nt, openai_service=mock_service))
-        assert result.structure_confidence == "low"
+        # 规则识别对含合计行+语义列的表格应给出 high 置信度
+        assert result.structure_confidence == "high"
         assert 2 in result.total_row_indices
         analyzer.clear_cache()
 
@@ -231,7 +233,8 @@ class TestLLMAnalysis:
         mock_service.stream_chat_completion = mock_stream
 
         result = _run(analyzer.analyze_table_structure(nt, openai_service=mock_service))
-        assert result.structure_confidence == "low"
+        # 规则识别对含合计行+语义列的表格应给出 high 置信度
+        assert result.structure_confidence == "high"
         analyzer.clear_cache()
 
     def test_llm_missing_required_fields_fallback(self):
@@ -247,11 +250,9 @@ class TestLLMAnalysis:
         mock_service.stream_chat_completion = mock_stream
 
         result = _run(analyzer.analyze_table_structure(nt, openai_service=mock_service))
-        assert result.structure_confidence == "low"
+        # 规则识别对含合计行+语义列的表格应给出 high 置信度
+        assert result.structure_confidence == "high"
         analyzer.clear_cache()
-
-
-# ─── 缓存测试 ───
 
 class TestCache:
     def test_cache_hit(self):
@@ -319,3 +320,237 @@ class TestPromptBuilding:
         assert "应收账款" in prompt
         assert "期初余额" in prompt or "期末余额" in prompt
         assert "JSON" in prompt
+
+
+# ─── 列语义关键词回归测试（Task 6 修复） ───
+
+class TestColumnKeywordRegression:
+    """验证 COLUMN_KEYWORDS 修复后，常见表头格式都能正确识别。"""
+
+    def test_short_increase_decrease_headers(self):
+        """表头为"增加"/"减少"时应识别为 current_increase/current_decrease。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期初余额", "增加", "减少", "期末余额"],
+            rows=[["固定资产", 1000, 200, 50, 1150], ["合计", 1000, 200, 50, 1150]],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        col_map = {c.col_index: c.semantic for c in result.columns}
+        assert col_map[2] == "current_increase", f"'增加'应为current_increase，实际{col_map[2]}"
+        assert col_map[3] == "current_decrease", f"'减少'应为current_decrease，实际{col_map[3]}"
+        analyzer.clear_cache()
+
+    def test_full_increase_decrease_headers(self):
+        """表头为"本期增加"/"本期减少"时应识别为 current_increase/current_decrease。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[["固定资产", 1000, 200, 50, 1150], ["合计", 1000, 200, 50, 1150]],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        col_map = {c.col_index: c.semantic for c in result.columns}
+        assert col_map[2] == "current_increase", f"'本期增加'应为current_increase，实际{col_map[2]}"
+        assert col_map[3] == "current_decrease", f"'本期减少'应为current_decrease，实际{col_map[3]}"
+        analyzer.clear_cache()
+
+    def test_current_period_prior_period(self):
+        """表头为"本期发生额"/"上期发生额"时应识别为 current_period/prior_period。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "本期发生额", "上期发生额"],
+            rows=[["收入", 500, 400], ["合计", 500, 400]],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        col_map = {c.col_index: c.semantic for c in result.columns}
+        assert col_map[1] == "current_period", f"'本期发生额'应为current_period，实际{col_map[1]}"
+        assert col_map[2] == "prior_period", f"'上期发生额'应为prior_period，实际{col_map[2]}"
+        analyzer.clear_cache()
+
+    def test_current_amount_prior_amount(self):
+        """表头为"本期金额"/"上期金额"时应识别为 current_period/prior_period。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "本期金额", "上期金额"],
+            rows=[["费用", 300, 250], ["合计", 300, 250]],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        col_map = {c.col_index: c.semantic for c in result.columns}
+        assert col_map[1] == "current_period", f"'本期金额'应为current_period，实际{col_map[1]}"
+        assert col_map[2] == "prior_period", f"'上期金额'应为prior_period，实际{col_map[2]}"
+        analyzer.clear_cache()
+
+    def test_percentage_column_excluded(self):
+        """含"比例"的列应识别为 other，不参与金额校验。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期末余额", "比例(%)", "期初余额"],
+            rows=[["A", 100, "50%", 80], ["合计", 100, "100%", 80]],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        col_map = {c.col_index: c.semantic for c in result.columns}
+        assert col_map[2] == "other", f"'比例(%)'应为other，实际{col_map[2]}"
+        analyzer.clear_cache()
+
+
+# ─── 多分组表格（并列子表）───
+
+class TestMultiGroupTable:
+    """表格含并列分组（如跌价准备+合同履约成本减值准备）时，
+    不应启用余额变动公式校验。"""
+
+    def test_duplicate_opening_balance_disables_formula(self):
+        """两个 opening_balance 列 → has_balance_formula 应为 False，
+        opening_balance_cell 应为 None（无法确定哪个是总计）。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期初余额", "本期增加", "期初余额", "本期增加", "本期减少", "本期转回", "期末余额"],
+            rows=[
+                ["原材料", 4554.20, None, 1507335.68, None, None, None, 16140670.21],
+                ["合计", 22285106.85, None, 11957176.87, None, 1664547.57, None, 28936716.40],
+            ],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        assert result.has_balance_formula is False, \
+            "多分组表格不应启用余额变动公式校验"
+        assert result.opening_balance_cell is None, \
+            "多分组表格的 opening_balance_cell 应为 None"
+        assert result.closing_balance_cell is not None, \
+            "唯一的 closing_balance 列仍应正常定位"
+        analyzer.clear_cache()
+
+    def test_single_opening_balance_keeps_formula(self):
+        """只有一个 opening_balance 列 → has_balance_formula 正常检测。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["A", 100, 50, 20, 130],
+                ["合计", 100, 50, 20, 130],
+            ],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        assert result.has_balance_formula is True, \
+            "单分组表格应正常检测余额变动公式"
+        analyzer.clear_cache()
+
+class TestNumberedSubItemDetection:
+    """短期薪酬等表格中，"其中：1. xxx"带编号的其中项，
+    后续非编号行（如"住房公积金"）不应被误标为 sub_item。"""
+
+    def test_numbered_sub_items_stop_at_non_numbered(self):
+        """其中：1. 医疗保险费 后面的编号行是 sub_item，
+        非编号行（住房公积金、工会经费）应为 data。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[
+                ["工资、奖金、津贴和补贴", 1000, 800],       # 0: data
+                ["职工福利费", 200, 150],                     # 1: data
+                ["社会保险费", 300, 250],                     # 2: data
+                ["其中：1. 医疗保险费", 100, 80],             # 3: sub_item (parent=2)
+                ["2. 工伤保险费", 50, 40],                    # 4: sub_item (parent=2)
+                ["3. 生育保险费", 30, 20],                    # 5: sub_item (parent=2)
+                ["4. 失业保险费", 20, 15],                    # 6: sub_item (parent=2)
+                ["住房公积金", 400, 350],                     # 7: data (NOT sub_item!)
+                ["工会经费", 50, 40],                         # 8: data (NOT sub_item!)
+                ["合计", 2000, 1600],                         # 9: total
+            ],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        roles = {r.row_index: r.role for r in result.rows}
+        parents = {r.row_index: r.parent_row_index for r in result.rows}
+
+        # 编号行应为 sub_item
+        assert roles[3] == "sub_item" and parents[3] == 2
+        assert roles[4] == "sub_item" and parents[4] == 2
+        assert roles[5] == "sub_item" and parents[5] == 2
+        assert roles[6] == "sub_item" and parents[6] == 2
+
+        # 非编号行应为 data
+        assert roles[7] == "data", f"住房公积金应为data，实际{roles[7]}"
+        assert roles[8] == "data", f"工会经费应为data，实际{roles[8]}"
+        assert roles[9] == "total"
+        analyzer.clear_cache()
+
+    def test_non_numbered_sub_items_still_work(self):
+        """不带编号的"其中："后续行仍正常标记为 sub_item。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期末余额"],
+            rows=[
+                ["按组合计提", 500],          # 0: data
+                ["其中：", None],              # 1: sub_item_header
+                ["账龄组合", 300],             # 2: sub_item (parent=0)
+                ["关联方组合", 200],           # 3: sub_item (parent=0)
+                ["合计", 500],                 # 4: total
+            ],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        roles = {r.row_index: r.role for r in result.rows}
+
+        assert roles[2] == "sub_item"
+        assert roles[3] == "sub_item"
+        assert roles[4] == "total"
+        analyzer.clear_cache()
+
+
+
+class TestNumberedSubItemDetection:
+    """短期薪酬等表格中，"其中：1. xxx"带编号的其中项，
+    后续非编号行（如"住房公积金"）不应被误标为 sub_item。"""
+
+    def test_numbered_sub_items_stop_at_non_numbered(self):
+        """其中：1. 医疗保险费 后面的编号行是 sub_item，
+        非编号行（住房公积金、工会经费）应为 data。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[
+                ["工资、奖金、津贴和补贴", 1000, 800],       # 0: data
+                ["职工福利费", 200, 150],                     # 1: data
+                ["社会保险费", 300, 250],                     # 2: data
+                ["其中：1. 医疗保险费", 100, 80],             # 3: sub_item (parent=2)
+                ["2. 工伤保险费", 50, 40],                    # 4: sub_item (parent=2)
+                ["3. 生育保险费", 30, 20],                    # 5: sub_item (parent=2)
+                ["4. 失业保险费", 20, 15],                    # 6: sub_item (parent=2)
+                ["住房公积金", 400, 350],                     # 7: data (NOT sub_item!)
+                ["工会经费", 50, 40],                         # 8: data (NOT sub_item!)
+                ["合计", 2000, 1600],                         # 9: total
+            ],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        roles = {r.row_index: r.role for r in result.rows}
+        parents = {r.row_index: r.parent_row_index for r in result.rows}
+
+        # 编号行应为 sub_item
+        assert roles[3] == "sub_item" and parents[3] == 2
+        assert roles[4] == "sub_item" and parents[4] == 2
+        assert roles[5] == "sub_item" and parents[5] == 2
+        assert roles[6] == "sub_item" and parents[6] == 2
+
+        # 非编号行应为 data
+        assert roles[7] == "data", f"住房公积金应为data，实际{roles[7]}"
+        assert roles[8] == "data", f"工会经费应为data，实际{roles[8]}"
+        assert roles[9] == "total"
+        analyzer.clear_cache()
+
+    def test_non_numbered_sub_items_still_work(self):
+        """不带编号的"其中："后续行仍正常标记为 sub_item。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期末余额"],
+            rows=[
+                ["按组合计提", 500],          # 0: data
+                ["其中：", None],              # 1: sub_item_header
+                ["账龄组合", 300],             # 2: sub_item (parent=0)
+                ["关联方组合", 200],           # 3: sub_item (parent=0)
+                ["合计", 500],                 # 4: total
+            ],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        roles = {r.row_index: r.role for r in result.rows}
+
+        assert roles[2] == "sub_item"
+        assert roles[3] == "sub_item"
+        assert roles[4] == "total"
+        analyzer.clear_cache()

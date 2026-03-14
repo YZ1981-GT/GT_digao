@@ -122,7 +122,7 @@ _BALANCE_SHEET_MAPPING: Dict[str, List[str]] = {
 
 # ─── 利润表科目（企财02表）───
 _INCOME_STATEMENT_MAPPING: Dict[str, List[str]] = {
-    '营业收入': ['营业收入', '收入'],
+    '营业收入': ['营业收入'],
     '利息收入': ['利息收入'],
     '保险服务收入': ['保险服务收入'],
     '已赚保费': ['已赚保费'],
@@ -284,6 +284,69 @@ _PARENT_ACCOUNTS_MAP: Dict[str, List[Dict[str, object]]] = {
 }
 
 
+# ═══════════════════════════════════════════════════════════
+# 合并财务报表主要项目注释 - 预设科目清单
+# 数据来源：上市报表附注.md / 国企报表附注.md 中的合并附注章节
+# ═══════════════════════════════════════════════════════════
+
+# 上市版：合并财务报表主要项目注释
+_CONSOLIDATED_ACCOUNTS_LISTED: List[Dict[str, object]] = [
+    {'name': '货币资金', 'keywords': ['货币资金'], 'order': 1},
+    {'name': '应收票据', 'keywords': ['应收票据'], 'order': 2},
+    {'name': '应收账款', 'keywords': ['应收账款'], 'order': 3},
+    {'name': '预付款项', 'keywords': ['预付款项', '预付账款'], 'order': 4},
+    {'name': '其他应收款', 'keywords': ['其他应收款'], 'order': 5},
+    {'name': '存货', 'keywords': ['存货'], 'order': 6},
+    {'name': '长期股权投资', 'keywords': ['长期股权投资'], 'order': 7},
+    {'name': '固定资产', 'keywords': ['固定资产'], 'order': 8},
+    {'name': '在建工程', 'keywords': ['在建工程'], 'order': 9},
+    {'name': '无形资产', 'keywords': ['无形资产'], 'order': 10},
+    {'name': '短期借款', 'keywords': ['短期借款', '短期借入'], 'order': 11},
+    {'name': '应付账款', 'keywords': ['应付账款'], 'order': 12},
+    {'name': '应付职工薪酬', 'keywords': ['应付职工薪酬', '职工薪酬'], 'order': 13},
+    {'name': '应交税费', 'keywords': ['应交税费'], 'order': 14},
+    {'name': '其他应付款', 'keywords': ['其他应付款'], 'order': 15},
+    {'name': '营业收入和营业成本', 'keywords': [
+        '营业收入和营业成本', '营业收入与营业成本', '营业收入', '营业成本',
+    ], 'order': 16},
+    {'name': '税金及附加', 'keywords': ['税金及附加'], 'order': 17},
+    {'name': '管理费用', 'keywords': ['管理费用'], 'order': 18},
+    {'name': '财务费用', 'keywords': ['财务费用'], 'order': 19},
+    {'name': '投资收益', 'keywords': ['投资收益'], 'order': 20},
+]
+
+# 国企版：合并财务报表主要项目注释
+_CONSOLIDATED_ACCOUNTS_SOE: List[Dict[str, object]] = [
+    {'name': '货币资金', 'keywords': ['货币资金'], 'order': 1},
+    {'name': '应收票据', 'keywords': ['应收票据'], 'order': 2},
+    {'name': '应收账款', 'keywords': ['应收账款'], 'order': 3},
+    {'name': '预付款项', 'keywords': ['预付款项', '预付账款'], 'order': 4},
+    {'name': '其他应收款', 'keywords': ['其他应收款'], 'order': 5},
+    {'name': '存货', 'keywords': ['存货'], 'order': 6},
+    {'name': '长期股权投资', 'keywords': ['长期股权投资'], 'order': 7},
+    {'name': '固定资产', 'keywords': ['固定资产'], 'order': 8},
+    {'name': '在建工程', 'keywords': ['在建工程'], 'order': 9},
+    {'name': '无形资产', 'keywords': ['无形资产'], 'order': 10},
+    {'name': '短期借款', 'keywords': ['短期借款', '短期借入'], 'order': 11},
+    {'name': '应付账款', 'keywords': ['应付账款'], 'order': 12},
+    {'name': '应付职工薪酬', 'keywords': ['应付职工薪酬', '职工薪酬'], 'order': 13},
+    {'name': '应交税费', 'keywords': ['应交税费'], 'order': 14},
+    {'name': '其他应付款', 'keywords': ['其他应付款'], 'order': 15},
+    {'name': '营业收入和营业成本', 'keywords': [
+        '营业收入和营业成本', '营业收入与营业成本', '营业收入', '营业成本',
+    ], 'order': 16},
+    {'name': '税金及附加', 'keywords': ['税金及附加'], 'order': 17},
+    {'name': '管理费用', 'keywords': ['管理费用'], 'order': 18},
+    {'name': '财务费用', 'keywords': ['财务费用'], 'order': 19},
+    {'name': '投资收益', 'keywords': ['投资收益'], 'order': 20},
+]
+
+_CONSOLIDATED_ACCOUNTS_MAP: Dict[str, List[Dict[str, object]]] = {
+    'listed': _CONSOLIDATED_ACCOUNTS_LISTED,
+    'soe': _CONSOLIDATED_ACCOUNTS_SOE,
+}
+
+
 def _normalize(name: str) -> str:
     """去除特殊前缀标记和空白。"""
     return name.replace('△', '').replace('▲', '').replace('*', '').replace('#', '').strip()
@@ -304,11 +367,15 @@ class AccountMappingTemplate:
         # 精确匹配
         if norm in self._map:
             return self._map[norm]
-        # 包含匹配（报表科目名可能带"其中："等前缀）
+        # 包含匹配（报表科目名可能带"其中："等前缀），优先选择最长匹配
+        best_kws: Optional[List[str]] = None
+        best_len = 0
         for key, kws in self._map.items():
             if key in norm or norm in key:
-                return kws
-        return None
+                if len(key) > best_len:
+                    best_kws = kws
+                    best_len = len(key)
+        return best_kws
 
     def match_note(
         self,
@@ -316,11 +383,28 @@ class AccountMappingTemplate:
         note_account: str,
         note_section: str = '',
     ) -> bool:
-        """判断某个附注是否匹配给定的报表科目。"""
+        """判断某个附注是否匹配给定的报表科目。
+
+        精确匹配优先：如果附注科目名称与另一个模板科目完全一致，
+        则只有该科目才能匹配，避免 "营业外收入" 被 "营业收入" 的关键词误匹配。
+        """
         keywords = self.get_keywords(statement_account)
         if not keywords:
             return False
-        target = _normalize(note_account) + ' ' + _normalize(note_section or '')
+
+        norm_note = _normalize(note_account)
+        norm_stmt = _normalize(statement_account)
+
+        # 如果附注科目名称与报表科目完全一致，直接匹配
+        if norm_note == norm_stmt:
+            return True
+
+        # 如果附注科目名称恰好是模板中另一个科目的精确名称，
+        # 则不允许当前科目匹配（应由那个精确科目来匹配）
+        if norm_note in self._map and norm_note != norm_stmt:
+            return False
+
+        target = norm_note + ' ' + _normalize(note_section or '')
         for kw in keywords:
             if kw in target:
                 return True
@@ -340,6 +424,17 @@ class AccountMappingTemplate:
             科目列表，每项包含 name, keywords, order
         """
         return _PARENT_ACCOUNTS_MAP.get(template_type, [])
+
+    def get_consolidated_accounts(self, template_type: str) -> List[Dict[str, object]]:
+        """获取合并附注预设科目清单。
+
+        Args:
+            template_type: 'soe' 或 'listed'
+
+        Returns:
+            科目列表，每项包含 name, keywords, order
+        """
+        return _CONSOLIDATED_ACCOUNTS_MAP.get(template_type, [])
 
     def match_parent_note(
         self,

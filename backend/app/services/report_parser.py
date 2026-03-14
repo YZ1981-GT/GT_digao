@@ -290,6 +290,31 @@ class ReportParser(WorkpaperParser):
                 data_col_end=data_col_end,
             ))
 
+        # ── 续表继承：如果续表未检测到合并列结构，从同类型主表继承 ──
+        main_sheet_map: Dict[str, ReportSheetData] = {}
+        for sd in sheets:
+            # 主表：非续表、有合并列结构
+            name_norm = sd.sheet_name.replace(' ', '')
+            if '续' not in name_norm and sd.is_consolidated and sd.column_map:
+                main_sheet_map[sd.statement_type] = sd
+
+        for sd in sheets:
+            name_norm = sd.sheet_name.replace(' ', '')
+            if '续' in name_norm and not sd.is_consolidated:
+                main = main_sheet_map.get(sd.statement_type)
+                if main and main.column_map:
+                    # 检查续表的列数是否与主表兼容
+                    max_col_idx = max(main.column_map.values()) if main.column_map else 0
+                    data_cols = len(sd.headers) if sd.headers else (len(sd.raw_data[0]) if sd.raw_data else 0)
+                    if data_cols > max_col_idx:
+                        sd.is_consolidated = True
+                        sd.column_map = dict(main.column_map)
+                        sd.data_col_end = main.data_col_end
+                        logger.info(
+                            f"[extract_sheets] Continuation sheet '{sd.sheet_name}' "
+                            f"inherited column_map from '{main.sheet_name}': {sd.column_map}"
+                        )
+
         return sheets
 
     def _detect_header_rows(
@@ -1246,15 +1271,73 @@ class ReportParser(WorkpaperParser):
         child_total = sub_row_max - solo_offset
         if child_total <= 0:
             child_total = sub_row_max
-        base_w = child_total // n_expand
-        rem = child_total % n_expand
 
-        widths = [1] * first_len
-        expand_idx = 0
-        for i in range(first_len):
-            if is_expand[i]:
-                widths[i] = base_w + (1 if expand_idx < rem else 0)
-                expand_idx += 1
+        # ── 尝试按子行内容分组来确定每个展开列的宽度 ──
+        # 子行中可能存在空列作为分隔符（如 "金额 | 比例% | [空] | 金额 | 比例%"）
+        # 将子行按空列分割成组，如果组数等于展开列数，则按组大小分配宽度
+        sub_content = list(ref_sub[solo_offset:])
+        # 将子行分割成非空组（被空列分隔）
+        groups: list = []
+        current_group: list = []
+        for ci, c in enumerate(sub_content):
+            if c and str(c).strip():
+                current_group.append(ci)
+            else:
+                if current_group:
+                    groups.append(current_group)
+                    current_group = []
+        if current_group:
+            groups.append(current_group)
+
+        if len(groups) == n_expand and all(len(g) > 0 for g in groups):
+            # 组数匹配展开列数 — 按每组实际列数分配宽度
+            # 同时在组之间插入空列（分隔符），保持与子行/数据行的对齐
+            # 构建 r0：独占列 + (展开列重复 * 组宽) + 组间空列 + ...
+            r0_parts: List[str] = []
+            expand_idx = 0
+            for i in range(first_len):
+                if is_expand[i]:
+                    if expand_idx < len(groups):
+                        group = groups[expand_idx]
+                        group_size = len(group)
+                        r0_parts.extend([first_row[i]] * group_size)
+                        # 在组之间插入空列（如果不是最后一组）
+                        if expand_idx + 1 < len(groups):
+                            next_group = groups[expand_idx + 1]
+                            gap_size = next_group[0] - (group[-1] + 1)
+                            r0_parts.extend([''] * gap_size)
+                    expand_idx += 1
+                else:
+                    r0_parts.append(first_row[i])
+
+            # 补齐或截断到 target_cols
+            if len(r0_parts) > target_cols:
+                r0 = r0_parts[:target_cols]
+            elif len(r0_parts) < target_cols:
+                r0 = r0_parts + [''] * (target_cols - len(r0_parts))
+            else:
+                r0 = r0_parts
+
+            # 子行对齐：直接前插独占列空位，保持原始结构（含空列分隔符）
+            aligned_subs: List[List[str]] = []
+            for row in sub_rows:
+                if len(row) >= target_cols:
+                    aligned_subs.append(list(row[:target_cols]))
+                else:
+                    padded = [''] * head_solo_count + list(row) + [''] * max(target_cols - len(row) - head_solo_count, 0)
+                    aligned_subs.append(padded[:target_cols])
+
+            return [r0[:target_cols]] + aligned_subs
+        else:
+            # 无法按组分配，使用均分策略
+            base_w = child_total // n_expand
+            rem = child_total % n_expand
+            widths = [1] * first_len
+            expand_idx = 0
+            for i in range(first_len):
+                if is_expand[i]:
+                    widths[i] = base_w + (1 if expand_idx < rem else 0)
+                    expand_idx += 1
 
         r0: List[str] = []
         for i, val in enumerate(first_row):
