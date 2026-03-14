@@ -54,6 +54,22 @@ class TableStructureAnalyzer:
     # 结构缓存
     _cache: Dict[str, TableStructure] = {}
 
+    def _is_total_row(self, label: str) -> bool:
+        """判断是否为合计行。要求关键词在 label 末尾或 label 就是关键词，
+        避免误匹配"按组合计提"这类包含"合计"子串的科目名。"""
+        if not label:
+            return False
+        for kw in self.TOTAL_KEYWORDS:
+            if label == kw:
+                return True
+            # label 以关键词结尾，如"应收账款合计"、"  合计"
+            if label.endswith(kw):
+                return True
+            # label 以关键词开头，如"合计数"、"总计"
+            if label.startswith(kw):
+                return True
+        return False
+
     # ─── Public API ───
 
     async def analyze_table_structure(
@@ -61,25 +77,24 @@ class TableStructureAnalyzer:
     ) -> TableStructure:
         """分析附注表格语义结构，返回 TableStructure。
 
-        优先使用 LLM 分析，失败时回退到规则识别。
+        优先使用规则识别（速度快），仅当规则识别置信度低且 LLM 可用时才调用 LLM 增强。
         结果缓存到内存避免重复调用。
         """
         # 检查缓存
         if note_table.id in self._cache:
             return self._cache[note_table.id]
 
-        structure: Optional[TableStructure] = None
+        # 先用规则识别（纯本地计算，毫秒级）
+        structure = self._analyze_with_rules(note_table)
 
-        # 尝试 LLM 分析
-        if openai_service:
+        # 仅当规则识别置信度低且有 LLM 服务时，才调用 LLM 增强
+        if structure.structure_confidence == "low" and openai_service and note_table.headers:
             try:
-                structure = await self._analyze_with_llm(note_table, openai_service)
+                llm_structure = await self._analyze_with_llm(note_table, openai_service)
+                if llm_structure is not None:
+                    structure = llm_structure
             except Exception as e:
-                logger.warning("LLM 分析表格结构失败，回退到规则识别: %s", e)
-
-        # LLM 失败或未提供 service，使用规则识别
-        if structure is None:
-            structure = self._analyze_with_rules(note_table)
+                logger.warning("LLM 增强分析失败，使用规则识别结果: %s", e)
 
         # 缓存结果
         self._cache[note_table.id] = structure
@@ -255,41 +270,80 @@ class TableStructureAnalyzer:
     # ─── 规则识别（降级策略） ───
 
     def _analyze_with_rules(self, note_table: NoteTable) -> TableStructure:
-        """基于关键词的规则识别（LLM 失败时的降级策略）。"""
+        """基于关键词的规则识别（LLM 失败时的降级策略）。
+
+        两遍扫描：
+        1. 第一遍：标记合计行、其中行，其余暂标为 data
+        2. 第二遍：对每个"其中"行，将其后续行（到下一个 data/total/subtotal 为止）标为 sub_item
+        """
         rows: List[TableStructureRow] = []
         total_row_indices: List[int] = []
         subtotal_row_indices: List[int] = []
-        current_parent_idx: Optional[int] = None
 
+        # ── 第一遍：识别合计行和"其中"标记行 ──
         for i, row in enumerate(note_table.rows):
             label = str(row[0]).strip() if row and row[0] else ""
             role = "data"
             parent_row_index = None
             indent_level = 0
 
-            # 检测合计行
-            if any(kw in label for kw in self.TOTAL_KEYWORDS):
+            if self._is_total_row(label):
                 if any(kw in label for kw in self.SUBTOTAL_KEYWORDS):
                     role = "subtotal"
                     subtotal_row_indices.append(i)
                 else:
                     role = "total"
                     total_row_indices.append(i)
-            # 检测其中项
             elif any(label.startswith(kw) for kw in self.SUB_ITEM_KEYWORDS):
-                role = "sub_item"
-                parent_row_index = current_parent_idx
+                role = "sub_item_header"  # 临时标记，第二遍处理
                 indent_level = 1
-            else:
-                current_parent_idx = i
 
             rows.append(TableStructureRow(
-                row_index=i,
-                role=role,
+                row_index=i, role=role,
                 parent_row_index=parent_row_index,
-                indent_level=indent_level,
-                label=label,
+                indent_level=indent_level, label=label,
             ))
+
+        # ── 第二遍：处理"其中"区域，将明细行标为 sub_item ──
+        # 找到每个 sub_item_header 前面最近的 data 行作为 parent
+        i = 0
+        while i < len(rows):
+            if rows[i].role == "sub_item_header":
+                # 找 parent：往前找最近的 data 行
+                parent_idx = None
+                for j in range(i - 1, -1, -1):
+                    if rows[j].role == "data":
+                        parent_idx = j
+                        break
+
+                # 标记"其中"行本身
+                rows[i].role = "sub_item"
+                rows[i].parent_row_index = parent_idx
+
+                # 向后扫描明细行，直到遇到 data/total/subtotal/sub_item_header
+                k = i + 1
+                while k < len(rows):
+                    if rows[k].role in ("total", "subtotal", "sub_item_header"):
+                        break
+                    if rows[k].role == "data" and rows[k].label:
+                        # 检查后面是否紧跟"其中"行 → 说明这是新的顶层 data，不是明细
+                        next_is_sub_header = False
+                        for m in range(k + 1, len(rows)):
+                            if rows[m].label:  # 找到下一个有内容的行
+                                next_is_sub_header = rows[m].role == "sub_item_header"
+                                break
+                        if next_is_sub_header:
+                            break  # 这是新的顶层 data 行，结束当前其中区域
+                        # 否则标记为 sub_item
+                        rows[k].role = "sub_item"
+                        rows[k].parent_row_index = parent_idx
+                        rows[k].indent_level = 1
+                    k += 1
+                i = k  # 跳过已处理的明细行
+            else:
+                i += 1
+
+        # ── 更新 current_parent_idx 用于后续（兼容性） ──
 
         # 识别列语义
         columns = self._identify_columns_by_rules(note_table.headers)
@@ -308,6 +362,17 @@ class TableStructureAnalyzer:
                 elif col.semantic == "opening_balance":
                     opening_cell = f"R{last_total}C{col.col_index}"
 
+        # 根据识别结果判断置信度
+        semantic_cols = [c for c in columns if c.semantic != "other"]
+        has_total = len(total_row_indices) > 0
+        has_semantic_cols = len(semantic_cols) >= 2
+        if has_total and has_semantic_cols:
+            confidence = "high"
+        elif has_total or has_semantic_cols or has_balance_formula:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
         return TableStructure(
             note_table_id=note_table.id,
             rows=rows,
@@ -317,27 +382,44 @@ class TableStructureAnalyzer:
             subtotal_row_indices=subtotal_row_indices,
             closing_balance_cell=closing_cell,
             opening_balance_cell=opening_cell,
-            structure_confidence="low",
+            structure_confidence=confidence,
         )
 
+    # 百分比/比例列关键词 — 这类列不参与金额校验
+    PERCENTAGE_KEYWORDS = ["比例", "%", "比率", "占比", "百分比"]
+
+    # "上年"前缀 → opening_balance（优先级高于 closing_balance 的"年末"匹配）
+    PRIOR_YEAR_PREFIXES = ["上年", "上期", "上年度"]
+
     def _identify_columns_by_rules(self, headers: List[str]) -> List[TableStructureColumn]:
-        """基于关键词识别列语义。"""
+        """基于关键词识别列语义。
+
+        改进点：
+        1. 百分比/比例列直接归为 other，不参与金额校验
+        2. "上年年末余额"等含"上年"前缀的列归为 opening_balance
+        """
         columns: List[TableStructureColumn] = []
 
         for i, header in enumerate(headers):
             header_str = str(header).strip() if header else ""
             semantic = "other"
 
-            for sem, keywords in self.COLUMN_KEYWORDS.items():
-                if any(kw in header_str for kw in keywords):
-                    semantic = sem
-                    break
+            # 规则 1：百分比/比例列 → other（最高优先级）
+            if any(kw in header_str for kw in self.PERCENTAGE_KEYWORDS):
+                columns.append(TableStructureColumn(col_index=i, semantic="other", period=None))
+                continue
 
-            columns.append(TableStructureColumn(
-                col_index=i,
-                semantic=semantic,
-                period=None,
-            ))
+            # 规则 2："上年"/"上期" 前缀 → opening_balance（优先于通用关键词匹配）
+            if any(header_str.startswith(prefix) or prefix in header_str for prefix in self.PRIOR_YEAR_PREFIXES):
+                semantic = "opening_balance"
+            else:
+                # 规则 3：通用关键词匹配
+                for sem, keywords in self.COLUMN_KEYWORDS.items():
+                    if any(kw in header_str for kw in keywords):
+                        semantic = sem
+                        break
+
+            columns.append(TableStructureColumn(col_index=i, semantic=semantic, period=None))
 
         return columns
 

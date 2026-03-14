@@ -102,9 +102,12 @@ _BALANCE_SHEET_MAPPING: Dict[str, List[str]] = {
     '递延收益': ['递延收益'],
     '递延所得税负债': ['递延所得税负债'],
     '其他非流动负债': ['其他非流动负债'],
+    # === 上市版特有科目 ===
+    '设定受益计划净资产': ['设定受益计划净资产', '设定受益计划'],
 
     # === 所有者权益 ===
     '实收资本': ['实收资本', '股本'],
+    '股本': ['实收资本', '股本'],
     '其他权益工具': ['其他权益工具'],
     '资本公积': ['资本公积'],
     '库存股': ['库存股'],
@@ -125,6 +128,9 @@ _INCOME_STATEMENT_MAPPING: Dict[str, List[str]] = {
     '已赚保费': ['已赚保费'],
     '手续费及佣金收入': ['手续费及佣金收入'],
     '营业成本': ['营业成本', '主营业务成本'],
+    '营业收入和营业成本': ['营业收入', '营业成本'],
+    '营业收入与营业成本': ['营业收入', '营业成本'],
+    '营业收入、营业成本': ['营业收入', '营业成本'],
     '利息支出': ['利息支出'],
     '手续费及佣金支出': ['手续费及佣金支出'],
     '保险服务费用': ['保险服务费用'],
@@ -153,6 +159,10 @@ _INCOME_STATEMENT_MAPPING: Dict[str, List[str]] = {
     '营业外收入': ['营业外收入'],
     '营业外支出': ['营业外支出'],
     '所得税费用': ['所得税费用', '所得税'],
+    # === 上市版/国企版附注中单独列示的利润表相关科目 ===
+    '现金流量表补充资料': ['现金流量表补充资料', '将净利润调节为经营活动现金流量'],
+    '外币货币性项目': ['外币货币性项目'],
+    '所有权或使用权受到限制的资产': ['所有权或使用权受到限制', '受限资产'],
 }
 
 
@@ -208,6 +218,19 @@ _CASH_FLOW_MAPPING: Dict[str, List[str]] = {
     '分配股利、利润或偿付利息支付的现金': ['分配股利', '偿付利息支付'],
     '子公司支付给少数股东的股利、利润': ['子公司支付给少数股东'],
     '支付其他与筹资活动有关的现金': ['支付其他与筹资活动'],
+    # === 附注中"现金流量表项目注释"下的特殊子项 ===
+    '现金流量表项目注释': ['现金流量表项目注释'],
+    '收到的重要的投资活动有关的现金': ['重要的投资活动有关的现金', '收到的重要的投资活动'],
+    '支付的重要的投资活动有关的现金': ['重要的投资活动有关的现金', '支付的重要的投资活动'],
+    '筹资活动产生的各项负债的变动情况': ['筹资活动产生的各项负债', '各项负债的变动'],
+    '合并现金流量表相关事项': ['合并现金流量表相关事项'],
+    # 国企版带"的"的变体（如"收到的其他与经营活动有关的现金"）
+    '收到的其他与经营活动有关的现金': ['收到其他与经营活动', '收到的其他与经营活动'],
+    '支付的其他与经营活动有关的现金': ['支付其他与经营活动', '支付的其他与经营活动'],
+    '收到的其他与投资活动有关的现金': ['收到其他与投资活动', '收到的其他与投资活动'],
+    '支付的其他与投资活动有关的现金': ['支付其他与投资活动', '支付的其他与投资活动'],
+    '收到的其他与筹资活动有关的现金': ['收到其他与筹资活动', '收到的其他与筹资活动'],
+    '支付的其他与筹资活动有关的现金': ['支付其他与筹资活动', '支付的其他与筹资活动'],
 }
 
 
@@ -216,6 +239,49 @@ _ALL_MAPPINGS: Dict[str, List[str]] = {}
 _ALL_MAPPINGS.update(_BALANCE_SHEET_MAPPING)
 _ALL_MAPPINGS.update(_INCOME_STATEMENT_MAPPING)
 _ALL_MAPPINGS.update(_CASH_FLOW_MAPPING)
+
+
+# ═══════════════════════════════════════════════════════════
+# 母公司财务报表主要项目附注 - 预设科目清单
+# 数据来源：上市报表附注.md / 国企报表附注.md 中的母公司附注章节
+# ═══════════════════════════════════════════════════════════
+
+# 上市版：公司财务报表主要项目注释
+_PARENT_ACCOUNTS_LISTED: List[Dict[str, object]] = [
+    {'name': '应收票据', 'keywords': ['应收票据'], 'order': 1},
+    {'name': '应收账款', 'keywords': ['应收账款'], 'order': 2},
+    {'name': '其他应收款', 'keywords': ['其他应收款'], 'order': 3},
+    {'name': '长期股权投资', 'keywords': [
+        '长期股权投资', '对子公司投资', '对联营企业投资',
+        '对合营企业投资', '对联营、合营企业投资',
+    ], 'order': 4},
+    {'name': '营业收入和营业成本', 'keywords': [
+        '营业收入和营业成本', '营业收入与营业成本', '营业收入', '营业成本',
+    ], 'order': 5},
+    {'name': '投资收益', 'keywords': ['投资收益'], 'order': 6},
+]
+
+# 国企版：母公司财务报表的主要项目附注
+_PARENT_ACCOUNTS_SOE: List[Dict[str, object]] = [
+    {'name': '应收账款', 'keywords': ['应收账款'], 'order': 1},
+    {'name': '其他应收款', 'keywords': ['其他应收款'], 'order': 2},
+    {'name': '长期股权投资', 'keywords': [
+        '长期股权投资', '对子公司投资', '对联营企业投资',
+        '对合营企业投资', '对联营、合营企业投资',
+    ], 'order': 3},
+    {'name': '营业收入和营业成本', 'keywords': [
+        '营业收入与营业成本', '营业收入和营业成本', '营业收入', '营业成本',
+    ], 'order': 4},
+    {'name': '投资收益', 'keywords': ['投资收益'], 'order': 5},
+    {'name': '现金流量表补充资料', 'keywords': [
+        '现金流量表补充资料', '将净利润调节为经营活动现金流量',
+    ], 'order': 6},
+]
+
+_PARENT_ACCOUNTS_MAP: Dict[str, List[Dict[str, object]]] = {
+    'listed': _PARENT_ACCOUNTS_LISTED,
+    'soe': _PARENT_ACCOUNTS_SOE,
+}
 
 
 def _normalize(name: str) -> str:
@@ -263,6 +329,31 @@ class AccountMappingTemplate:
     def all_accounts(self) -> List[str]:
         """返回所有标准科目名称。"""
         return list(self._map.keys())
+
+    def get_parent_company_accounts(self, template_type: str) -> List[Dict[str, object]]:
+        """获取母公司附注预设科目清单。
+
+        Args:
+            template_type: 'soe' 或 'listed'
+
+        Returns:
+            科目列表，每项包含 name, keywords, order
+        """
+        return _PARENT_ACCOUNTS_MAP.get(template_type, [])
+
+    def match_parent_note(
+        self,
+        note_title: str,
+        template_type: str,
+    ) -> Optional[str]:
+        """判断附注标题是否匹配母公司预设科目，返回匹配的科目名。"""
+        accounts = self.get_parent_company_accounts(template_type)
+        norm = _normalize(note_title)
+        for acct in accounts:
+            for kw in acct['keywords']:
+                if kw in norm:
+                    return acct['name']
+        return None
 
 
 # 模块级单例

@@ -2,7 +2,7 @@
  * FindingConfirmationView - 问题确认视图
  * Task 16.1: 顶部统计栏 + 筛选栏 + 问题列表，批量操作，已忽略灰显+恢复
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import FindingDetailPanel from './FindingDetailPanel';
 import {
   ReportReviewFinding, ReportReviewFindingCategory, FindingConfirmationStatus, RiskLevel,
@@ -24,6 +24,34 @@ const FindingConfirmationView: React.FC<Props> = ({ sessionId, onComplete }) => 
   const [filterStatus, setFilterStatus] = useState<FindingConfirmationStatus | 'all'>('all');
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(480);
+  const dragging = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+
+  // 拖拽调整右侧面板宽度
+  const onDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const newWidth = rect.right - ev.clientX;
+      setPanelWidth(Math.max(280, Math.min(newWidth, rect.width - 300)));
+    };
+    const onUp = () => {
+      dragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, []);
 
   const loadFindings = useCallback(async () => {
     if (!sessionId) return;
@@ -38,10 +66,19 @@ const FindingConfirmationView: React.FC<Props> = ({ sessionId, onComplete }) => 
 
   useEffect(() => { loadFindings(); }, [loadFindings]);
 
+  // 选中问题变化时，右侧面板滚动到顶部
+  useEffect(() => {
+    if (selected && detailRef.current) {
+      detailRef.current.scrollTop = 0;
+    }
+  }, [selected]);
+
   const filtered = findings.filter(f => {
     if (filterCategory !== 'all' && f.category !== filterCategory) return false;
     if (filterRisk !== 'all' && f.risk_level !== filterRisk) return false;
     if (filterStatus !== 'all' && f.confirmation_status !== filterStatus) return false;
+    // 默认隐藏已忽略的问题，除非用户主动筛选"已忽略"
+    if (filterStatus !== 'dismissed' && f.confirmation_status === 'dismissed') return false;
     return true;
   });
 
@@ -53,17 +90,33 @@ const FindingConfirmationView: React.FC<Props> = ({ sessionId, onComplete }) => 
   };
 
   const updateStatus = async (id: string, status: FindingConfirmationStatus) => {
-    await fetch(`${API}/api/report-review/finding/${id}/${status === 'confirmed' ? 'confirm' : status === 'dismissed' ? 'dismiss' : 'restore'}`, { method: 'PATCH' });
+    try {
+      const endpoint = status === 'confirmed' ? 'confirm' : status === 'dismissed' ? 'dismiss' : 'restore';
+      const r = await fetch(`${API}/api/report-review/finding/${id}/${endpoint}`, { method: 'PATCH' });
+      if (!r.ok) {
+        console.warn('更新状态失败:', r.status, await r.text());
+      }
+    } catch (e) {
+      console.warn('更新状态请求失败:', e);
+    }
+    // 忽略后清除选中，右侧面板回到空状态
+    if (status === 'dismissed' && selected === id) {
+      setSelected(null);
+    }
     loadFindings();
   };
 
   const batchAction = async (action: 'confirm' | 'dismiss') => {
     if (checkedIds.size === 0) return;
-    await fetch(`${API}/api/report-review/findings/batch`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ finding_ids: Array.from(checkedIds), action }),
-    });
+    try {
+      await fetch(`${API}/api/report-review/findings/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ finding_ids: Array.from(checkedIds), action }),
+      });
+    } catch (e) {
+      console.warn('批量操作失败:', e);
+    }
     setCheckedIds(new Set());
     loadFindings();
   };
@@ -77,9 +130,9 @@ const FindingConfirmationView: React.FC<Props> = ({ sessionId, onComplete }) => 
   };
 
   return (
-    <div style={{ display: 'flex', gap: 'var(--gt-space-4)', minHeight: '60vh' }}>
+    <div ref={containerRef} style={{ display: 'flex', minHeight: '60vh', maxHeight: 'calc(100vh - 160px)', alignItems: 'flex-start' }}>
       {/* Left: list */}
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, paddingRight: 'var(--gt-space-3)', overflowY: 'auto', maxHeight: 'calc(100vh - 160px)' }}>
         {/* Stats bar */}
         <div style={{ display: 'flex', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-3)', flexWrap: 'wrap' }}>
           <span>总计: {stats.total}</span>
@@ -105,13 +158,17 @@ const FindingConfirmationView: React.FC<Props> = ({ sessionId, onComplete }) => 
         </div>
 
         {/* Batch actions */}
-        {checkedIds.size > 0 && (
-          <div style={{ marginBottom: 'var(--gt-space-2)', display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{ fontSize: 13 }}>已选 {checkedIds.size} 项</span>
-            <button onClick={() => batchAction('confirm')} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', backgroundColor: 'var(--gt-success, green)', color: '#fff', border: 'none', borderRadius: 4 }}>批量确认</button>
-            <button onClick={() => batchAction('dismiss')} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', backgroundColor: '#999', color: '#fff', border: 'none', borderRadius: 4 }}>批量忽略</button>
-          </div>
-        )}
+        <div style={{ marginBottom: 'var(--gt-space-2)', display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button onClick={() => setCheckedIds(new Set(filtered.map(f => f.id)))} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', border: '1px solid #ccc', borderRadius: 4, background: '#fff' }}>全选</button>
+          <button onClick={() => setCheckedIds(new Set())} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', border: '1px solid #ccc', borderRadius: 4, background: '#fff' }}>全清</button>
+          {checkedIds.size > 0 && (
+            <>
+              <span style={{ fontSize: 13, marginLeft: 4 }}>已选 {checkedIds.size} 项</span>
+              <button onClick={() => batchAction('confirm')} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', backgroundColor: 'var(--gt-success, green)', color: '#fff', border: 'none', borderRadius: 4 }}>批量确认</button>
+              <button onClick={() => batchAction('dismiss')} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', backgroundColor: '#999', color: '#fff', border: 'none', borderRadius: 4 }}>批量忽略</button>
+            </>
+          )}
+        </div>
 
         {/* Finding list */}
         {loading ? <p style={{ textAlign: 'center', color: '#999' }}>加载中...</p> : (
@@ -138,8 +195,8 @@ const FindingConfirmationView: React.FC<Props> = ({ sessionId, onComplete }) => 
                     onClick={e => e.stopPropagation()}
                     aria-label={`选择问题 ${f.account_name}`}
                   />
-                  <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 3, backgroundColor: FINDING_CATEGORY_COLORS[f.category], color: '#fff' }}>
-                    {FINDING_CATEGORY_LABELS[f.category]}
+                  <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 3, backgroundColor: FINDING_CATEGORY_COLORS[f.category] || '#888', color: '#fff' }}>
+                    {FINDING_CATEGORY_LABELS[f.category] || f.category || '未分类'}
                   </span>
                   <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 3, backgroundColor: f.risk_level === 'high' ? '#DC3545' : f.risk_level === 'medium' ? '#FFC107' : '#17A2B8', color: '#fff' }}>
                     {f.risk_level === 'high' ? '高' : f.risk_level === 'medium' ? '中' : '低'}
@@ -148,6 +205,9 @@ const FindingConfirmationView: React.FC<Props> = ({ sessionId, onComplete }) => 
                   <span style={{ fontSize: 11, color: '#888' }}>{CONFIRMATION_STATUS_LABELS[f.confirmation_status]}</span>
                 </div>
                 <p style={{ fontSize: 13, color: '#555', margin: '4px 0 0 28px' }}>{f.description}</p>
+                {f.location && (
+                  <p style={{ fontSize: 11, color: '#999', margin: '2px 0 0 28px' }}>📍 {f.location}</p>
+                )}
                 {f.confirmation_status === 'dismissed' && (
                   <button
                     onClick={e => { e.stopPropagation(); updateStatus(f.id, 'pending_confirmation'); }}
@@ -174,12 +234,33 @@ const FindingConfirmationView: React.FC<Props> = ({ sessionId, onComplete }) => 
         </div>
       </div>
 
+      {/* Drag handle */}
+      <div
+        onMouseDown={onDragStart}
+        style={{
+          width: 6, cursor: 'col-resize', flexShrink: 0, alignSelf: 'stretch',
+          background: '#e5e5e5', borderRadius: 3, transition: 'background 0.15s',
+          minHeight: 100,
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--gt-primary, #7c3aed)')}
+        onMouseLeave={e => (e.currentTarget.style.background = '#e5e5e5')}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="拖拽调整面板宽度"
+        tabIndex={0}
+      />
+
       {/* Right: detail panel */}
-      <div style={{ width: 480, flexShrink: 0 }}>
+      <div ref={detailRef} style={{
+        width: panelWidth, flexShrink: 0, paddingLeft: 'var(--gt-space-3)',
+        position: 'sticky', top: 0, alignSelf: 'flex-start',
+        maxHeight: 'calc(100vh - 160px)', overflowY: 'auto',
+      }}>
         {selected ? (
           <FindingDetailPanel
             findingId={selected}
             finding={findings.find(f => f.id === selected) || null}
+            sessionId={sessionId}
             onStatusChange={(id, status) => { updateStatus(id, status); }}
             onUpdate={loadFindings}
           />

@@ -563,8 +563,11 @@ class StatementItem(BaseModel):
     account_name: str = Field(..., description="科目名称")
     statement_type: StatementType = Field(..., description="所属报表类型")
     sheet_name: str = Field(..., description="来源 Sheet 名称")
-    opening_balance: Optional[float] = Field(None, description="期初余额/上期金额")
-    closing_balance: Optional[float] = Field(None, description="期末余额/本期金额")
+    opening_balance: Optional[float] = Field(None, description="期初余额/上期金额（合并）")
+    closing_balance: Optional[float] = Field(None, description="期末余额/本期金额（合并）")
+    company_opening_balance: Optional[float] = Field(None, description="期初余额/上期金额（公司）")
+    company_closing_balance: Optional[float] = Field(None, description="期末余额/本期金额（公司）")
+    is_consolidated: bool = Field(False, description="是否为合并报表（含合并+公司列）")
     parent_id: Optional[str] = Field(None, description="父科目ID（其中项时指向主科目）")
     is_sub_item: bool = Field(False, description="是否为其中项明细")
     row_index: int = Field(..., description="在报表中的行号")
@@ -576,7 +579,8 @@ class NoteTable(BaseModel):
     id: str = Field(..., description="表格ID（UUID）")
     account_name: str = Field(..., description="对应科目名称")
     section_title: str = Field(..., description="附注章节标题")
-    headers: List[str] = Field(default_factory=list, description="表头行")
+    headers: List[str] = Field(default_factory=list, description="表头行（合并后的单行语义表头）")
+    header_rows: List[List[str]] = Field(default_factory=list, description="原始多行表头（用于前端展示合并单元格）")
     rows: List[List[Any]] = Field(default_factory=list, description="数据行")
     source_location: str = Field("", description="在源文档中的位置描述")
 
@@ -598,8 +602,12 @@ class ReportSheetData(BaseModel):
     sheet_name: str = Field(..., description="Sheet 名称")
     statement_type: StatementType = Field(..., description="自动识别的报表类型")
     row_count: int = Field(0, description="数据行数")
-    headers: List[str] = Field(default_factory=list, description="表头行")
+    headers: List[str] = Field(default_factory=list, description="表头行（合并后的语义表头）")
+    header_rows: List[List[str]] = Field(default_factory=list, description="原始多行表头（用于前端展示）")
     raw_data: List[List[Any]] = Field(default_factory=list, description="原始数据行")
+    is_consolidated: bool = Field(False, description="是否为合并报表（含合并+公司列）")
+    column_map: Dict[str, int] = Field(default_factory=dict, description="语义列映射：closing_consolidated/closing_company/opening_consolidated/opening_company → 列索引")
+    data_col_end: Optional[int] = Field(None, description="有效数据列的右边界索引（公司列为最右有效列）")
 
 
 # ─── 表格结构识别模型 ───
@@ -667,6 +675,8 @@ class ReportReviewSession(BaseModel):
     table_structures: Dict[str, TableStructure] = Field(default_factory=dict, description="表格结构识别结果 {note_table_id: TableStructure}")
     matching_map: Optional[MatchingMap] = Field(None)
     finding_conversations: Dict[str, 'FindingConversation'] = Field(default_factory=dict, description="问题确认对话")
+    page_image_dir: Optional[str] = Field(None, description="页面截图存储目录路径")
+    source_file_names: Dict[str, str] = Field(default_factory=dict, description="file_id → 原始文件名映射")
     status: str = Field("created", description="会话状态：created/parsed/matched/analyzing_structure/reviewing/completed")
     created_at: str = Field(..., description="创建时间ISO格式")
 
@@ -686,6 +696,9 @@ class ReportReviewFinding(BaseModel):
     template_reference: Optional[str] = Field(None, description="模板参考文本")
     suggestion: str = Field("", description="修改建议")
     analysis_reasoning: Optional[str] = Field(None, description="分析推理过程")
+    note_table_ids: List[str] = Field(default_factory=list, description="关联的附注表格ID列表（用于前端预览溯源）")
+    source_page: Optional[int] = Field(None, description="问题所在源文档页码（1-based）")
+    source_file: Optional[str] = Field(None, description="问题所在源文件名")
     confirmation_status: FindingConfirmationStatus = Field(
         FindingConfirmationStatus.PENDING_CONFIRMATION,
         description="确认状态"

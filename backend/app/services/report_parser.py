@@ -176,8 +176,17 @@ class ReportParser(WorkpaperParser):
         # Word/PDF 默认归类为附注
         return ReportFileType.NOTES_TO_STATEMENTS
 
+    # 合并/公司列关键词
+    CONSOLIDATED_KW = ['合并', '合并数']
+    COMPANY_KW = ['公司', '母公司', '公司数']
+
     def extract_sheets(self, excel_result) -> List[ReportSheetData]:
         """从 Excel 解析结果中逐 Sheet 提取数据，自动识别报表类型。
+
+        支持合并财务报表的多行表头（2行结构），识别合并/公司列。
+        典型结构：
+          行1: 项目 | 附注 | 期末余额(合并单元格) |       | 上年年末余额(合并单元格) |
+          行2:      |      | 合并                | 公司   | 合并                    | 公司
 
         Args:
             excel_result: ExcelParseResult
@@ -209,35 +218,362 @@ class ReportParser(WorkpaperParser):
             sorted_rows = sorted(rows_map.keys())
             max_col = max(c for row_cells in rows_map.values() for c, _ in row_cells) if rows_map else 0
 
-            # 第一行作为表头
-            headers: List[str] = []
-            raw_data: List[List[Any]] = []
-
-            for idx, row_num in enumerate(sorted_rows):
+            # 构建所有行的值数组
+            all_row_values: List[List[Any]] = []
+            for row_num in sorted_rows:
                 row_cells = sorted(rows_map[row_num], key=lambda x: x[0])
-                # 构建完整行（填充空列）
                 row_values: List[Any] = [None] * max_col
                 for col, val in row_cells:
                     if 1 <= col <= max_col:
                         row_values[col - 1] = val
+                all_row_values.append(row_values)
 
-                if idx == 0:
-                    headers = [str(v) if v is not None else "" for v in row_values]
-                else:
-                    raw_data.append(row_values)
+            # 调试日志：输出前10行的内容，帮助排查表头识别问题
+            logger.info(f"[extract_sheets] Sheet '{sheet_name}': {len(all_row_values)} rows, max_col={max_col}")
+            for dbg_i, dbg_row in enumerate(all_row_values[:10]):
+                non_none = [(ci, v) for ci, v in enumerate(dbg_row) if v is not None]
+                logger.info(f"  Row[{dbg_i}] (excel_row={sorted_rows[dbg_i]}): {non_none}")
+            if sheet_data.merged_ranges:
+                logger.info(f"  Merged ranges: {sheet_data.merged_ranges[:20]}")
+
+            # ── 识别表头行：找到"项目"行及其后续的合并/公司子表头行 ──
+            header_start_idx, header_end_idx = self._detect_header_rows(
+                all_row_values, sheet_data.merged_ranges, sorted_rows
+            )
+
+            header_rows_raw: List[List[str]] = []
+            for i in range(header_start_idx, header_end_idx + 1):
+                header_rows_raw.append(
+                    [str(v) if v is not None else "" for v in all_row_values[i]]
+                )
+
+            # ── 检测合并/公司列结构 ──
+            # 传入表头行对应的 Excel 实际行号，用于匹配合并单元格范围
+            header_excel_rows = [sorted_rows[i] for i in range(header_start_idx, header_end_idx + 1)]
+            is_consolidated, column_map, data_col_end = self._detect_consolidated_columns(
+                header_rows_raw, sheet_data.merged_ranges, max_col, header_excel_rows
+            )
+
+            # 如果检测到合并报表但只有单行表头，自动生成2行表头（补充合并/公司标签）
+            if is_consolidated and len(header_rows_raw) == 1 and column_map:
+                sub_row = [''] * len(header_rows_raw[0])
+                for key, ci in column_map.items():
+                    if ci < len(sub_row):
+                        if 'consolidated' in key:
+                            sub_row[ci] = '合并'
+                        elif 'company' in key:
+                            sub_row[ci] = '公司'
+                header_rows_raw.append(sub_row)
+                logger.info(f"[extract_sheets] Auto-generated sub-header row for consolidated sheet: {sub_row}")
+
+            # 合并多行表头为单行语义表头
+            merged_headers = self._merge_header_rows(header_rows_raw, data_col_end)
+
+            # 数据行 = 表头之后的行
+            raw_data = all_row_values[header_end_idx + 1:]
+
+            # 如果检测到右边界，截断数据列
+            if data_col_end is not None and data_col_end < max_col:
+                raw_data = [row[:data_col_end] for row in raw_data]
+                merged_headers = merged_headers[:data_col_end]
+                header_rows_raw = [row[:data_col_end] for row in header_rows_raw]
 
             sheets.append(ReportSheetData(
                 sheet_name=sheet_name,
                 statement_type=statement_type,
                 row_count=len(raw_data),
-                headers=headers,
+                headers=merged_headers,
+                header_rows=header_rows_raw,
                 raw_data=raw_data,
+                is_consolidated=is_consolidated,
+                column_map=column_map,
+                data_col_end=data_col_end,
             ))
 
         return sheets
 
+    def _detect_header_rows(
+        self, all_rows: List[List[Any]], merged_ranges: List[str],
+        sorted_excel_rows: Optional[List[int]] = None
+    ) -> Tuple[int, int]:
+        """检测表头的起止行索引（支持多行表头）。
+
+        策略：
+        1. 找到包含"项目"的行作为表头起始行
+        2. 检查下一行是否包含"合并"/"公司"等子表头关键词
+        3. 或者检查表头行是否有跨行的合并单元格（如 C3:D4 表示2行表头）
+        4. 或者检查下一行第一列为空但有其他非空文本列（子表头特征）
+
+        Args:
+            all_rows: 所有行的值数组
+            merged_ranges: 合并单元格范围字符串列表
+            sorted_excel_rows: all_rows 中每行对应的 Excel 实际行号
+
+        Returns:
+            (header_start_idx, header_end_idx) 基于 all_rows 的索引
+        """
+        header_kw = ['项目', '项 目']
+        header_start = 0
+
+        # 解析合并单元格范围，用于后续判断
+        # merged_ranges 格式如 ['C3:D4', 'E3:F4'] 或 ['C1:D1']
+        parsed_merges = self._parse_merged_ranges(merged_ranges)
+
+        for ri, row in enumerate(all_rows[:10]):
+            first_cell = str(row[0] if row[0] is not None else '').replace(' ', '')
+            if any(kw.replace(' ', '') == first_cell for kw in header_kw):
+                header_start = ri
+                break
+
+        header_end = header_start
+        # 对应的 Excel 实际行号（sorted_rows 中的索引 → 实际行号）
+        # 注意：all_rows 的索引和 Excel 行号可能不一致，但 merged_ranges 用的是 Excel 行号
+        # 我们需要通过 all_rows 的内容来判断
+
+        if header_start + 1 < len(all_rows):
+            next_row = all_rows[header_start + 1]
+            next_row_texts = [
+                str(v).strip() for v in next_row if v is not None and str(v).strip()
+            ]
+            logger.info(f"[_detect_header_rows] header_start={header_start}, next_row_texts={next_row_texts}")
+
+            # 策略1：下一行包含"合并"/"公司"关键词
+            has_consolidated = any(
+                any(kw in t for kw in self.CONSOLIDATED_KW) for t in next_row_texts
+            )
+            has_company = any(
+                any(kw in t for kw in self.COMPANY_KW) for t in next_row_texts
+            )
+            logger.info(f"[_detect_header_rows] has_consolidated={has_consolidated}, has_company={has_company}")
+
+            if has_consolidated or has_company:
+                header_end = header_start + 1
+            else:
+                # 策略2：检查是否有跨行的合并单元格覆盖了表头行
+                # 需要知道 all_rows 索引对应的 Excel 实际行号
+                if sorted_excel_rows and header_start < len(sorted_excel_rows):
+                    excel_header_row = sorted_excel_rows[header_start]
+                    for mr in parsed_merges:
+                        if mr['row_span'] > 1 and mr['min_row'] <= excel_header_row <= mr['max_row']:
+                            extra_rows = mr['max_row'] - excel_header_row
+                            if extra_rows > 0 and header_start + extra_rows < len(all_rows):
+                                header_end = max(header_end, header_start + extra_rows)
+                                logger.info(f"[_detect_header_rows] Strategy 2: multi-row merge {mr}, extending header to idx {header_end}")
+
+                # 策略3：下一行第一列为空，但有其他非空文本（子表头特征）
+                if header_end == header_start and next_row_texts:
+                    first_of_next = next_row[0] if next_row[0] is not None else ''
+                    first_of_next_str = str(first_of_next).strip()
+                    has_large_numbers = any(
+                        self._try_parse_number(v) is not None and abs(self._try_parse_number(v)) >= 1000
+                        for v in next_row if v is not None
+                    )
+                    if not first_of_next_str and len(next_row_texts) >= 2 and not has_large_numbers:
+                        header_end = header_start + 1
+                        logger.info(f"[_detect_header_rows] Strategy 3: sub-header detected (empty first col, {len(next_row_texts)} text cols)")
+
+        # ── 继续向下扫描更多表头行（权益变动表等可能有3行以上表头） ──
+        # 判断标准：下一行第一列为空，且有多个非空文本列，且不含大数字
+        while header_end + 1 < len(all_rows) and header_end < header_start + 5:
+            candidate_row = all_rows[header_end + 1]
+            candidate_first = str(candidate_row[0] if candidate_row[0] is not None else '').strip()
+            candidate_texts = [
+                str(v).strip() for v in candidate_row if v is not None and str(v).strip()
+            ]
+            # 如果第一列有文本内容（非空），说明已经是数据行了
+            if candidate_first:
+                break
+            # 如果没有非空文本列，说明是空行
+            if len(candidate_texts) < 2:
+                break
+            # 如果包含大数字，说明是数据行
+            has_large_nums = any(
+                self._try_parse_number(v) is not None and abs(self._try_parse_number(v)) >= 1000
+                for v in candidate_row if v is not None
+            )
+            if has_large_nums:
+                break
+            # 通过了所有检查，这是一个子表头行
+            header_end += 1
+            logger.info(f"[_detect_header_rows] Extended header to idx {header_end}, texts={candidate_texts}")
+
+        logger.info(f"[_detect_header_rows] result: header_start={header_start}, header_end={header_end}")
+        return header_start, header_end
+
+    @staticmethod
+    def _parse_merged_ranges(merged_ranges: List[str]) -> List[Dict[str, int]]:
+        """解析合并单元格范围字符串为结构化数据。
+
+        Args:
+            merged_ranges: ['A1:B2', 'C3:D4'] 格式的合并范围
+
+        Returns:
+            [{'min_row': 1, 'max_row': 2, 'min_col': 1, 'max_col': 2, 'row_span': 2, 'col_span': 2}, ...]
+        """
+        result = []
+        pattern = re.compile(r'([A-Z]+)(\d+):([A-Z]+)(\d+)')
+        for mr_str in merged_ranges:
+            m = pattern.match(mr_str)
+            if m:
+                min_col = 0
+                for ch in m.group(1):
+                    min_col = min_col * 26 + (ord(ch) - ord('A') + 1)
+                min_row = int(m.group(2))
+                max_col = 0
+                for ch in m.group(3):
+                    max_col = max_col * 26 + (ord(ch) - ord('A') + 1)
+                max_row = int(m.group(4))
+                result.append({
+                    'min_row': min_row, 'max_row': max_row,
+                    'min_col': min_col, 'max_col': max_col,
+                    'row_span': max_row - min_row + 1,
+                    'col_span': max_col - min_col + 1,
+                })
+        return result
+
+    def _detect_consolidated_columns(
+        self,
+        header_rows: List[List[str]],
+        merged_ranges: List[str],
+        max_col: int,
+        header_excel_rows: Optional[List[int]] = None,
+    ) -> Tuple[bool, Dict[str, int], Optional[int]]:
+        """检测合并/公司列结构，返回列映射和数据右边界。
+
+        对于合并财务报表，典型的表头结构为：
+          行1: 项目 | 附注 | 期末余额 |      | 上年年末余额 |
+          行2:      |      | 合并     | 公司  | 合并         | 公司
+
+        Returns:
+            (is_consolidated, column_map, data_col_end)
+            column_map: {
+                'closing_consolidated': col_idx,
+                'closing_company': col_idx,
+                'opening_consolidated': col_idx,
+                'opening_company': col_idx,
+            }
+            data_col_end: 最右侧公司列的索引+1（用于截断），None表示不截断
+        """
+        column_map: Dict[str, int] = {}
+        is_consolidated = False
+        data_col_end: Optional[int] = None
+
+        # 即使只有单行表头，也尝试通过合并单元格范围推断列结构
+        if len(header_rows) >= 1:
+            parent_row = header_rows[0]
+            parsed_merges = self._parse_merged_ranges(merged_ranges)
+            parent_excel_row = header_excel_rows[0] if header_excel_rows else None
+
+            # 找到表头行中跨2列的合并单元格组
+            span2_groups: List[Tuple[int, int, str]] = []
+            for mr in parsed_merges:
+                if mr['col_span'] == 2:
+                    if parent_excel_row is not None:
+                        if not (mr['min_row'] <= parent_excel_row <= mr['max_row']):
+                            continue
+                    col_0 = mr['min_col'] - 1
+                    col_1 = mr['max_col'] - 1
+                    if col_0 < len(parent_row):
+                        text = parent_row[col_0].strip()
+                        if text:
+                            span2_groups.append((col_0, col_1, text))
+
+            if len(span2_groups) >= 2:
+                # 有2组以上跨2列的合并单元格，推断为合并报表
+                is_consolidated = True
+                column_map['closing_consolidated'] = span2_groups[0][0]
+                column_map['closing_company'] = span2_groups[0][1]
+                column_map['opening_consolidated'] = span2_groups[1][0]
+                column_map['opening_company'] = span2_groups[1][1]
+                rightmost = max(g[1] for g in span2_groups)
+                data_col_end = rightmost + 1
+                logger.info(f"[_detect_consolidated_columns] Inferred from parent row merged ranges: {span2_groups}, column_map={column_map}")
+                return is_consolidated, column_map, data_col_end
+
+        if len(header_rows) < 2:
+            return is_consolidated, column_map, data_col_end
+
+        sub_header = header_rows[-1]  # 子表头行（第2行）
+
+        # 收集所有"合并"和"公司"列的位置
+        consolidated_cols: List[int] = []
+        company_cols: List[int] = []
+
+        for ci, cell_text in enumerate(sub_header):
+            text = cell_text.strip()
+            if not text:
+                continue
+            if any(kw == text or kw in text for kw in self.CONSOLIDATED_KW):
+                consolidated_cols.append(ci)
+            elif any(kw == text or kw in text for kw in self.COMPANY_KW):
+                company_cols.append(ci)
+
+        # 需要同时有合并和公司列才算合并报表
+        if consolidated_cols and company_cols:
+            is_consolidated = True
+            logger.info(f"[_detect_consolidated_columns] FOUND consolidated_cols={consolidated_cols}, company_cols={company_cols}")
+
+            # 按位置排序，通常结构为：[合并, 公司, 合并, 公司]
+            # 前两个对应期末余额，后两个对应期初/上期余额
+            if len(consolidated_cols) >= 1 and len(company_cols) >= 1:
+                column_map['closing_consolidated'] = consolidated_cols[0]
+                column_map['closing_company'] = company_cols[0]
+
+            if len(consolidated_cols) >= 2 and len(company_cols) >= 2:
+                column_map['opening_consolidated'] = consolidated_cols[1]
+                column_map['opening_company'] = company_cols[1]
+
+            # 最右侧的公司列就是数据右边界
+            rightmost_company = max(company_cols)
+            data_col_end = rightmost_company + 1  # +1 因为是切片用
+        else:
+            logger.info(f"[_detect_consolidated_columns] sub_header: no consolidated/company keywords found. consolidated_cols={consolidated_cols}, company_cols={company_cols}")
+
+        return is_consolidated, column_map, data_col_end
+
+    def _merge_header_rows(
+        self, header_rows: List[List[str]], data_col_end: Optional[int]
+    ) -> List[str]:
+        """将多行表头合并为单行语义表头。
+
+        支持2行、3行甚至更多行的表头结构（如权益变动表）。
+        合并策略：逐层向下合并，每层的值会继承上层的合并单元格值。
+        最终每列的表头 = 各层非空值用"-"拼接。
+        """
+        if len(header_rows) == 1:
+            return header_rows[0]
+
+        col_count = max(len(row) for row in header_rows)
+
+        # 对每一行，向右传播值（处理合并单元格导致的空值）
+        propagated_rows: List[List[str]] = []
+        for row in header_rows:
+            propagated: List[str] = []
+            last_val = ""
+            for ci in range(col_count):
+                v = row[ci].strip() if ci < len(row) else ""
+                if v:
+                    last_val = v
+                propagated.append(last_val if v else "")
+            propagated_rows.append(propagated)
+
+        # 逐列合并：取每行中该列的非空值，用"-"拼接
+        # 但要避免重复（如果子行值和父行值相同则不重复）
+        merged: List[str] = []
+        for ci in range(col_count):
+            parts: List[str] = []
+            for row in propagated_rows:
+                val = row[ci] if ci < len(row) else ""
+                if val and (not parts or val != parts[-1]):
+                    parts.append(val)
+            merged.append("-".join(parts) if parts else "")
+
+        return merged
+
     def extract_statement_items(self, sheet_data: ReportSheetData) -> List[StatementItem]:
         """从单个 Sheet 中识别报表科目，含其中项明细和父子关系。
+
+        支持合并财务报表的合并/公司列结构。
 
         Args:
             sheet_data: ReportSheetData
@@ -273,10 +609,17 @@ class ReportParser(WorkpaperParser):
 
             item_id = str(uuid.uuid4())
 
-            # 解析金额
-            opening_balance, closing_balance, warnings = self._parse_amounts(
-                row, sheet_data.statement_type
-            )
+            # 解析金额 - 根据是否为合并报表使用不同策略
+            if sheet_data.is_consolidated and sheet_data.column_map:
+                opening_balance, closing_balance, company_opening, company_closing, warnings = (
+                    self._parse_amounts_consolidated(row, sheet_data.column_map)
+                )
+            else:
+                opening_balance, closing_balance, warnings = self._parse_amounts(
+                    row, sheet_data.statement_type
+                )
+                company_opening = None
+                company_closing = None
 
             item = StatementItem(
                 id=item_id,
@@ -285,6 +628,9 @@ class ReportParser(WorkpaperParser):
                 sheet_name=sheet_data.sheet_name,
                 opening_balance=opening_balance,
                 closing_balance=closing_balance,
+                company_opening_balance=company_opening,
+                company_closing_balance=company_closing,
+                is_consolidated=sheet_data.is_consolidated,
                 parent_id=current_parent_id if is_sub else None,
                 is_sub_item=is_sub,
                 row_index=row_idx,
@@ -339,15 +685,22 @@ class ReportParser(WorkpaperParser):
             if not account_name and context_text:
                 account_name = context_text
 
-            # 表头和数据行
-            headers = [str(h).strip() for h in table_data[0]] if table_data else []
-            rows = table_data[1:] if len(table_data) > 1 else []
+            # 表头和数据行 — 检测多行表头
+            header_rows_raw, data_start = self._detect_note_table_headers(table_data)
+            headers = self._merge_note_header_rows(header_rows_raw)
+            rows = table_data[data_start:] if data_start < len(table_data) else []
+
+            logger.info(f"[extract_note_tables] table {table_idx}: account={account_name}, "
+                        f"header_rows={len(header_rows_raw)}, data_start={data_start}, "
+                        f"row0_cols={len(table_data[0]) if table_data else 0}, "
+                        f"headers={headers[:4]}...")
 
             note_tables.append(NoteTable(
                 id=str(uuid.uuid4()),
                 account_name=account_name or f"附注表格 {table_idx + 1}",
                 section_title=section_title,
                 headers=headers,
+                header_rows=header_rows_raw,
                 rows=rows,
                 source_location=f"表格 {table_idx + 1}",
             ))
@@ -483,6 +836,10 @@ class ReportParser(WorkpaperParser):
                 else:
                     root_sections.append(section)
                 stack.append((norm_level, section))
+
+                if '货币资金' in text:
+                    parent_title = stack[-2][1].title if len(stack) >= 2 else 'ROOT'
+                    logger.info(f"[extract_note_sections] 货币资金 found: level={level}, norm={norm_level}, parent={parent_title}")
             else:
                 sec = current_section()
                 if sec:
@@ -496,6 +853,11 @@ class ReportParser(WorkpaperParser):
         for ti in range(len(word_result.tables)):
             if ti not in used_tables:
                 add_table_to_current(ti)
+
+        # 调试日志：输出根节点及其子节点
+        for sec in root_sections:
+            child_titles = [c.title[:20] for c in sec.children[:10]]
+            logger.info(f"[extract_note_sections] ROOT: '{sec.title[:30]}' level={sec.level}, children={len(sec.children)}, first_children={child_titles}")
 
         return root_sections
 
@@ -572,6 +934,39 @@ class ReportParser(WorkpaperParser):
         """清理其中项名称前缀。"""
         cleaned = re.sub(r'^其中[：:]?\s*', '', name.strip())
         return cleaned.strip()
+
+    def _parse_amounts_consolidated(
+        self, row: List[Any], column_map: Dict[str, int]
+    ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], List[str]]:
+        """从合并报表行中按列映射精确提取金额。
+
+        Args:
+            row: 数据行
+            column_map: 列语义映射 {closing_consolidated: idx, closing_company: idx, ...}
+
+        Returns:
+            (opening_balance, closing_balance, company_opening, company_closing, warnings)
+        """
+        warnings: List[str] = []
+
+        def _get_val(key: str) -> Optional[float]:
+            idx = column_map.get(key)
+            if idx is None or idx >= len(row):
+                return None
+            val = row[idx]
+            parsed = self._try_parse_number(val)
+            if parsed is None and val is not None and isinstance(val, str) and val.strip():
+                stripped = val.strip()
+                if stripped not in ('-', '—', '/', ''):
+                    warnings.append(f"金额无法解析：'{val}'")
+            return parsed
+
+        closing_balance = _get_val('closing_consolidated')
+        opening_balance = _get_val('opening_consolidated')
+        company_closing = _get_val('closing_company')
+        company_opening = _get_val('opening_company')
+
+        return opening_balance, closing_balance, company_opening, company_closing, warnings
 
     def _parse_amounts(
         self, row: List[Any], statement_type: StatementType
@@ -676,6 +1071,230 @@ class ReportParser(WorkpaperParser):
         elif headings:
             return headings[-1]
         return f"附注表格 {table_idx + 1}"
+
+    def _detect_note_table_headers(self, table_data: List[List[Any]]) -> tuple:
+        """检测附注表格的多行表头。
+
+        Word 表格中合并单元格被 seen_cells 去重后，不同行列数可能不同。
+        例如：
+          row0: ["票据种类", "期末余额", "上年年末余额"]  (3列，水平合并去重)
+          row1: ["账面余额", "坏账准备", "账面价值", "账面余额", "坏账准备", "账面价值"]  (6列，垂直合并去重掉了第一列)
+          row2: ["银行承兑汇票", "112,623,142.41", ...]  (7列，数据行)
+
+        检测策略：如果相邻行列数不同且后续行无大数字，则为多行表头。
+        对齐策略：短行在前面补空列使所有行列数一致。
+
+        返回 (header_rows, data_start_index)。
+        """
+        if not table_data:
+            return [], 0
+
+        row0 = [str(h).strip() for h in table_data[0]]
+        if len(table_data) < 2:
+            return [row0], 1
+
+        # 找到数据行的最大列数
+        max_cols = len(row0)
+        for ri in range(1, min(len(table_data), 6)):
+            max_cols = max(max_cols, len(table_data[ri]))
+
+        # 如果所有行列数相同，用简单逻辑
+        if len(row0) == max_cols:
+            row1 = table_data[1]
+            first_cell = str(row1[0]).strip() if row1 and row1[0] is not None else ''
+            if first_cell and first_cell != row0[0]:
+                return [row0], 1
+            non_empty = [str(c).strip() for c in row1 if c is not None and str(c).strip()]
+            if len(non_empty) < 2:
+                return [row0], 1
+            if self._row_has_large_number(row1):
+                return [row0], 1
+            header_rows = [row0, [str(c).strip() if c is not None else '' for c in row1]]
+            return header_rows, 2
+
+        # 列数不同 — 有合并单元格
+        header_rows_raw: List[List[str]] = [row0]
+        data_start = 1
+
+        for ri in range(1, min(len(table_data), 4)):
+            row = [str(c).strip() if c is not None else '' for c in table_data[ri]]
+            if self._row_has_large_number(table_data[ri]):
+                break
+            non_empty = [v for v in row if v]
+            if len(non_empty) < 2:
+                break
+            # 如果这行列数和 max_cols 相同且第一列是实际科目名，则是数据行
+            if len(row) == max_cols and row[0] and row[0] != row0[0]:
+                # 再检查是否全是文本（子表头特征）
+                num_count = 0
+                for c in row:
+                    s = c.replace(',', '').replace(' ', '')
+                    try:
+                        float(s)
+                        num_count += 1
+                    except (ValueError, TypeError):
+                        pass
+                if num_count > len(row) // 3:
+                    break  # 数字太多，是数据行
+            header_rows_raw.append(row)
+            data_start = ri + 1
+
+        # 对齐所有表头行到 max_cols
+        aligned = self._align_header_rows(header_rows_raw, max_cols)
+        return aligned, data_start
+
+    @staticmethod
+    def _row_has_large_number(row: List[Any]) -> bool:
+        """检查行中是否有大数字（>1000），用于区分表头和数据行。"""
+        for c in row:
+            if c is None:
+                continue
+            s = str(c).replace(',', '').replace(' ', '').strip()
+            try:
+                if abs(float(s)) > 1000:
+                    return True
+            except (ValueError, TypeError):
+                pass
+        return False
+
+    @staticmethod
+    def _align_header_rows(header_rows: List[List[str]], target_cols: int) -> List[List[str]]:
+        """对齐多行表头到相同列数（智能展开）。
+
+        对于父表头行（最短行），根据子行信息推断独占列和展开列：
+        - 独占列（纵向合并）保持1列宽度
+        - 展开列（有子列的父列）重复填充以覆盖子列范围
+        前端通过相同值检测来渲染 rowSpan/colSpan。
+        """
+        if not header_rows:
+            return header_rows
+        if len(header_rows) == 1:
+            row = header_rows[0]
+            if len(row) >= target_cols:
+                return [row[:target_cols]]
+            return [row + [''] * (target_cols - len(row))]
+
+        first_row = header_rows[0]
+        first_len = len(first_row)
+        sub_rows = header_rows[1:]
+        sub_row_max = max(len(r) for r in sub_rows)
+
+        # 第一行不需要展开的情况
+        if first_len >= target_cols or first_len >= sub_row_max:
+            result: List[List[str]] = []
+            r0 = list(first_row[:target_cols]) if first_len >= target_cols else list(first_row) + [''] * (target_cols - first_len)
+            result.append(r0)
+            for row in sub_rows:
+                if len(row) >= target_cols:
+                    result.append(list(row[:target_cols]))
+                else:
+                    result.append(list(row) + [''] * (target_cols - len(row)))
+            return result
+
+        # ── 第一行比子行短，需要智能展开 ──
+        # 策略：第一列通常是独占列（项目/科目名），其余列是展开列
+        # 展开列的宽度基于子行列数均分，而不是基于 target_cols
+        # 这样即使数据行有额外空列，展开也是正确的
+
+        # 确定独占列：默认第一列独占，其余展开
+        # 但如果有关键词匹配，优先使用关键词
+        expand_kw = ['变动', '增减', '明细', '调整', '余额', '金额', '数']
+        is_expand = [False] * first_len
+
+        # 先用关键词标记展开列
+        for i, val in enumerate(first_row):
+            v = (val or '').replace(' ', '')
+            if any(kw in v for kw in expand_kw):
+                is_expand[i] = True
+
+        n_marked = sum(is_expand)
+        if n_marked == 0:
+            # 没有关键词匹配，用位置启发式：第一列独占，其余展开
+            for i in range(1, first_len):
+                is_expand[i] = True
+        elif n_marked == first_len:
+            # 所有列都被标记为展开，第一列改为独占
+            is_expand[0] = False
+
+        n_expand = sum(is_expand)
+        head_solo_count = 0
+        for i in range(first_len):
+            if not is_expand[i]:
+                head_solo_count += 1
+            else:
+                break
+
+        if n_expand <= 0:
+            # 所有列都是独占的，简单补齐
+            r0 = list(first_row) + [''] * (target_cols - first_len)
+            subs = []
+            for row in sub_rows:
+                subs.append(list(row) + [''] * (target_cols - len(row)) if len(row) < target_cols else list(row[:target_cols]))
+            return [r0[:target_cols]] + subs
+
+        # 展开列的总子列数 = 子行列数 - 子行中对应独占列的空位数
+        # 如果子行前面有空列，说明是独占列的纵向合并空位
+        ref_sub = sub_rows[0] if sub_rows else []
+        sub_leading_empty = 0
+        for c in ref_sub:
+            if not (c and str(c).strip()):
+                sub_leading_empty += 1
+            else:
+                break
+        # 子行前导空列数不超过独占列数
+        solo_offset = min(sub_leading_empty, head_solo_count)
+        child_total = sub_row_max - solo_offset
+        if child_total <= 0:
+            child_total = sub_row_max
+        base_w = child_total // n_expand
+        rem = child_total % n_expand
+
+        widths = [1] * first_len
+        expand_idx = 0
+        for i in range(first_len):
+            if is_expand[i]:
+                widths[i] = base_w + (1 if expand_idx < rem else 0)
+                expand_idx += 1
+
+        r0: List[str] = []
+        for i, val in enumerate(first_row):
+            r0.extend([val] * widths[i])
+        # 补齐或截断到 target_cols
+        if len(r0) > target_cols:
+            r0 = r0[:target_cols]
+        elif len(r0) < target_cols:
+            r0.extend([''] * (target_cols - len(r0)))
+
+        # ── 对齐子行：前面插入 head_solo_count 个空列 ──
+        aligned_subs: List[List[str]] = []
+        for row in sub_rows:
+            if len(row) >= target_cols:
+                aligned_subs.append(list(row[:target_cols]))
+            else:
+                padded = [''] * head_solo_count + list(row) + [''] * max(target_cols - len(row) - head_solo_count, 0)
+                aligned_subs.append(padded[:target_cols])
+
+        return [r0[:target_cols]] + aligned_subs
+
+
+    @staticmethod
+    def _merge_note_header_rows(header_rows: List[List[str]]) -> List[str]:
+        """将附注表格的多行表头合并为单行语义表头。"""
+        if not header_rows:
+            return []
+        if len(header_rows) == 1:
+            return header_rows[0]
+
+        col_count = max(len(row) for row in header_rows)
+        merged = []
+        for ci in range(col_count):
+            parts = []
+            for row in header_rows:
+                val = row[ci].strip() if ci < len(row) else ''
+                if val and val not in parts:
+                    parts.append(val)
+            merged.append('-'.join(parts) if parts else '')
+        return merged
 
     @staticmethod
     def _extract_account_from_heading(heading: str) -> str:

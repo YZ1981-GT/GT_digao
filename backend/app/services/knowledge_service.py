@@ -44,6 +44,8 @@ class KnowledgeService:
             # 初始化缓存并预加载已有文档
             self._content_cache[lib_id] = {}
             self._preload_cache(lib_id)
+        # 预装内置模板到报告模板库
+        self._preload_builtin_templates()
 
     @staticmethod
     def _validate_doc_id(doc_id: str) -> str:
@@ -82,6 +84,36 @@ class KnowledgeService:
                     logger.error("[知识库] 加载文档 %s 失败: %s", doc['id'], e)
         if loaded:
             logger.info("[知识库] %s 已加载 %d 个文档到缓存", self.LIBRARIES[library_id]['name'], loaded)
+
+    # 内置模板定义：(文件名, 知识库ID)
+    BUILTIN_TEMPLATES = [
+        ('国企报表附注.md', 'report_templates'),
+        ('上市报表附注.md', 'report_templates'),
+    ]
+
+    def _preload_builtin_templates(self) -> None:
+        """将内置模板文件预装到知识库（仅首次，按文件名去重）。"""
+        templates_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'templates')
+        if not os.path.isdir(templates_dir):
+            return
+
+        for filename, library_id in self.BUILTIN_TEMPLATES:
+            filepath = os.path.join(templates_dir, filename)
+            if not os.path.isfile(filepath):
+                continue
+
+            # 检查是否已存在同名文档
+            docs = self._load_index(library_id)
+            if any(d.get('filename') == filename for d in docs):
+                continue
+
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                doc = self.add_document(library_id, filename, content)
+                logger.info("[知识库] 预装内置模板: %s → %s (id=%s)", filename, self.LIBRARIES[library_id]['name'], doc['id'])
+            except Exception as e:
+                logger.warning("[知识库] 预装模板失败 %s: %s", filename, e)
 
     @staticmethod
     def _strip_ai_header(content: str) -> str:

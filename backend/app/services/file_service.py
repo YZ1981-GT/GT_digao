@@ -734,3 +734,40 @@ class FileService:
             # 异常情况下也使用安全的文件清理方法
             FileService._safe_file_cleanup(file_path)
             raise e
+
+    @staticmethod
+    def render_pdf_page_images(file_path: str, output_dir: str, dpi: int = 150) -> Dict[int, str]:
+        """将 PDF 每页渲染为 JPEG 图片，返回 {page_number: image_path} 映射。
+
+        page_number 为 1-based。图片保存到 output_dir/page_N.jpg。
+        """
+        if not HAS_ADVANCED_LIBS:
+            return {}
+        result: Dict[int, str] = {}
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            doc = fitz.open(file_path)
+            zoom = dpi / 72.0
+            mat = fitz.Matrix(zoom, zoom)
+            for page_num in range(doc.page_count):
+                page = doc[page_num]
+                pix = page.get_pixmap(matrix=mat)
+                img_path = os.path.join(output_dir, f"page_{page_num + 1}.jpg")
+                pix.save(img_path)
+                result[page_num + 1] = img_path
+                pix = None
+            doc.close()
+        except Exception as e:
+            logger.warning("PDF 页面渲染失败: %s", e)
+        return result
+
+    @staticmethod
+    def render_docx_page_images(file_path: str, output_dir: str) -> Dict[int, str]:
+        """Word 文档无法直接按页渲染，返回空映射。
+
+        如果需要 Word 页面预览，需先转 PDF 再渲染。
+        此方法预留接口，后续可扩展。
+        """
+        # Word 文档不支持直接按页渲染
+        # 可以尝试通过 LibreOffice 转 PDF 后再渲染
+        return {}

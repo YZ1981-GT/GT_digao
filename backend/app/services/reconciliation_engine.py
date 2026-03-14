@@ -144,33 +144,35 @@ class ReconciliationEngine:
                 # 期末余额比对
                 if item.closing_balance is not None and note_closing is not None:
                     if not _amounts_equal(item.closing_balance, note_closing):
-                        diff = item.closing_balance - note_closing
+                        diff = round(item.closing_balance - note_closing, 2)
                         findings.append(self._make_finding(
                             category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
                             account_name=item.account_name,
                             statement_amount=item.closing_balance,
                             note_amount=note_closing,
                             difference=diff,
-                            location=f"报表'{item.sheet_name}'vs附注'{note.section_title}'期末余额",
+                            location=f"附注-{item.account_name}-{note.section_title}-期末余额",
                             description=f"报表期末余额{item.closing_balance}与附注合计{note_closing}不一致，差异{diff}",
                             risk_level=self._assess_risk(abs(diff), item.closing_balance),
                             reasoning=f"校验公式: 报表期末余额({item.closing_balance}) - 附注合计({note_closing}) = {diff}",
+                            note_table_ids=[note_id],
                         ))
 
                 # 期初余额比对
                 if item.opening_balance is not None and note_opening is not None:
                     if not _amounts_equal(item.opening_balance, note_opening):
-                        diff = item.opening_balance - note_opening
+                        diff = round(item.opening_balance - note_opening, 2)
                         findings.append(self._make_finding(
                             category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
                             account_name=item.account_name,
                             statement_amount=item.opening_balance,
                             note_amount=note_opening,
                             difference=diff,
-                            location=f"报表'{item.sheet_name}'vs附注'{note.section_title}'期初余额",
+                            location=f"附注-{item.account_name}-{note.section_title}-期初余额",
                             description=f"报表期初余额{item.opening_balance}与附注合计{note_opening}不一致，差异{diff}",
                             risk_level=self._assess_risk(abs(diff), item.opening_balance),
                             reasoning=f"校验公式: 报表期初余额({item.opening_balance}) - 附注合计({note_opening}) = {diff}",
+                            note_table_ids=[note_id],
                         ))
 
         return findings
@@ -208,17 +210,18 @@ class ReconciliationEngine:
                         has_data = True
 
                 if has_data and not _amounts_equal(data_sum, total_val):
-                    diff = data_sum - total_val
+                    diff = round(data_sum - total_val, 2)
                     findings.append(self._make_finding(
                         category=ReportReviewFindingCategory.RECONCILIATION_ERROR,
                         account_name=note_table.account_name,
                         statement_amount=total_val,
                         note_amount=data_sum,
                         difference=diff,
-                        location=f"附注'{note_table.section_title}'行{total_idx}列{col.col_index}",
+                        location=f"附注-{note_table.account_name}-{note_table.section_title}-第{total_idx + 1}行合计-列{col.col_index + 1}",
                         description=f"纵向加总不平：数据行合计{data_sum}，合计行{total_val}，差异{diff}",
                         risk_level=RiskLevel.MEDIUM,
                         reasoning=f"校验: sum(数据行)={data_sum}, 合计行={total_val}, 差异={diff}",
+                        note_table_ids=[note_table.id],
                     ))
 
         return findings
@@ -260,17 +263,18 @@ class ReconciliationEngine:
 
             expected = opening + increase - decrease
             if not _amounts_equal(expected, closing):
-                diff = expected - closing
+                diff = round(expected - closing, 2)
                 findings.append(self._make_finding(
                     category=ReportReviewFindingCategory.RECONCILIATION_ERROR,
                     account_name=note_table.account_name,
-                    location=f"附注'{note_table.section_title}'行{row_struct.row_index}'{row_struct.label}'",
+                    location=f"附注-{note_table.account_name}-{note_table.section_title}-第{row_struct.row_index + 1}行'{row_struct.label}'",
                     description=f"余额变动公式不平：期初{opening}+增加{increase}-减少{decrease}={expected}，期末{closing}，差异{diff}",
                     difference=diff,
                     statement_amount=expected,
                     note_amount=closing,
                     risk_level=RiskLevel.MEDIUM,
                     reasoning=f"公式: {opening}+{increase}-{decrease}={expected}, 实际期末={closing}",
+                    note_table_ids=[note_table.id],
                 ))
 
         return findings
@@ -309,7 +313,7 @@ class ReconciliationEngine:
                         has_child = True
 
                 if has_child and child_sum > parent_val + TOLERANCE:
-                    diff = child_sum - parent_val
+                    diff = round(child_sum - parent_val, 2)
                     parent_label = ""
                     for r in table_structure.rows:
                         if r.row_index == parent_idx:
@@ -318,13 +322,14 @@ class ReconciliationEngine:
                     findings.append(self._make_finding(
                         category=ReportReviewFindingCategory.RECONCILIATION_ERROR,
                         account_name=note_table.account_name,
-                        location=f"附注'{note_table.section_title}'行{parent_idx}'{parent_label}'",
+                        location=f"附注-{note_table.account_name}-{note_table.section_title}-第{parent_idx + 1}行'{parent_label}'",
                         description=f"其中项之和{child_sum}超过父项{parent_val}，差异{diff}",
                         difference=diff,
                         statement_amount=parent_val,
                         note_amount=child_sum,
                         risk_level=RiskLevel.LOW,
                         reasoning=f"其中项校验: sum(子项)={child_sum} > 父项={parent_val}",
+                        note_table_ids=[note_table.id],
                     ))
 
         return findings
@@ -388,13 +393,14 @@ class ReconciliationEngine:
     def _get_data_rows_for_total(
         self, ts: TableStructure, total_idx: int
     ) -> List[int]:
-        """获取某合计行对应的数据行索引。"""
+        """获取某合计行对应的顶层数据行索引（排除其中项明细，避免重复计算）。"""
         data_rows = []
         for r in ts.rows:
             if r.row_index >= total_idx:
                 break
             if r.role == "data":
                 data_rows.append(r.row_index)
+            # sub_item 不参与合计行加总（它们已包含在父项中）
         return data_rows
 
     @staticmethod
@@ -423,6 +429,7 @@ class ReconciliationEngine:
         note_amount: Optional[float] = None,
         difference: Optional[float] = None,
         reasoning: str = "",
+        note_table_ids: Optional[List[str]] = None,
     ) -> ReportReviewFinding:
         return ReportReviewFinding(
             id=str(uuid.uuid4())[:8],
@@ -436,9 +443,11 @@ class ReconciliationEngine:
             description=description,
             suggestion="请核实数据并修正",
             analysis_reasoning=reasoning,
+            note_table_ids=note_table_ids or [],
             confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
             status=FindingStatus.OPEN,
         )
+
 
 
 # 模块级单例

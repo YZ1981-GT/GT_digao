@@ -544,6 +544,9 @@ export interface StatementItem {
   sheet_name: string;
   opening_balance?: number;
   closing_balance?: number;
+  company_opening_balance?: number;
+  company_closing_balance?: number;
+  is_consolidated?: boolean;
   parent_id?: string;
   is_sub_item: boolean;
   row_index: number;
@@ -556,6 +559,7 @@ export interface NoteTable {
   account_name: string;
   section_title: string;
   headers: string[];
+  header_rows?: string[][];
   rows: any[][];
   source_location: string;
 }
@@ -654,6 +658,9 @@ export interface ReportReviewFinding {
   template_reference?: string;
   suggestion: string;
   analysis_reasoning?: string;
+  note_table_ids?: string[];
+  source_page?: number;
+  source_file?: string;
   confirmation_status: FindingConfirmationStatus;
   status: FindingStatus;
 }
@@ -780,8 +787,8 @@ export const FINDING_CATEGORY_COLORS: Record<ReportReviewFindingCategory, string
   change_abnormal: 'var(--gt-warning)',
   note_missing: 'var(--gt-info)',
   report_body_compliance: 'var(--gt-primary)',
-  note_content: 'var(--gt-water-blue)',
-  text_quality: 'var(--gt-medium-gray)',
+  note_content: 'var(--gt-teal)',
+  text_quality: '#888888',
 };
 
 export const REPORT_TEMPLATE_TYPE_LABELS: Record<ReportTemplateType, string> = {

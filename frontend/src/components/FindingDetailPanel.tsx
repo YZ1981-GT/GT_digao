@@ -13,11 +13,12 @@ const API = process.env.REACT_APP_API_URL || (process.env.NODE_ENV === 'producti
 interface Props {
   findingId: string;
   finding: ReportReviewFinding | null;
+  sessionId?: string | null;
   onStatusChange: (id: string, status: FindingConfirmationStatus) => void;
   onUpdate: () => void;
 }
 
-const FindingDetailPanel: React.FC<Props> = ({ findingId, finding, onStatusChange, onUpdate }) => {
+const FindingDetailPanel: React.FC<Props> = ({ findingId, finding, sessionId, onStatusChange, onUpdate }) => {
   const [messages, setMessages] = useState<FindingConversationMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -25,6 +26,11 @@ const FindingDetailPanel: React.FC<Props> = ({ findingId, finding, onStatusChang
   const [editDesc, setEditDesc] = useState('');
   const [editSuggestion, setEditSuggestion] = useState('');
   const [editRisk, setEditRisk] = useState<RiskLevel>('medium');
+  const [noteTables, setNoteTables] = useState<any[]>([]);
+  const [showTable, setShowTable] = useState(true);
+  const [showPageImage, setShowPageImage] = useState(true);
+  const [pageImageUrl, setPageImageUrl] = useState<string | null>(null);
+  const [pageImagesInfo, setPageImagesInfo] = useState<Record<string, { filename: string; pages: number[] }>>({});
   const msgEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -43,7 +49,84 @@ const FindingDetailPanel: React.FC<Props> = ({ findingId, finding, onStatusChang
     }
   }, [finding]);
 
+  // 加载关联的附注表格
+  useEffect(() => {
+    if (!sessionId || !finding) { setNoteTables([]); return; }
+
+    const loadTables = async () => {
+      try {
+        let tables: any[] = [];
+
+        // 优先使用 finding 上的 note_table_ids 直接查找（最精确）
+        if (finding.note_table_ids && finding.note_table_ids.length > 0) {
+          const ids = finding.note_table_ids.join(',');
+          const url = `${API}/api/report-review/session/${sessionId}/note-tables?note_ids=${encodeURIComponent(ids)}`;
+          const r = await fetch(url);
+          const data = await r.json();
+          tables = data.note_tables || [];
+        }
+
+        // 回退：用 account_name 查
+        if (tables.length === 0) {
+          let url = `${API}/api/report-review/session/${sessionId}/note-tables?account_name=${encodeURIComponent(finding.account_name)}`;
+          let r = await fetch(url);
+          let data = await r.json();
+          tables = data.note_tables || [];
+
+          // 如果没结果，尝试从 location 提取 section_title
+          if (tables.length === 0 && finding.location) {
+            const match = finding.location.match(/附注'([^']+)'/);
+            if (match) {
+              url = `${API}/api/report-review/session/${sessionId}/note-tables?account_name=${encodeURIComponent(match[1])}`;
+              r = await fetch(url);
+              data = await r.json();
+              tables = data.note_tables || [];
+            }
+          }
+        }
+
+        setNoteTables(tables);
+      } catch {
+        setNoteTables([]);
+      }
+    };
+
+    loadTables();
+  }, [sessionId, findingId]);
+
   useEffect(() => { msgEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+  // 加载页面截图信息
+  useEffect(() => {
+    if (!sessionId) return;
+    fetch(`${API}/api/report-review/session/${sessionId}/page-images-info`)
+      .then(r => r.json())
+      .then(data => setPageImagesInfo(data.page_images || {}))
+      .catch(() => {});
+  }, [sessionId]);
+
+  // 构建页面截图 URL
+  useEffect(() => {
+    if (!finding?.source_page || !sessionId) {
+      setPageImageUrl(null);
+      return;
+    }
+    // 查找包含该页码的 file_id
+    const entries = Object.entries(pageImagesInfo);
+    for (const [fileId, info] of entries) {
+      if (info.pages.includes(finding.source_page)) {
+        setPageImageUrl(`${API}/api/report-review/session/${sessionId}/page-image/${fileId}/${finding.source_page}`);
+        return;
+      }
+    }
+    // 如果只有一个文件，直接尝试
+    if (entries.length > 0) {
+      const [fileId] = entries[0];
+      setPageImageUrl(`${API}/api/report-review/session/${sessionId}/page-image/${fileId}/${finding.source_page}`);
+    } else {
+      setPageImageUrl(null);
+    }
+  }, [finding, sessionId, pageImagesInfo]);
 
   const sendChat = useCallback(async () => {
     if (!chatInput.trim() || streaming) return;
@@ -202,6 +285,9 @@ const FindingDetailPanel: React.FC<Props> = ({ findingId, finding, onStatusChang
       ) : (
         <div style={{ marginBottom: 'var(--gt-space-3)', fontSize: 13 }}>
           <p><span style={{ color: '#888' }}>描述：</span>{finding.description}</p>
+          {finding.location && (
+            <p style={{ marginTop: 4 }}><span style={{ color: '#888' }}>位置：</span><span style={{ backgroundColor: '#fff8e1', padding: '1px 4px', borderRadius: 3 }}>{finding.location}</span></p>
+          )}
           <p><span style={{ color: '#888' }}>建议：</span>{finding.suggestion}</p>
           {finding.analysis_reasoning && (
             <div style={{ marginTop: 8, padding: 8, backgroundColor: '#f8f8f8', borderRadius: 4, fontSize: 12 }}>
@@ -217,11 +303,109 @@ const FindingDetailPanel: React.FC<Props> = ({ findingId, finding, onStatusChang
           )}
           {finding.difference != null && (
             <p style={{ fontSize: 12, color: '#888' }}>
-              报表: {finding.statement_amount?.toLocaleString()} | 附注: {finding.note_amount?.toLocaleString()} | 差异: {finding.difference?.toLocaleString()}
+              报表: {finding.statement_amount?.toLocaleString()} | 附注: {finding.note_amount?.toLocaleString()} | 差异: {finding.difference?.toFixed(2)}
             </p>
           )}
         </div>
       )}
+
+      {/* 源文档页面预览 */}
+      {pageImageUrl && (
+        <div style={{ marginBottom: 'var(--gt-space-3)' }}>
+          <div
+            onClick={() => setShowPageImage(!showPageImage)}
+            style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 6 }}
+            role="button" tabIndex={0}
+          >
+            <span style={{ fontSize: 10 }}>{showPageImage ? '▼' : '▶'}</span>
+            📄 源文档预览{finding?.source_page ? `（第${finding.source_page}页）` : ''}
+          </div>
+          {showPageImage && (
+            <div style={{ border: '1px solid #e0d8ec', borderRadius: 6, overflow: 'hidden', backgroundColor: '#f9f9f9' }}>
+              {finding?.source_file && (
+                <div style={{ padding: '4px 8px', backgroundColor: '#f5f0fa', fontSize: 11, color: '#888' }}>
+                  文件：{finding.source_file}
+                </div>
+              )}
+              <img
+                src={pageImageUrl}
+                alt={`源文档第${finding?.source_page || ''}页`}
+                style={{ width: '100%', display: 'block' }}
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 关联附注表格预览 */}
+      {noteTables.length > 0 ? (
+        <div style={{ marginBottom: 'var(--gt-space-3)' }}>
+          <div
+            onClick={() => setShowTable(!showTable)}
+            style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 6 }}
+            role="button" tabIndex={0}
+          >
+            <span style={{ fontSize: 10 }}>{showTable ? '▼' : '▶'}</span>
+            原始附注表格（{noteTables.length} 个）
+          </div>
+          {showTable && noteTables.map((table: any) => (
+            <div key={table.id} style={{ marginBottom: 10, border: '1px solid #e0d8ec', borderRadius: 6, overflow: 'hidden' }}>
+              <div style={{ padding: '4px 8px', backgroundColor: '#f5f0fa', fontSize: 12, fontWeight: 600, color: '#555' }}>
+                {table.section_title}
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  {table.headers && table.headers.length > 0 && (
+                    <thead>
+                      <tr>
+                        {table.headers.map((h: string, i: number) => (
+                          <th key={i} style={{
+                            padding: '4px 8px', borderBottom: '2px solid #d0c4e0', backgroundColor: '#f9f6fd',
+                            textAlign: i === 0 ? 'left' : 'right', whiteSpace: 'nowrap', fontSize: 11, color: '#666',
+                          }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                  )}
+                  <tbody>
+                    {(table.rows || []).map((row: any[], ri: number) => {
+                      const label = String(row[0] || '').trim();
+                      const isTotal = /合计|总计/.test(label);
+                      // 高亮差异行：如果 finding 有 statement_amount，对比合计行数值
+                      let highlight = false;
+                      if (isTotal && finding?.difference != null && finding.difference !== 0) {
+                        highlight = true;
+                      }
+                      return (
+                        <tr key={ri} style={{
+                          backgroundColor: highlight ? '#fff3f3' : isTotal ? '#f9f6fd' : ri % 2 === 0 ? '#fff' : '#fafafa',
+                        }}>
+                          {row.map((cell: any, ci: number) => (
+                            <td key={ci} style={{
+                              padding: '3px 8px', borderBottom: '1px solid #eee',
+                              textAlign: ci === 0 ? 'left' : 'right',
+                              fontWeight: isTotal ? 600 : 400,
+                              color: highlight && ci > 0 ? '#dc3545' : '#333',
+                              whiteSpace: 'nowrap',
+                            }}>
+                              {cell != null ? String(cell) : ''}
+                            </td>
+                          ))}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : sessionId ? (
+        <div style={{ marginBottom: 'var(--gt-space-3)', padding: 8, fontSize: 12, color: '#999', backgroundColor: '#f8f8f8', borderRadius: 4 }}>
+          未找到关联的附注表格
+        </div>
+      ) : null}
 
       {/* Trace buttons */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 'var(--gt-space-3)' }}>

@@ -14,7 +14,7 @@
  */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  NoteTable, NoteSection, MatchingMap,
+  NoteTable, NoteSection, MatchingMap, StatementItem,
 } from '../types/audit';
 
 const API = process.env.REACT_APP_API_URL || (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:9980');
@@ -69,11 +69,36 @@ const fmtNum = (v: any): string => {
 const lvlBorder  = (l: number) => LEVEL_COLORS.border[l]  || '#ccc';
 
 // ─── 判断是否为"财务报表主要项目注释"类标题 ───
-const MAIN_NOTE_KW = ['财务报表主要项目', '主要项目注释', '报表项目注释', '报表主要项目', '合并财务报表项目'];
-const PARENT_NOTE_KW = ['母公司财务报表', '公司财务报表主要项目附注', '母公司报表主要项目'];
+// 上市版: "合并财务报表项目附注"  国企版: "财务报表主要项目注释"
+const MAIN_NOTE_KW = [
+  '财务报表主要项目', '主要项目注释', '报表项目注释',
+  '报表主要项目', '合并财务报表项目',
+];
+// 上市版: "公司财务报表主要项目注释"（无"母"字）
+// 国企版: "母公司财务报表的主要项目附注"
+const PARENT_NOTE_KW = [
+  '母公司财务报表', '母公司报表主要项目',
+  '公司财务报表主要项目注释', '公司财务报表主要项目附注',
+];
+
+// 合并报表注释的延续章节（位于主项目注释之后、母公司之前，单独页签显示）
+const EXTRA_DISCLOSURE_KW = [
+  '研发支出', '在其他主体中的权益', '政府补助', '金融工具风险',
+  '公允价值', '关联方', '股份支付', '企业合并及合并',
+  '补充资料', '非经常性损益', '净资产收益率', '每股收益',
+  '承诺及或有', '或有事项', '资产负债表日后', '日后事项',
+  '其他重要事项',
+];
+
+function isExtraDisclosure(title: string): boolean {
+  const c = title.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
+  return EXTRA_DISCLOSURE_KW.some(k => c.includes(k));
+}
 
 function isMainNoteSection(title: string): boolean {
   const c = title.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
+  // 先排除母公司标题，避免"公司财务报表主要项目注释"同时命中两个
+  if (isParentNoteSection(title)) return false;
   return MAIN_NOTE_KW.some(k => c.includes(k));
 }
 function isParentNoteSection(title: string): boolean {
@@ -95,8 +120,11 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   const [sheetData, setSheetData] = useState<Record<string, any[]>>({});
   const [auditReportContent, setAuditReportContent] = useState<Array<{ text: string; level?: number; is_bold?: boolean }>>([]);
   const [matching, setMatching] = useState<MatchingMap | null>(null);
+  const [statementItems, setStatementItems] = useState<StatementItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [templateType, setTemplateType] = useState<string>('soe');
+  const [parentPresetAccounts, setParentPresetAccounts] = useState<Array<{ name: string; keywords: string[]; order: number }>>([]);
 
   const [activeTopTab, setActiveTopTab] = useState<string>('notes');
   const [activeSheetTab, setActiveSheetTab] = useState(0);
@@ -137,6 +165,8 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         setSheetData(data.sheet_data || {});
         setAuditReportContent(data.audit_report_content || []);
         setMatching(data.matching_map || null);
+        setStatementItems(data.statement_items || []);
+        if (data.template_type) setTemplateType(data.template_type);
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
@@ -153,13 +183,63 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     return () => { document.getElementById(STYLE_ID)?.remove(); };
   }, []);
 
+  // ─── 加载母公司附注预设科目 ───
+  useEffect(() => {
+    if (!templateType) return;
+    fetch(`${API}/api/report-review/parent-accounts/${templateType}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.accounts) setParentPresetAccounts(data.accounts);
+      })
+      .catch(() => {});
+  }, [templateType]);
+
   const noteMap = useMemo(() => new Map(notes.map(n => [n.id, n])), [notes]);
 
-  // ─── 附注分组：前段 / 主项目注释 / 母公司 / 后段 ───
+  // ─── 报表科目映射：noteTableId → StatementItem（反向索引） ───
+  const stmtItemMap = useMemo(() => new Map(statementItems.map(s => [s.id, s])), [statementItems]);
+  const noteToStmtMap = useMemo(() => {
+    const m = new Map<string, StatementItem>();
+    if (!matching) return m;
+    for (const entry of matching.entries) {
+      const item = stmtItemMap.get(entry.statement_item_id);
+      if (!item) continue;
+      for (const nid of entry.note_table_ids) {
+        // 一个 note_table 可能被多个 statement_item 匹配，取第一个
+        if (!m.has(nid)) m.set(nid, item);
+      }
+    }
+    return m;
+  }, [matching, stmtItemMap]);
+
+  // 通过 section 的 note_table_ids 找到对应的报表科目
+  const findStmtForSection = useCallback((sec: NoteSection): StatementItem | null => {
+    // 先在自身的 note_table_ids 中查找
+    for (const nid of sec.note_table_ids) {
+      const item = noteToStmtMap.get(nid);
+      if (item) return item;
+    }
+    // 再在子节点中递归查找
+    for (const child of sec.children) {
+      const item = findStmtForSection(child);
+      if (item) return item;
+    }
+    // 最后尝试通过科目名称直接匹配
+    const secName = sec.title.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
+    for (const si of statementItems) {
+      if (si.is_sub_item) continue;
+      const siName = si.account_name.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
+      if (secName.includes(siName) || siName.includes(secName)) return si;
+    }
+    return null;
+  }, [noteToStmtMap, statementItems]);
+
+  // ─── 附注分组：前段 / 主项目注释 / 其他专项披露 / 母公司 / 后段 ───
   const noteGroups = useMemo(() => {
     const before: NoteSection[] = [];
     let mainSec: NoteSection | null = null;
     let parentSec: NoteSection | null = null;
+    const extra: NoteSection[] = [];
     const after: NoteSection[] = [];
     let foundMain = false;
 
@@ -171,11 +251,27 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         parentSec = sec;
       } else if (!foundMain) {
         before.push(sec);
+      } else if (isExtraDisclosure(sec.title)) {
+        extra.push(sec);
       } else {
         after.push(sec);
       }
     }
-    return { before, mainSec, parentSec, after };
+
+    // 如果母公司节点未在根级找到，检查 mainSec 的子节点中是否有母公司容器
+    if (mainSec && !parentSec) {
+      const parentIdx = mainSec.children.findIndex(c => isParentNoteSection(c.title));
+      if (parentIdx >= 0) {
+        parentSec = mainSec.children[parentIdx];
+        // 从 mainSec.children 中移除母公司节点（避免重复显示）
+        mainSec = {
+          ...mainSec,
+          children: mainSec.children.filter((_, i) => i !== parentIdx),
+        } as NoteSection;
+      }
+    }
+
+    return { before, mainSec, parentSec, extra, after };
   }, [sections]);
 
   // 附注页签列表
@@ -184,6 +280,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     if (noteGroups.before.length > 0) tabs.push({ key: 'before', label: '会计政策及其他' });
     if (noteGroups.mainSec) tabs.push({ key: 'main', label: '财务报表主要项目注释' });
     if (noteGroups.parentSec) tabs.push({ key: 'parent', label: '母公司报表主要项目附注' });
+    if (noteGroups.extra.length > 0) tabs.push({ key: 'extra', label: '其他专项披露' });
     if (noteGroups.after.length > 0) tabs.push({ key: 'after', label: '其他事项' });
     return tabs;
   }, [noteGroups]);
@@ -235,7 +332,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
 
   // ─── 折叠标题行 ───
   const renderCollapseHeader = (
-    id: string, title: string, level: number, hasContent: boolean,
+    id: string, title: string, level: number, hasContent: boolean, seqNo?: string,
   ) => {
     const isCollapsed = collapsedIds.has(id);
     const tc = lvlColor(level);
@@ -247,11 +344,12 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '8px 14px', background: bg,
-          borderLeft: `3px solid ${bc}`, borderRadius: GT.radiusSm,
+          borderRadius: GT.radiusSm,
           cursor: hasContent ? 'pointer' : 'default', userSelect: 'none',
           marginBottom: isCollapsed ? 8 : 0,
         }}>
         <span style={{ fontSize: level <= 2 ? 14 : 13, fontWeight: 600, color: tc }}>
+          {seqNo && !(/^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇㈠㈡㈢㈣㈤㈥㈦㈧㈨㈩]/.test(title.trim()) || /^\d+[.、)）\s]/.test(title.trim()) || /^[\(（]\d+[\)）]/.test(title.trim())) && <span style={{ marginRight: 8, opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{seqNo}</span>}
           {title}
         </span>
         {hasContent && (
@@ -270,12 +368,100 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     const tc = level ? lvlColor(level) : GT.primary;
     const hBg = level ? lvlTitleBg(level) : GT.primaryBgDeep;
     const sBg = level ? lvlBodyBg(level) : GT.bgPage;
+    const rawHeaders: string[][] = nt.header_rows && nt.header_rows.length > 1 ? nt.header_rows : [];
+
+    // 数据行的最大列数（用于确定表格总列数）
+    const dataCols = nt.rows.length > 0 ? Math.max(...nt.rows.map(r => r.length)) : 0;
+    const headerCols = rawHeaders.length > 0 ? Math.max(...rawHeaders.map(r => r.length)) : nt.headers.length;
+    const totalCols = Math.max(dataCols, headerCols);
+
+    /**
+     * 构建多行表头的合并单元格矩阵。
+     * 策略：先将所有 header_rows 填充到 totalCols 列的网格中，
+     * 然后通过"相同值合并"检测 colSpan 和 rowSpan。
+     */
+    const buildHeaderGrid = () => {
+      if (rawHeaders.length < 2) return null;
+      const tR = rawHeaders.length;
+      const tC = totalCols;
+
+      // 1. 构建网格，短行补空
+      const grid: string[][] = rawHeaders.map(row => {
+        const padded = [...row];
+        while (padded.length < tC) padded.push('');
+        return padded.slice(0, tC).map(v => (v || '').trim());
+      });
+
+      // 2. 占位矩阵
+      const occ: boolean[][] = Array.from({ length: tR }, () => Array(tC).fill(false));
+      type CellInfo = { text: string; cs: number; rs: number; col: number };
+      const cells: CellInfo[][] = Array.from({ length: tR }, () => []);
+
+      for (let ri = 0; ri < tR; ri++) {
+        for (let ci = 0; ci < tC; ci++) {
+          if (occ[ri][ci]) continue;
+          const t = grid[ri][ci];
+
+          if (!t) {
+            // 空单元格 — 跳过（会被其他单元格的 colSpan/rowSpan 覆盖）
+            continue;
+          }
+
+          // 计算 colSpan：向右扫描相同值或空值
+          let cs = 1;
+          while (ci + cs < tC) {
+            const nextVal = grid[ri][ci + cs];
+            if (occ[ri][ci + cs]) break;
+            // 相同值 → 水平合并
+            if (nextVal === t) { cs++; continue; }
+            // 空值 → 检查下面是否有子列值
+            if (!nextVal) {
+              let hasBelow = false;
+              for (let b = ri + 1; b < tR; b++) {
+                if (grid[b][ci + cs]) { hasBelow = true; break; }
+              }
+              if (hasBelow) { cs++; continue; }
+            }
+            break;
+          }
+
+          // 计算 rowSpan：向下扫描相同值或空值
+          let rs = 1;
+          while (ri + rs < tR) {
+            const belowVal = grid[ri + rs][ci];
+            if (occ[ri + rs][ci]) break;
+            // 相同值 → 纵向合并
+            if (belowVal === t) { rs++; continue; }
+            // 空值且整个 colSpan 范围都为空 → 纵向合并
+            if (!belowVal) {
+              let allEmpty = true;
+              for (let c = ci; c < ci + cs; c++) {
+                if (grid[ri + rs][c]) { allEmpty = false; break; }
+              }
+              if (allEmpty) { rs++; continue; }
+            }
+            break;
+          }
+
+          // 标记占位
+          for (let dr = 0; dr < rs; dr++)
+            for (let dc = 0; dc < cs; dc++)
+              occ[ri + dr][ci + dc] = true;
+
+          cells[ri].push({ text: t, cs, rs, col: ci });
+        }
+      }
+      return { cells, tR };
+    };
+
+    const headerGrid = buildHeaderGrid();
+
     return (
       <div key={nt.id} style={{ marginBottom: 14 }}>
         {label && (
           <div style={{
             fontSize: 13, fontWeight: 600, color: tc, background: hBg,
-            padding: '6px 12px', borderLeft: `3px solid ${tc}`,
+            padding: '6px 12px',
             borderRadius: GT.radiusSm, marginBottom: 4,
           }}>{label}</div>
         )}
@@ -285,17 +471,36 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         }}>
           <table className="amt-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <caption className="sr-only">{nt.account_name}</caption>
-            {nt.headers.length > 0 && (
+            {(nt.headers.length > 0 || headerGrid) && (
               <thead>
-                <tr style={{ background: hBg }}>
-                  {nt.headers.map((h, i) => (
-                    <th key={i} style={{
-                      padding: '8px 12px', fontWeight: 600,
-                      borderBottom: `2px solid ${tc}50`, color: tc,
-                      textAlign: i === 0 ? 'left' : 'right', whiteSpace: 'nowrap',
-                    }}>{h}</th>
-                  ))}
-                </tr>
+                {headerGrid ? (
+                  <>{headerGrid.cells.map((rowCells, ri) => (
+                    <tr key={ri} style={{ background: hBg }}>
+                      {rowCells.map((c, idx) => (
+                        <th key={idx}
+                          colSpan={c.cs > 1 ? c.cs : undefined}
+                          rowSpan={c.rs > 1 ? c.rs : undefined}
+                          style={{
+                            padding: '8px 12px', fontWeight: 600, color: tc,
+                            borderBottom: ri < headerGrid.tR - 1 ? `1px solid #e8e4f0` : `2px solid ${tc}50`,
+                            borderRight: `1px solid #e8e4f0`,
+                            textAlign: c.col === 0 ? 'left' : 'center',
+                            whiteSpace: 'nowrap',
+                          }}>{c.text}</th>
+                      ))}
+                    </tr>
+                  ))}</>
+                ) : (
+                  <tr style={{ background: hBg }}>
+                    {nt.headers.map((h, i) => (
+                      <th key={i} style={{
+                        padding: '8px 12px', fontWeight: 600,
+                        borderBottom: `2px solid ${tc}50`, color: tc,
+                        textAlign: i === 0 ? 'left' : 'right', whiteSpace: 'nowrap',
+                      }}>{h}</th>
+                    ))}
+                  </tr>
+                )}
               </thead>
             )}
             <tbody>
@@ -319,8 +524,345 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   };
 
 
+  // ─── 从附注表格中提取合计行金额 ───
+  const extractNoteTotals = useCallback((sec: NoteSection): { closing?: number; opening?: number } => {
+    // 取第一个表格的合计行
+    if (sec.note_table_ids.length === 0) return {};
+    const nt = noteMap.get(sec.note_table_ids[0]);
+    if (!nt || nt.rows.length === 0) return {};
+
+    const parse = (v: any): number | undefined => {
+      if (v == null) return undefined;
+      const s = String(v).replace(/,/g, '').trim();
+      if (!s || s === '—' || s === '-' || s === '——') return undefined;
+      const n = Number(s);
+      return isNaN(n) ? undefined : n;
+    };
+
+    // 找合计行（从后往前找）
+    let totalRow: any[] | null = null;
+    for (let ri = nt.rows.length - 1; ri >= 0; ri--) {
+      const first = (String(nt.rows[ri]?.[0] ?? '')).replace(/\s+/g, '');
+      if (first === '合计') { totalRow = nt.rows[ri]; break; }
+    }
+    if (!totalRow) return {};
+
+    // 提取合计行中所有数值及其列索引
+    const nums: { idx: number; val: number }[] = [];
+    for (let ci = 1; ci < totalRow.length; ci++) {
+      const v = parse(totalRow[ci]);
+      if (v != null) nums.push({ idx: ci, val: v });
+    }
+    if (nums.length === 0) return {};
+
+    // ── 简单表格（≤2个数值列）：第一个=期末，第二个=期初 ──
+    if (nums.length <= 2) {
+      return { closing: nums[0]?.val, opening: nums[1]?.val };
+    }
+
+    // ── 多列表格：通过 header_rows 分析语义列 ──
+    const hRows = nt.header_rows && nt.header_rows.length > 0 ? nt.header_rows : [];
+    const totalCols = totalRow.length;
+
+    // 辅助：在 header_rows 中查找某个关键词出现的列索引
+    const findColsByKeyword = (kw: string, rowIdx?: number): number[] => {
+      const result: number[] = [];
+      const rows = rowIdx != null ? [hRows[rowIdx]] : hRows;
+      for (const row of rows) {
+        for (let ci = 0; ci < row.length; ci++) {
+          const h = (row[ci] || '').replace(/\s/g, '');
+          if (h.includes(kw)) result.push(ci);
+        }
+      }
+      return result;
+    };
+
+    // 辅助：找到某个父列在子行中覆盖的列范围
+    // 智能展开后，父行中相同值的连续列表示 colSpan，需要跳过
+    const findChildRange = (parentRow: string[], parentCol: number, childRow: string[]): [number, number] => {
+      const parentVal = (parentRow[parentCol] || '').trim();
+      // 找到父行中下一个不同值的非空列
+      let nextParentCol = totalCols;
+      for (let ci = parentCol + 1; ci < parentRow.length; ci++) {
+        const v = (parentRow[ci] || '').trim();
+        if (v && v !== parentVal) { nextParentCol = ci; break; }
+      }
+      const endCol = Math.min(nextParentCol, childRow.length);
+      return [parentCol, endCol];
+    };
+
+    if (hRows.length >= 2) {
+      // ── 多行表头策略 ──
+      const firstRow = hRows[0];
+      const lastRow = hRows[hRows.length - 1];
+
+      // 策略A：在最后一行表头中找"账面价值"列
+      const valueColsInLast: number[] = [];
+      for (let ci = 0; ci < lastRow.length; ci++) {
+        const h = (lastRow[ci] || '').replace(/\s/g, '');
+        if (h.includes('账面价值')) valueColsInLast.push(ci);
+      }
+      if (valueColsInLast.length >= 2) {
+        // 第一个"账面价值"=期末，第二个=期初
+        return {
+          closing: parse(totalRow[valueColsInLast[0]]),
+          opening: parse(totalRow[valueColsInLast[1]]),
+        };
+      }
+      if (valueColsInLast.length === 1) {
+        // 只有一个"账面价值"列，判断它属于期末还是期初
+        const vci = valueColsInLast[0];
+        // 看第一行中哪个父列覆盖了这个位置
+        let parentLabel = '';
+        for (let ci = vci; ci >= 0; ci--) {
+          const h = (firstRow[ci] || '').replace(/\s/g, '');
+          if (h) { parentLabel = h; break; }
+        }
+        if (parentLabel.includes('期末') || parentLabel.includes('本期')) {
+          return { closing: parse(totalRow[vci]) };
+        }
+        if (parentLabel.includes('期初') || parentLabel.includes('上期') || parentLabel.includes('上年')) {
+          return { opening: parse(totalRow[vci]) };
+        }
+        return { closing: parse(totalRow[vci]) };
+      }
+
+      // 策略A2：没有"账面价值"列，但有"账面余额/原值"和"减值准备"列时，用 原值-准备 计算
+      if (valueColsInLast.length === 0) {
+        const balanceCols: number[] = [];  // 账面余额/原值列
+        const provisionCols: number[] = []; // 减值准备/坏账准备列
+        for (let ci = 0; ci < lastRow.length; ci++) {
+          const h = (lastRow[ci] || '').replace(/\s/g, '');
+          if (h.includes('账面余额') || h.includes('原值')) balanceCols.push(ci);
+          if (h.includes('减值准备') || h.includes('坏账准备')) provisionCols.push(ci);
+        }
+        // 需要成对出现：每组一个余额+一个准备
+        if (balanceCols.length >= 2 && provisionCols.length >= 2) {
+          const closingBal = parse(totalRow[balanceCols[0]]);
+          const closingProv = parse(totalRow[provisionCols[0]]) ?? 0;
+          const openingBal = parse(totalRow[balanceCols[1]]);
+          const openingProv = parse(totalRow[provisionCols[1]]) ?? 0;
+          return {
+            closing: closingBal != null ? closingBal - closingProv : undefined,
+            opening: openingBal != null ? openingBal - openingProv : undefined,
+          };
+        }
+        if (balanceCols.length >= 1 && provisionCols.length >= 1) {
+          // 只有一组，判断期末/期初
+          const bal = parse(totalRow[balanceCols[0]]);
+          const prov = parse(totalRow[provisionCols[0]]) ?? 0;
+          const vci = balanceCols[0];
+          let parentLabel = '';
+          for (let ci = vci; ci >= 0; ci--) {
+            const h = (firstRow[ci] || '').replace(/\s/g, '');
+            if (h) { parentLabel = h; break; }
+          }
+          const val = bal != null ? bal - prov : undefined;
+          if (parentLabel.includes('期初') || parentLabel.includes('上期') || parentLabel.includes('上年')) {
+            return { opening: val };
+          }
+          return { closing: val };
+        }
+      }
+
+      // 策略B：在最后一行表头中找"期末余额"/"期初余额"或"期末数"/"期初数"
+      const closingColsLast = findColsByKeyword('期末', hRows.length - 1)
+        .concat(findColsByKeyword('本期', hRows.length - 1));
+      const openingColsLast = findColsByKeyword('期初', hRows.length - 1)
+        .concat(findColsByKeyword('上期', hRows.length - 1))
+        .concat(findColsByKeyword('上年', hRows.length - 1));
+      if (closingColsLast.length > 0 || openingColsLast.length > 0) {
+        return {
+          closing: closingColsLast.length > 0 ? parse(totalRow[closingColsLast[0]]) : undefined,
+          opening: openingColsLast.length > 0 ? parse(totalRow[openingColsLast[0]]) : undefined,
+        };
+      }
+
+      // 策略C：在第一行表头中找"期末"/"期初"父列，然后在子行中定位金额列
+      let closingParentCol = -1, openingParentCol = -1;
+      for (let ci = 0; ci < firstRow.length; ci++) {
+        const h = (firstRow[ci] || '').replace(/\s/g, '');
+        if (!h) continue;
+        if (closingParentCol < 0 && (h.includes('期末') || h.includes('本期'))) closingParentCol = ci;
+        if (openingParentCol < 0 && (h.includes('期初') || h.includes('上期') || h.includes('上年'))) openingParentCol = ci;
+      }
+
+      // 在子列范围内找最佳金额值：
+      // 1. 优先找"账面价值"列直接取值
+      // 2. 如果有"账面余额/原值"和"减值准备"列，计算 原值-准备
+      // 3. 其次找"金额"/"余额"列（排除"比例"/%列）
+      // 4. 最后取范围内第一个有数值的非比例列
+      const pickAmountValue = (start: number, end: number): number | undefined => {
+        const tr = totalRow!;
+        // 优先：账面价值
+        for (let ci = start; ci < end; ci++) {
+          const h = (lastRow[ci] || '').replace(/\s/g, '');
+          if (h.includes('账面价值')) return parse(tr[ci]);
+        }
+        // 其次：原值/账面余额 - 减值准备
+        let balCol = -1, provCol = -1;
+        for (let ci = start; ci < end; ci++) {
+          const h = (lastRow[ci] || '').replace(/\s/g, '');
+          if (balCol < 0 && (h.includes('账面余额') || h.includes('原值'))) balCol = ci;
+          if (provCol < 0 && (h.includes('减值准备') || h.includes('坏账准备'))) provCol = ci;
+        }
+        if (balCol >= 0 && provCol >= 0) {
+          const bal = parse(tr[balCol]);
+          const prov = parse(tr[provCol]) ?? 0;
+          if (bal != null) return bal - prov;
+        }
+        // 其次：金额/余额（排除比例/%）
+        for (let ci = start; ci < end; ci++) {
+          const h = (lastRow[ci] || '').replace(/\s/g, '');
+          if (h && (h.includes('金额') || h.includes('余额') || h.includes('价值'))
+            && !h.includes('比例') && !h.includes('比率') && !h.includes('%')) return parse(tr[ci]);
+        }
+        // fallback：第一个有数值且子表头不含"比例"/%的列
+        for (let ci = start; ci < end; ci++) {
+          const h = (lastRow[ci] || '').replace(/\s/g, '');
+          if (h.includes('比例') || h.includes('比率') || h.includes('%')) continue;
+          if (parse(tr[ci]) != null) return parse(tr[ci]);
+        }
+        // 最终：第一个有数值的列
+        for (let ci = start; ci < end; ci++) {
+          if (parse(tr[ci]) != null) return parse(tr[ci]);
+        }
+        return undefined;
+      };
+
+      if (closingParentCol >= 0 || openingParentCol >= 0) {
+        let closingVal: number | undefined;
+        let openingVal: number | undefined;
+
+        if (closingParentCol >= 0) {
+          const [start, end] = findChildRange(firstRow, closingParentCol, lastRow);
+          closingVal = pickAmountValue(start, end);
+        }
+
+        if (openingParentCol >= 0) {
+          const [start, end] = findChildRange(firstRow, openingParentCol, lastRow);
+          openingVal = pickAmountValue(start, end);
+        }
+
+        if (closingVal != null || openingVal != null) {
+          return { closing: closingVal, opening: openingVal };
+        }
+      }
+    }
+
+    // ── 单行表头策略 ──
+    const headers = (hRows.length === 1 ? hRows[0] : nt.headers).map(h => (h || '').replace(/[\s-]/g, ''));
+
+    // 找"账面价值"列
+    const valueColIndices = headers
+      .map((h, i) => ({ h, i }))
+      .filter(x => x.h.includes('账面价值'));
+    if (valueColIndices.length >= 2) {
+      return {
+        closing: parse(totalRow[valueColIndices[0].i]),
+        opening: parse(totalRow[valueColIndices[1].i]),
+      };
+    }
+
+    // 找"期末"/"期初"关键词
+    let closingIdx = -1, openingIdx = -1;
+    for (let ci = 0; ci < headers.length; ci++) {
+      const h = headers[ci];
+      if (closingIdx < 0 && (h.includes('期末') || h.includes('本期') || h.includes('本年'))) closingIdx = ci;
+      if (openingIdx < 0 && (h.includes('期初') || h.includes('上期') || h.includes('上年'))) openingIdx = ci;
+    }
+    if (closingIdx >= 0 || openingIdx >= 0) {
+      return {
+        closing: closingIdx >= 0 ? parse(totalRow[closingIdx]) : undefined,
+        opening: openingIdx >= 0 ? parse(totalRow[openingIdx]) : undefined,
+      };
+    }
+
+    // 最终 fallback：取第一个和最后一个数值
+    return { closing: nums[0]?.val, opening: nums[nums.length - 1]?.val };
+  }, [noteMap]);
+
+  // ─── 渲染报表金额提示条 ───
+  const renderStmtAmountBar = (item: StatementItem, mode: 'consolidated' | 'parent', sec: NoteSection) => {
+    const fmt = (v?: number) => v != null ? v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+    // 根据模式选择金额
+    const stmtClosing = mode === 'parent' ? (item.company_closing_balance ?? item.closing_balance) : item.closing_balance;
+    const stmtOpening = mode === 'parent' ? (item.company_opening_balance ?? item.opening_balance) : item.opening_balance;
+    const label = mode === 'parent' ? '母公司报表' : item.sheet_name;
+
+    // 提取附注合计行金额进行比对
+    const noteTotals = extractNoteTotals(sec);
+    const TOL = 0.5;
+    // closingMatch / openingMatch: true=一致, false=不一致, null=无法比对
+    const closingMatch = (stmtClosing != null && noteTotals.closing != null)
+      ? Math.abs(stmtClosing - noteTotals.closing) <= TOL : null;
+    const openingMatch = (stmtOpening != null && noteTotals.opening != null)
+      ? Math.abs(stmtOpening - noteTotals.opening) <= TOL : null;
+
+    return (
+      <div style={{
+        margin: '4px 0 8px 0', borderRadius: GT.radiusSm,
+        border: `1px solid ${GT.primary}40`, overflow: 'hidden',
+      }}>
+        {/* 报表金额行 */}
+        <div style={{
+          padding: '7px 14px',
+          background: `linear-gradient(135deg, ${GT.primaryBg} 0%, ${GT.primaryBgDeep} 100%)`,
+          fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '4px 20px',
+          alignItems: 'center',
+        }}>
+          <span style={{ fontWeight: 700, color: GT.primary, fontSize: 12 }}>📊 {label}</span>
+          <span style={{ color: GT.primary, fontWeight: 600 }}>
+            期末/本期：<span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(stmtClosing)}</span>
+          </span>
+          <span style={{ color: GT.primary, fontWeight: 600 }}>
+            期初/上期：<span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(stmtOpening)}</span>
+          </span>
+        </div>
+        {/* 勾稽校验行 */}
+        {(closingMatch !== null || openingMatch !== null) && (
+          <div style={{
+            padding: '5px 14px',
+            background: (closingMatch === false || openingMatch === false) ? '#fdf0ef' : '#eafaf1',
+            borderTop: `1px solid ${GT.primary}20`,
+            fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '4px 20px',
+            alignItems: 'center',
+          }}>
+            <span style={{ fontWeight: 600, color: GT.textSecondary, fontSize: 11 }}>勾稽校验</span>
+            {closingMatch !== null && (
+              <span style={{
+                color: closingMatch ? GT.success : GT.danger,
+                fontWeight: closingMatch ? 400 : 700,
+              }}>
+                {closingMatch ? '✓' : '✗'} 期末
+                {!closingMatch && noteTotals.closing != null && (
+                  <span style={{ fontSize: 11, marginLeft: 4 }}>
+                    （附注：{fmt(noteTotals.closing)}）
+                  </span>
+                )}
+              </span>
+            )}
+            {openingMatch !== null && (
+              <span style={{
+                color: openingMatch ? GT.success : GT.danger,
+                fontWeight: openingMatch ? 400 : 700,
+              }}>
+                {openingMatch ? '✓' : '✗'} 期初
+                {!openingMatch && noteTotals.opening != null && (
+                  <span style={{ fontSize: 11, marginLeft: 4 }}>
+                    （附注：{fmt(noteTotals.opening)}）
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ─── 渲染 section 内容（正文段落 + 表格） ───
-  const renderSectionContent = (sec: NoteSection) => {
+  const renderSectionContent = (sec: NoteSection, mode: 'consolidated' | 'parent' = 'consolidated', showAmountBar = false, stmtItemOverride?: StatementItem | null) => {
     const tableTitles = new Set(
       sec.note_table_ids.map(id => noteMap.get(id)?.section_title?.trim()).filter(Boolean) as string[]
     );
@@ -328,14 +870,20 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     const filteredParas = sec.content_paragraphs.filter(p => !tableTitles.has(p.trim()));
     const shownLabels = new Set<string>();
 
+    // 只在 showAmountBar=true 时查找报表科目
+    const stmtItem = showAmountBar
+      ? (stmtItemOverride !== undefined ? stmtItemOverride : findStmtForSection(sec))
+      : null;
+    let amountBarInserted = false;
+
     return (
-      <div style={{ padding: '8px 0' }}>
+      <div style={{ padding: '2px 0' }}>
         {filteredParas.length > 0 && (
-          <div style={{ marginBottom: 10, lineHeight: 1.9, fontSize: 14, color: GT.text }}>
-            {filteredParas.map((p, i) => <p key={i} style={{ margin: '4px 0' }}>{p}</p>)}
+          <div style={{ marginBottom: 6, lineHeight: 1.8, fontSize: 14, color: GT.text }}>
+            {filteredParas.map((p, i) => <p key={i} style={{ margin: '2px 0' }}>{p}</p>)}
           </div>
         )}
-        {sec.note_table_ids.map(id => {
+        {sec.note_table_ids.map((id, idx) => {
           const nt = noteMap.get(id);
           if (!nt) return null;
           const rawLabel = nt.section_title?.trim() || '';
@@ -344,29 +892,72 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
             label = nt.section_title;
             shownLabels.add(rawLabel);
           }
-          return renderNoteTable(nt, label, sec.level);
+          const tableEl = renderNoteTable(nt, label, sec.level);
+          // 只在顶层科目节点的第一个表格之后插入报表金额条
+          if (stmtItem && !amountBarInserted && idx === 0) {
+            amountBarInserted = true;
+            return <React.Fragment key={id}>{tableEl}{renderStmtAmountBar(stmtItem, mode, sec)}</React.Fragment>;
+          }
+          return tableEl;
         })}
       </div>
     );
   };
 
   // ─── 递归渲染 section（可折叠） ───
-  const renderSectionTree = (sec: NoteSection): React.ReactNode => {
+  const renderSectionTree = (sec: NoteSection, seqNo?: string, mode: 'consolidated' | 'parent' = 'consolidated', isTopLevel = false): React.ReactNode => {
+    const isCollapsed = collapsedIds.has(sec.id);
+    const hasContent = sec.content_paragraphs.length > 0 || sec.note_table_ids.length > 0 || sec.children.length > 0;
+    const cBg = lvlBodyBg(sec.level);
+
+    // 如果是顶层科目节点但自身没有表格，把金额条下传给第一个有表格的子节点
+    const selfHasTables = sec.note_table_ids.length > 0;
+    const needPassDown = isTopLevel && !selfHasTables;
+
+    // 提前找好报表科目（在父级层面找，避免子节点标题不匹配）
+    const parentStmtItem = needPassDown ? findStmtForSection(sec) : null;
+    const firstChildWithTable = needPassDown
+      ? sec.children.findIndex(c => c.note_table_ids.length > 0)
+      : -1;
+
+    return (
+      <div key={sec.id} style={{ marginBottom: 8 }}>
+        {renderCollapseHeader(sec.id, sec.title, sec.level, hasContent, seqNo)}
+        {!isCollapsed && hasContent && (
+          <div style={{
+            background: cBg, padding: '4px 14px',
+            borderRadius: `0 0 ${GT.radiusSm}px ${GT.radiusSm}px`,
+          }}>
+            {renderSectionContent(sec, mode, isTopLevel && selfHasTables)}
+            {sec.children.map((child, ci) => {
+              if (needPassDown && ci === firstChildWithTable && parentStmtItem) {
+                // 子节点需要显示金额条，传入父级找到的报表科目
+                return renderSectionTreeWithStmt(child, seqNo ? `${seqNo}.${ci + 1}` : `${ci + 1}`, mode, parentStmtItem);
+              }
+              return renderSectionTree(child, seqNo ? `${seqNo}.${ci + 1}` : `${ci + 1}`, mode, false);
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ─── 渲染子节点（带指定的报表科目，用于父级无表格时下传金额条） ───
+  const renderSectionTreeWithStmt = (sec: NoteSection, seqNo: string, mode: 'consolidated' | 'parent', stmtItem: StatementItem): React.ReactNode => {
     const isCollapsed = collapsedIds.has(sec.id);
     const hasContent = sec.content_paragraphs.length > 0 || sec.note_table_ids.length > 0 || sec.children.length > 0;
     const cBg = lvlBodyBg(sec.level);
 
     return (
       <div key={sec.id} style={{ marginBottom: 8 }}>
-        {renderCollapseHeader(sec.id, sec.title, sec.level, hasContent)}
+        {renderCollapseHeader(sec.id, sec.title, sec.level, hasContent, seqNo)}
         {!isCollapsed && hasContent && (
           <div style={{
-            background: cBg, padding: '6px 14px',
-            borderLeft: `3px solid ${lvlBorder(sec.level)}`,
+            background: cBg, padding: '4px 14px',
             borderRadius: `0 0 ${GT.radiusSm}px ${GT.radiusSm}px`,
           }}>
-            {renderSectionContent(sec)}
-            {sec.children.map(child => renderSectionTree(child))}
+            {renderSectionContent(sec, mode, true, stmtItem)}
+            {sec.children.map((child, ci) => renderSectionTree(child, seqNo ? `${seqNo}.${ci + 1}` : `${ci + 1}`, mode, false))}
           </div>
         )}
       </div>
@@ -377,25 +968,108 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   const renderSectionsPage = (secs: NoteSection[]) => (
     <div>
       {renderExpandCollapseBar(secs)}
-      <div style={{ maxHeight: 'calc(100vh - 320px)', overflowY: 'auto', paddingRight: 4 }}>
-        {secs.map(sec => renderSectionTree(sec))}
+      <div style={{ paddingRight: 4 }}>
+        {secs.map((sec, i) => renderSectionTree(sec, `${i + 1}`))}
       </div>
     </div>
   );
 
+  // ─── 母公司附注预设科目覆盖率面板 ───
+  const renderParentCoveragePanel = (sec: NoteSection) => {
+    if (parentPresetAccounts.length === 0) return null;
+
+    // 收集所有子节点标题（递归）
+    const allTitles: string[] = [];
+    const walk = (s: NoteSection) => {
+      allTitles.push(s.title);
+      s.children.forEach(walk);
+    };
+    sec.children.forEach(walk);
+    // 也检查 sec 自身
+    allTitles.push(sec.title);
+
+    const normalize = (s: string) => s.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
+
+    const coverage = parentPresetAccounts.map(acct => {
+      const found = allTitles.some(t => {
+        const nt = normalize(t);
+        return (acct.keywords as string[]).some(kw => nt.includes(kw));
+      });
+      return { ...acct, found };
+    });
+
+    const foundCount = coverage.filter(c => c.found).length;
+    const total = coverage.length;
+    const allFound = foundCount === total;
+
+    return (
+      <div style={{
+        margin: '0 0 12px 0', padding: '10px 14px',
+        background: allFound ? GT.successBg : GT.warningBg,
+        borderRadius: GT.radiusSm,
+        border: `1px solid ${allFound ? GT.success : GT.warning}`,
+        fontSize: 13,
+      }}>
+        <div style={{ fontWeight: 600, marginBottom: 6, color: allFound ? GT.success : GT.warning }}>
+          模板预设科目覆盖：{foundCount}/{total}
+          {allFound ? ' ✓ 全部覆盖' : ' — 部分科目缺失'}
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px' }}>
+          {coverage.map((c, i) => (
+            <span key={i} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              color: c.found ? GT.success : GT.danger,
+              fontWeight: c.found ? 400 : 600,
+            }}>
+              <span style={{ fontSize: 11 }}>{c.found ? '✓' : '✗'}</span>
+              {c.name}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   // ─── 渲染报表科目注释（财务报表主要项目注释 / 母公司） ───
-  const renderStatementNotes = (sec: NoteSection) => {
-    // 子节点就是各个科目
-    const allSecs = sec.children.length > 0 ? sec.children : [sec];
+  const renderStatementNotes = (sec: NoteSection, mode: 'consolidated' | 'parent' = 'consolidated') => {
+    // 如果 mainSec 的直接子节点是容器（如"(一) 合并财务报表项目注释"），
+    // 且该容器自身没有表格、无实质正文、只有子节点，则展开一层直接显示科目列表，
+    // 避免货币资金等被嵌套在折叠面板深处
+    let displayChildren = sec.children;
+    const containerPreambles: NoteSection[] = [];
+
+    // 判断一个节点是否为纯容器（有子节点、自身无表格、自身无实质正文）
+    const isContainer = (c: NoteSection) =>
+      c.children.length > 0 && c.note_table_ids.length === 0 &&
+      c.content_paragraphs.filter(p => p.trim()).length === 0;
+
+    if (sec.children.length >= 1 && sec.children.every(isContainer)) {
+      // 所有直接子节点都是纯容器，展开它们的子节点
+      displayChildren = [];
+      for (const container of sec.children) {
+        containerPreambles.push(container);
+        displayChildren.push(...container.children);
+      }
+    }
+
+    const allSecs = displayChildren.length > 0 ? displayChildren : [sec];
     return (
       <div>
         {renderExpandCollapseBar(allSecs)}
-        <div style={{ maxHeight: 'calc(100vh - 320px)', overflowY: 'auto', paddingRight: 4 }}>
+        <div style={{ paddingRight: 4 }}>
           {/* section 自身的正文 */}
           {(sec.content_paragraphs.length > 0 || sec.note_table_ids.length > 0) && (
-            <div style={{ marginBottom: 12 }}>{renderSectionContent(sec)}</div>
+            <div style={{ marginBottom: 12 }}>{renderSectionContent(sec, mode)}</div>
           )}
-          {sec.children.map(child => renderSectionTree(child))}
+          {/* 多个容器时显示分组标题 */}
+          {containerPreambles.length > 1 && containerPreambles.map((cp, i) => (
+            <div key={`cp-title-${i}`} style={{
+              fontSize: 13, fontWeight: 600, color: GT.primary, padding: '6px 0',
+              marginTop: i > 0 ? 16 : 0, borderBottom: `1px solid ${GT.border}`,
+              marginBottom: 8,
+            }}>{cp.title}</div>
+          ))}
+          {displayChildren.map((child, ci) => renderSectionTree(child, `${ci + 1}`, mode, true))}
         </div>
       </div>
     );
@@ -416,69 +1090,55 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   const renderSheetContent = (sheet: any) => {
     const origHeaders: string[] = sheet.headers || [];
     const origData: any[][] = sheet.raw_data || [];
+    const headerRowsFromBackend: string[][] = sheet.header_rows || [];
+    const isConsolidated: boolean = sheet.is_consolidated || false;
+
     if (origHeaders.length === 0 && origData.length === 0) {
       return <div style={{ padding: 30, textAlign: 'center', color: GT.textMuted }}>该 Sheet 无数据</div>;
     }
 
-    // 合并 headers 和 rawData 为统一行数组，从中找到真正的表头行
-    const allRows: any[][] = [origHeaders.map(h => h), ...origData];
-
-    // 表头行特征：第一个单元格包含"项目"/"项 目"
-    const HEADER_KW = ['项目', '项 目'];
-    let headerIdx = -1;
-    for (let ri = 0; ri < Math.min(allRows.length, 10); ri++) {
-      const firstCell = String(allRows[ri]?.[0] ?? '').replace(/\s+/g, '');
-      if (HEADER_KW.some(kw => firstCell === kw.replace(/\s+/g, ''))) {
-        headerIdx = ri;
-        break;
-      }
-    }
-
-    // 如果找到了表头行，用它作为 headers，后面的作为数据
     let headers: string[];
     let displayData: any[][];
-    if (headerIdx >= 0) {
-      headers = allRows[headerIdx].map((v: any) => v != null ? String(v) : '');
-      displayData = allRows.slice(headerIdx + 1);
-    } else {
+    let multiRowHeaders: string[][] = [];
+
+    if (headerRowsFromBackend.length > 0) {
       headers = origHeaders;
       displayData = origData;
+      multiRowHeaders = headerRowsFromBackend;
+    } else {
+      const allRows: any[][] = [origHeaders.map(h => h), ...origData];
+      const HEADER_KW = ['项目', '项 目'];
+      let headerIdx = -1;
+      for (let ri = 0; ri < Math.min(allRows.length, 10); ri++) {
+        const firstCell = String(allRows[ri]?.[0] ?? '').replace(/\s+/g, '');
+        if (HEADER_KW.some(kw => firstCell === kw.replace(/\s+/g, ''))) { headerIdx = ri; break; }
+      }
+      if (headerIdx >= 0) {
+        headers = allRows[headerIdx].map((v: any) => v != null ? String(v) : '');
+        displayData = allRows.slice(headerIdx + 1);
+      } else {
+        headers = origHeaders;
+        displayData = origData;
+      }
     }
 
-    // 截断到终止行（含终止行本身）或签章行（不含该行）
+    // 截断 / 过滤
     for (let ri = 0; ri < displayData.length; ri++) {
       const firstCell = String(displayData[ri]?.[0] ?? '').replace(/\s+/g, '');
-      if (SHEET_END_KW.some(kw => firstCell === kw.replace(/\s+/g, ''))) {
-        displayData = displayData.slice(0, ri + 1);
-        break;
-      }
-      // 任意单元格包含签章关键词 → 该行及以下全部截断
+      if (SHEET_END_KW.some(kw => firstCell === kw.replace(/\s+/g, ''))) { displayData = displayData.slice(0, ri + 1); break; }
       const rowText = displayData[ri].map((c: any) => String(c ?? '')).join('');
-      if (SHEET_CUT_KW.some(kw => rowText.includes(kw))) {
-        displayData = displayData.slice(0, ri);
-        break;
-      }
+      if (SHEET_CUT_KW.some(kw => rowText.includes(kw))) { displayData = displayData.slice(0, ri); break; }
     }
-    // 过滤项目列（第一列）为空的行
-    displayData = displayData.filter(row => {
-      const first = String(row?.[0] ?? '').trim();
-      return first.length > 0;
-    });
-    // 从末尾裁剪注释行和空行
+    displayData = displayData.filter(row => String(row?.[0] ?? '').trim().length > 0);
     let endIdx = displayData.length;
     while (endIdx > 0) {
       const row = displayData[endIdx - 1];
-      const firstCell = String(row?.[0] ?? '').trim();
-      const allEmpty = row.every((c: any) => c == null || String(c).trim() === '');
-      if (allEmpty || SHEET_SKIP_KW.some(kw => firstCell.startsWith(kw))) {
-        endIdx--;
-      } else {
-        break;
-      }
+      const fc = String(row?.[0] ?? '').trim();
+      if (row.every((c: any) => c == null || String(c).trim() === '') || SHEET_SKIP_KW.some(kw => fc.startsWith(kw))) { endIdx--; } else { break; }
     }
     displayData = displayData.slice(0, endIdx);
 
-    // ── 行类型检测 ──
+    // ── 行类型 ──
     const TOTAL_KW = ['合计', '总计', '资产总计', '负债合计', '所有者权益合计',
       '非流动资产合计', '流动资产合计', '流动负债合计', '非流动负债合计',
       '负债和所有者权益总计', '负债及所有者权益总计', '负债和股东权益总计'];
@@ -487,54 +1147,146 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     const CATEGORY_KW = ['流动资产：', '流动资产:', '非流动资产：', '非流动资产:',
       '流动负债：', '流动负债:', '非流动负债：', '非流动负债:',
       '所有者权益：', '所有者权益:', '所有者权益（或股东权益）：'];
+    const EQUITY_SEC_PREFIX = ['一、', '二、', '三、', '四、', '五、', '六、',
+      '加：', '加:', '减：', '减:'];
 
-    type RowType = 'total' | 'subtotal' | 'sub_item' | 'category' | 'normal';
+    type RowType = 'total' | 'subtotal' | 'sub_item' | 'category' | 'section' | 'normal';
     const getRowType = (row: any[]): RowType => {
       const name = String(row?.[0] ?? '').replace(/\s+/g, '');
+      const raw = String(row?.[0] ?? '').trim();
       if (TOTAL_KW.some(kw => name === kw.replace(/\s+/g, ''))) return 'total';
       if (SUBTOTAL_KW.some(kw => name.includes(kw))) return 'subtotal';
-      const raw = String(row?.[0] ?? '').trim();
       if (SUB_ITEM_PREFIX.some(kw => raw.startsWith(kw))) return 'sub_item';
       if (CATEGORY_KW.some(kw => name === kw.replace(/\s+/g, ''))) return 'category';
+      if (EQUITY_SEC_PREFIX.some(kw => raw.startsWith(kw))) return 'section';
       return 'normal';
     };
 
     const colCount = headers.length || (displayData[0]?.length ?? 0);
+    const isWide = colCount > 5;
+
+    // 检测"附注"列索引，用于居中对齐
+    const noteColSet = new Set<number>();
+    headers.forEach((h, i) => { if (h.includes('附注')) noteColSet.add(i); });
 
     return (
       <div style={{
-        overflowX: 'auto', overflowY: 'auto',
-        maxHeight: 'calc(100vh - 300px)',
-        borderRadius: GT.radius, border: `1px solid ${GT.border}`, boxShadow: GT.shadow,
+        overflowX: 'auto',
+        overflowY: 'auto',
+        maxHeight: 'calc(100vh - 280px)',
+        borderRadius: 10,
+        border: `1px solid ${GT.border}`,
+        boxShadow: '0 4px 24px rgba(75,45,119,0.06)',
+        background: GT.bgWhite,
       }}>
-        <table className="amt-table" style={{
-          width: '100%', borderCollapse: 'collapse', fontSize: 13,
-          tableLayout: 'fixed',
+        <style>{`
+          @keyframes stmtFadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: translateY(0); }
+          }
+          @keyframes stmtRowIn {
+            from { opacity: 0; }
+            to   { opacity: 1; }
+          }
+          .stmt-tbl { animation: stmtFadeIn .32s cubic-bezier(.4,0,.2,1) both; }
+          .stmt-tbl tbody tr {
+            animation: stmtRowIn .28s ease both;
+            transition: background .15s ease, box-shadow .15s ease;
+          }
+          .stmt-tbl tbody tr:hover {
+            background: ${GT.primaryBg} !important;
+          }
+          .stmt-tbl tbody tr:hover td:first-child { color: ${GT.primary} !important; }
+          .stmt-tbl thead th { user-select: none; }
+        `}</style>
+        <table className="stmt-tbl" style={{
+          width: isWide ? undefined : '100%',
+          minWidth: isWide ? Math.max(colCount * 100, 1200) : undefined,
+          borderCollapse: 'separate', borderSpacing: 0,
+          fontSize: 13, tableLayout: isWide ? 'auto' : 'fixed',
         }}>
           <caption className="sr-only">{sheet.sheet_name}</caption>
+          {!isWide && (
           <colgroup>
-            {Array.from({ length: colCount }, (_, ci) => (
-              <col key={ci} style={{
-                width: ci === 0 ? '30%' : `${70 / Math.max(colCount - 1, 1)}%`,
-                minWidth: ci === 0 ? 180 : 120,
-              }} />
-            ))}
+            {Array.from({ length: colCount }, (_, ci) => {
+              const firstPct = colCount <= 4 ? 30 : 24;
+              const restPct = (100 - firstPct) / Math.max(colCount - 1, 1);
+              return <col key={ci} style={{ width: ci === 0 ? `${firstPct}%` : `${restPct}%` }} />;
+            })}
           </colgroup>
+          )}
+
+          {/* ── 表头 ── */}
           {headers.length > 0 && (
             <thead>
-              <tr>
-                {headers.map((h: string, i: number) => (
+              {multiRowHeaders.length > 1 ? (() => {
+                const tR = multiRowHeaders.length, tC = Math.max(...multiRowHeaders.map(r => r.length));
+                const occ: boolean[][] = Array.from({ length: tR }, () => Array(tC).fill(false));
+                type CI = { text: string; cs: number; rs: number; col: number };
+                const rc: CI[][] = Array.from({ length: tR }, () => []);
+                for (let ri = 0; ri < tR; ri++) {
+                  const row = multiRowHeaders[ri];
+                  for (let ci = 0; ci < tC; ci++) {
+                    if (occ[ri][ci]) continue;
+                    const t = (row[ci] || '').trim();
+                    if (!t) continue;
+                    let cs = 1;
+                    while (ci + cs < tC && !(row[ci + cs] || '').trim() && !occ[ri][ci + cs]) {
+                      let bv = false;
+                      for (let b = ri + 1; b < tR; b++) { if ((multiRowHeaders[b][ci + cs] || '').trim()) { bv = true; break; } }
+                      if (bv) cs++; else break;
+                    }
+                    let rs = 1;
+                    while (ri + rs < tR) {
+                      if ((multiRowHeaders[ri + rs][ci] || '').trim() || occ[ri + rs][ci]) break;
+                      let ae = true;
+                      for (let c = ci; c < ci + cs; c++) { if ((multiRowHeaders[ri + rs][c] || '').trim()) { ae = false; break; } }
+                      if (!ae) break; rs++;
+                    }
+                    for (let dr = 0; dr < rs; dr++) for (let dc = 0; dc < cs; dc++) occ[ri + dr][ci + dc] = true;
+                    rc[ri].push({ text: t, cs, rs, col: ci });
+                  }
+                }
+                const hH = 36;
+                return <>{rc.map((cells, ri) => (
+                  <tr key={ri}>{cells.map((c, idx) => (
+                    <th key={idx}
+                      colSpan={c.cs > 1 ? c.cs : undefined}
+                      rowSpan={c.rs > 1 ? c.rs : undefined}
+                      style={{
+                        padding: '9px 12px', fontWeight: 600,
+                        color: GT.primary,
+                        background: ri === 0 ? '#f7f5fb' : '#fbfafd',
+                        borderBottom: ri < tR - 1
+                          ? `1px solid #e8e4f0`
+                          : `2px solid ${GT.primary}`,
+                        borderRight: `1px solid #e8e4f0`,
+                        textAlign: c.col === 0 ? 'left' : 'center',
+                        whiteSpace: 'nowrap',
+                        position: 'sticky', top: ri * hH, zIndex: isWide && c.col === 0 ? 12 : 10 - ri,
+                        fontSize: 13, letterSpacing: .2,
+                        ...(isWide && c.col === 0 ? { left: 0, minWidth: 180 } : {}),
+                      }}>{c.text}</th>
+                  ))}</tr>
+                ))}</>;
+              })() : (
+                <tr>{headers.map((h, i) => (
                   <th key={i} style={{
-                    padding: '10px 14px', fontWeight: 700, color: GT.primary,
+                    padding: '10px 14px', fontWeight: 600,
+                    color: GT.primary,
+                    background: '#f7f5fb',
+                    textAlign: i === 0 ? 'left' : noteColSet.has(i) ? 'center' : 'right', whiteSpace: 'nowrap',
+                    position: 'sticky', top: 0, zIndex: isWide && i === 0 ? 12 : 10, fontSize: 13, letterSpacing: .2,
                     borderBottom: `2px solid ${GT.primary}`,
-                    textAlign: i === 0 ? 'left' : 'right', whiteSpace: 'nowrap',
-                    background: GT.primaryBgDeep,
-                    position: 'sticky', top: 0, zIndex: 2,
+                    borderRight: i < headers.length - 1 ? `1px solid #e8e4f0` : undefined,
+                    ...(isWide && i === 0 ? { left: 0, minWidth: 180 } : {}),
                   }}>{h}</th>
-                ))}
-              </tr>
+                ))}</tr>
+              )}
             </thead>
           )}
+
+          {/* ── 数据行 ── */}
           <tbody>
             {displayData.slice(0, 300).map((row: any[], ri: number) => {
               const rt = getRowType(row);
@@ -542,30 +1294,50 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
               const isSubtotal = rt === 'subtotal';
               const isSub = rt === 'sub_item';
               const isCat = rt === 'category';
-              const bg = isTotal ? GT.primaryBgDeep
+              const isSec = rt === 'section';
+
+              const bg = isTotal ? `linear-gradient(90deg, ${GT.primaryBgDeep}, #e8dff2)`
                 : isSubtotal ? '#f0edf6'
-                : isCat ? '#f8f6fc'
-                : ri % 2 === 0 ? GT.bgWhite : GT.bgPage;
+                : isCat ? '#f6f3fb'
+                : isSec ? '#faf8fd'
+                : ri % 2 === 0 ? GT.bgWhite : '#faf9fc';
+
               return (
-                <tr key={ri} style={{ background: bg }}>
+                <tr key={ri} style={{
+                  background: bg,
+                  animationDelay: `${Math.min(ri * 10, 350)}ms`,
+                }}>
                   {row.map((c: any, ci: number) => {
                     const isFirst = ci === 0;
-                    let cellText = isFirst ? (c != null ? String(c) : '') : fmtNum(c);
-                    // 其中项缩进
-                    const pl = isFirst
-                      ? (isSub ? 32 : isCat ? 8 : 14)
-                      : 14;
+                    const cellText = isFirst ? (c != null ? String(c) : '') : fmtNum(c);
+                    const pl = isFirst ? (isSub ? 36 : isSec ? 12 : isCat ? 8 : 16) : 10;
+
+                    // 负数标红
+                    let numColor = GT.text;
+                    if (!isFirst && c != null) {
+                      const n = Number(String(c).replace(/,/g, ''));
+                      if (!isNaN(n) && n < 0) numColor = GT.danger;
+                    }
+
                     return (
                       <td key={ci} style={{
-                        padding: `6px ${14}px 6px ${pl}px`,
-                        borderBottom: `1px solid ${isTotal ? GT.primary + '30' : GT.borderLight}`,
-                        textAlign: isFirst ? 'left' : 'right',
-                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                        padding: `7px 10px 7px ${pl}px`,
+                        borderBottom: isTotal ? `2px solid ${GT.primary}25` : `1px solid #e8e4f0`,
+                        textAlign: isFirst ? 'left' : noteColSet.has(ci) ? 'center' : 'right',
+                        whiteSpace: 'nowrap',
+                        overflow: isWide ? undefined : 'hidden',
+                        textOverflow: isWide ? undefined : 'ellipsis',
                         fontVariantNumeric: !isFirst ? 'tabular-nums' : 'normal',
-                        fontWeight: (isTotal || isSubtotal || isCat) ? 700 : 400,
-                        color: isTotal ? GT.primary : isCat ? GT.primaryLight : GT.text,
+                        fontWeight: (isTotal || isSubtotal || isCat || isSec) ? 700 : 400,
+                        color: isTotal ? GT.primary : isCat ? GT.primaryLight : isSec ? GT.primary : isFirst ? GT.text : numColor,
                         fontSize: isTotal ? 13.5 : 13,
-                        borderTop: isTotal ? `2px solid ${GT.primary}40` : undefined,
+                        borderTop: isTotal ? `2px solid ${GT.primary}25` : undefined,
+                        borderRight: isFirst ? `1px solid #e8e4f0` : undefined,
+                        ...(isWide && isFirst ? {
+                          position: 'sticky' as const, left: 0, zIndex: 1,
+                          background: isTotal ? '#ece5f3' : isCat ? '#f6f3fb' : isSec ? '#faf8fd' : ri % 2 === 0 ? GT.bgWhite : '#faf9fc',
+                          minWidth: 180,
+                        } : {}),
                       }}>{cellText}</td>
                     );
                   })}
@@ -637,7 +1409,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   ];
 
   const renderFooter = () => (
-    <>
+    <div style={{ flexShrink: 0 }}>
       {error && (
         <div style={{
           color: GT.danger, padding: '10px 16px', background: '#fdf0ef',
@@ -645,7 +1417,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
           border: '1px solid #f5c6cb',
         }}>⚠ {error}</div>
       )}
-      <div style={{ textAlign: 'right', marginTop: 24, paddingTop: 16, borderTop: `1px solid ${GT.border}` }}>
+      <div style={{ textAlign: 'right', marginTop: 12, paddingTop: 12, borderTop: `1px solid ${GT.border}` }}>
         <button onClick={handleConfirm} disabled={loading}
           style={{
             padding: '10px 40px', border: 'none', borderRadius: GT.radius,
@@ -655,13 +1427,16 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
             boxShadow: loading ? 'none' : `0 2px 10px ${GT.primary}40`,
           }}>确认匹配</button>
       </div>
-    </>
+    </div>
   );
 
   return (
-    <div style={{ fontFamily: GT.font }}>
+    <div style={{ fontFamily: GT.font, display: 'flex', flexDirection: 'column', height: 'calc(100vh - 180px)', overflow: 'hidden' }}>
       {/* 一级页签 */}
       {renderTabBar(TOP_TABS, activeTopTab, setActiveTopTab, 'lg')}
+
+      {/* 单一滚动容器 */}
+      <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0, paddingRight: 4 }}>
 
       {/* ─── 审计报告正文 ─── */}
       {activeTopTab === 'audit_report' && (
@@ -671,9 +1446,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
               暂无审计报告正文数据，请上传审计报告文件
             </div>
           ) : (
-            <div style={{
-              maxHeight: 'calc(100vh - 280px)', overflowY: 'auto', paddingRight: 4,
-            }}>
+            <div>
               <div style={{
                 maxWidth: 800, margin: '0 auto', padding: '20px 32px',
                 background: GT.bgWhite, borderRadius: GT.radius,
@@ -901,13 +1674,21 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
                 },
               )}
               {noteTabs[activeNoteTab]?.key === 'before' && renderSectionsPage(noteGroups.before)}
-              {noteTabs[activeNoteTab]?.key === 'main' && noteGroups.mainSec && renderStatementNotes(noteGroups.mainSec)}
-              {noteTabs[activeNoteTab]?.key === 'parent' && noteGroups.parentSec && renderStatementNotes(noteGroups.parentSec)}
+              {noteTabs[activeNoteTab]?.key === 'main' && noteGroups.mainSec && renderStatementNotes(noteGroups.mainSec, 'consolidated')}
+              {noteTabs[activeNoteTab]?.key === 'parent' && noteGroups.parentSec && (
+                <div>
+                  {renderParentCoveragePanel(noteGroups.parentSec)}
+                  {renderStatementNotes(noteGroups.parentSec, 'parent')}
+                </div>
+              )}
+              {noteTabs[activeNoteTab]?.key === 'extra' && renderSectionsPage(noteGroups.extra)}
               {noteTabs[activeNoteTab]?.key === 'after' && renderSectionsPage(noteGroups.after)}
             </>
           )}
         </div>
       )}
+
+      </div>{/* 单一滚动容器结束 */}
 
       {renderFooter()}
     </div>

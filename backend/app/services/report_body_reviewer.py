@@ -76,7 +76,10 @@ class ReportBodyReviewer:
                     "规则：首次出现应使用全称并注明简称，后续统一使用简称。\n\n"
                     f"正文内容（前3000字）：\n{report_body_text[:3000]}\n\n"
                     f"附注内容（前3000字）：\n{notes_text[:3000]}\n\n"
-                    "请以JSON数组格式返回发现的问题。"
+                    "如果发现问题，请以JSON数组格式返回，每项必须包含以下字段：\n"
+                    '{"location":"问题所在的具体段落（引用原文片段）","description":"问题描述，必须说明具体哪个简称有什么问题，引用原文","suggestion":"修改建议，给出具体的修改方式","risk_level":"low或medium"}\n'
+                    "注意：description 不能为空，必须包含原文片段让用户能定位问题。\n"
+                    "如果没有问题，返回空数组 []。"
                 )
                 findings = await self._call_llm_for_findings(
                     openai_service, prompt,
@@ -118,8 +121,10 @@ class ReportBodyReviewer:
                     "请将以下审计报告正文与模板逐段比对，识别表述偏差。\n\n"
                     f"模板内容：\n{template_content[:5000]}\n\n"
                     f"实际正文：\n{report_body_text[:5000]}\n\n"
-                    "对于每个偏差，请返回JSON数组，每项包含：\n"
-                    '{"location":"位置","description":"问题描述","template_reference":"模板原文","suggestion":"修改建议","risk_level":"low/medium/high"}'
+                    "对于每个偏差，请返回JSON数组，每项必须包含以下字段：\n"
+                    '{"location":"问题所在的具体段落（引用原文片段）","description":"问题描述，必须说明具体偏差内容，引用实际正文原文","template_reference":"模板中对应的原文","suggestion":"修改建议，给出具体的修改方式","risk_level":"low/medium/high"}\n'
+                    "注意：description 不能为空，必须包含原文片段让用户能定位问题。\n"
+                    "如果没有偏差，返回空数组 []。"
                 )
                 findings = await self._call_llm_for_findings(
                     openai_service, prompt,
@@ -143,8 +148,23 @@ class ReportBodyReviewer:
             f"正文内容（前3000字）：\n{body[:3000]}\n\n"
             f"报表科目名称：{', '.join(item_names)}\n"
             f"附注科目名称：{', '.join(note_names)}\n\n"
-            "请以JSON数组格式返回发现的不一致问题。"
+            "如果发现不一致，请以JSON数组格式返回，每项必须包含以下字段：\n"
+            '{"location":"问题所在的具体段落（引用原文片段）","description":"问题描述，必须说明具体哪个名称不一致，引用原文","suggestion":"修改建议，给出具体的修改方式","risk_level":"low或medium"}\n'
+            "注意：description 不能为空，必须包含原文片段让用户能定位问题。\n"
+            "如果没有问题，返回空数组 []。"
         )
+
+    @staticmethod
+    def _extract_field(item: dict, primary: str, fallbacks: list) -> str:
+        """从 LLM 返回的 dict 中提取字段，支持多个备选字段名。"""
+        val = item.get(primary, "")
+        if val:
+            return str(val).strip()
+        for fb in fallbacks:
+            val = item.get(fb, "")
+            if val:
+                return str(val).strip()
+        return ""
 
     async def _call_llm_for_findings(
         self,
@@ -157,7 +177,7 @@ class ReportBodyReviewer:
         import json
 
         messages = [
-            {"role": "system", "content": "你是审计报告复核专家。请分析问题并以JSON数组格式返回。"},
+            {"role": "system", "content": "你是审计报告复核专家。请分析问题并以JSON数组格式返回。每个问题的description字段必须包含具体的问题描述和原文引用，不能为空。"},
             {"role": "user", "content": prompt},
         ]
 
@@ -176,15 +196,24 @@ class ReportBodyReviewer:
                 for item in items:
                     if not isinstance(item, dict):
                         continue
+                    desc = self._extract_field(item, "description", ["issue", "problem", "content", "错误描述", "问题", "detail"])
+                    suggestion = self._extract_field(item, "suggestion", ["fix", "recommendation", "修改建议", "建议", "advice"])
+                    location = self._extract_field(item, "location", ["位置", "loc", "position"])
+                    # 跳过描述为空的 finding
+                    if not desc:
+                        continue
+                    # 确保 location 有"正文"前缀
+                    if location and not location.startswith("正文"):
+                        location = f"正文-{location}"
                     findings.append(ReportReviewFinding(
                         id=str(uuid.uuid4())[:8],
                         category=category,
                         risk_level=RiskLevel(item.get("risk_level", "low")),
                         account_name=item.get("account_name", check_type),
-                        location=item.get("location", "审计报告正文"),
-                        description=item.get("description", ""),
+                        location=location or "正文",
+                        description=desc,
                         template_reference=item.get("template_reference"),
-                        suggestion=item.get("suggestion", ""),
+                        suggestion=suggestion,
                         analysis_reasoning=item.get("reasoning", ""),
                         confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
                         status=FindingStatus.OPEN,

@@ -33,7 +33,9 @@ def _item(name="应收账款", opening=100.0, closing=200.0, sheet="资产负债
     )
 
 
-def _note(name="应收账款", title="应收账款附注", headers=None, rows=None):
+def _note(name="应收账款", title=None, headers=None, rows=None):
+    if title is None:
+        title = f"{name}附注"
     return NoteTable(
         id=str(uuid.uuid4()), account_name=name,
         section_title=title,

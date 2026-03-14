@@ -76,7 +76,16 @@ async def upload_document(library_id: str, file: UploadFile = File(...)):
             if ext == 'pdf':
                 content = await FileService.extract_text_from_pdf(tmp_path)
             elif ext in ['doc', 'docx']:
-                content = await FileService.extract_text_from_docx(tmp_path)
+                # 优先使用增强的 docx→markdown 转换（保留标题层级和表格结构）
+                try:
+                    from ..utils.docx_to_md import convert_docx_to_md
+                    md_output = tmp_path.rsplit('.', 1)[0] + '.md'
+                    convert_docx_to_md(tmp_path, md_output)
+                    with open(md_output, 'r', encoding='utf-8') as mf:
+                        content = mf.read()
+                    os.remove(md_output)
+                except Exception:
+                    content = await FileService.extract_text_from_docx(tmp_path)
             elif ext in ['xlsx', 'xls']:
                 content = await FileService.extract_text_from_excel(tmp_path)
             elif ext in ['txt', 'md', 'markdown']:
@@ -225,7 +234,15 @@ async def upload_report_template_folder(
             if ext == 'pdf':
                 content = await FileService.extract_text_from_pdf(tmp_path)
             elif ext in ['doc', 'docx']:
-                content = await FileService.extract_text_from_docx(tmp_path)
+                try:
+                    from ..utils.docx_to_md import convert_docx_to_md
+                    md_output = tmp_path.rsplit('.', 1)[0] + '.md'
+                    convert_docx_to_md(tmp_path, md_output)
+                    with open(md_output, 'r', encoding='utf-8') as mf:
+                        content = mf.read()
+                    os.remove(md_output)
+                except Exception:
+                    content = await FileService.extract_text_from_docx(tmp_path)
             elif ext in ['xlsx', 'xls']:
                 content = await FileService.extract_text_from_excel(tmp_path)
             elif ext in ['txt', 'md', 'markdown']:

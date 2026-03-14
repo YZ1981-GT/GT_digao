@@ -3,6 +3,7 @@
 流式执行：结构识别 → 数值校验 → 正文复核 → 附注内容复核 → 文本质量检查。
 所有 Finding 统一标记为 pending_confirmation。
 """
+import asyncio
 import json
 import logging
 import uuid
@@ -16,6 +17,8 @@ from ..models.audit_schemas import (
     FindingConversationMessage,
     FindingStatus,
     MatchingMap,
+    NarrativeSection,
+    NoteSection,
     NoteTable,
     ReportReviewConfig,
     ReportReviewFinding,
@@ -60,48 +63,296 @@ class ReportReviewEngine:
         session: ReportReviewSession,
         config: ReportReviewConfig,
     ) -> AsyncGenerator[str, None]:
-        """流式执行五层复核。"""
+        """流式执行五层复核。每次 yield 后用 asyncio.sleep(0) 确保事件及时 flush。"""
         all_findings: List[ReportReviewFinding] = []
         oai = self.openai_service
 
         yield json.dumps({"status": "started", "message": "开始审计报告复核"}, ensure_ascii=False)
+        await asyncio.sleep(0)
 
-        # 1. 结构识别
-        yield json.dumps({"status": "phase", "phase": "structure_analysis", "message": "正在识别附注表格结构..."}, ensure_ascii=False)
-        table_structures: Dict[str, TableStructure] = {}
-        for note in session.note_tables:
-            try:
-                ts = await self.table_analyzer.analyze_table_structure(note, oai)
-                table_structures[note.id] = ts
-            except Exception as e:
-                logger.warning("表格结构识别失败 %s: %s", note.id, e)
+        # 1. 结构识别（优先复用 session 中已有的结果，仅补充缺失的）
+        table_structures: Dict[str, TableStructure] = dict(session.table_structures)
+        missing_notes = [n for n in session.note_tables if n.id not in table_structures]
+        total_tables = len(session.note_tables)
+
+        if missing_notes:
+            yield json.dumps({"status": "phase", "phase": "structure_analysis", "message": f"正在识别附注表格结构（{len(missing_notes)} 个待识别，{total_tables - len(missing_notes)} 个已缓存）..."}, ensure_ascii=False)
+            await asyncio.sleep(0)
+
+            async def _analyze_one(note: NoteTable) -> tuple:
+                try:
+                    ts = await self.table_analyzer.analyze_table_structure(note, oai)
+                    return (note.id, ts, None)
+                except Exception as e:
+                    logger.warning("表格结构识别失败 %s: %s", note.id, e)
+                    return (note.id, None, e)
+
+            semaphore = asyncio.Semaphore(5)
+
+            async def _analyze_with_limit(note: NoteTable) -> tuple:
+                async with semaphore:
+                    return await _analyze_one(note)
+
+            results = await asyncio.gather(
+                *[_analyze_with_limit(note) for note in missing_notes],
+                return_exceptions=True,
+            )
+            for r in results:
+                if isinstance(r, Exception):
+                    continue
+                note_id, ts, err = r
+                if ts:
+                    table_structures[note_id] = ts
+
+            yield json.dumps({
+                "status": "phase_progress",
+                "phase": "structure_analysis",
+                "message": f"表格结构识别完成（{len(table_structures)}/{total_tables}）",
+            }, ensure_ascii=False)
+            await asyncio.sleep(0)
+        else:
+            yield json.dumps({"status": "phase", "phase": "structure_analysis", "message": f"复用已有表格结构（{total_tables} 个）"}, ensure_ascii=False)
+            await asyncio.sleep(0)
+
+        # 统计结构识别详情
+        high_conf = sum(1 for ts in table_structures.values() if ts.structure_confidence == "high")
+        med_conf = sum(1 for ts in table_structures.values() if ts.structure_confidence == "medium")
+        low_conf = sum(1 for ts in table_structures.values() if ts.structure_confidence == "low")
+        has_total_count = sum(1 for ts in table_structures.values() if ts.total_row_indices)
+        has_formula_count = sum(1 for ts in table_structures.values() if ts.has_balance_formula)
+        struct_details = [
+            f"共识别 {len(table_structures)} 个附注表格",
+            f"识别置信度：高 {high_conf} 个、中 {med_conf} 个、低 {low_conf} 个",
+            f"含合计行的表格 {has_total_count} 个，含余额变动结构的表格 {has_formula_count} 个",
+        ]
+        yield json.dumps({
+            "status": "phase_complete", "phase": "structure_analysis",
+            "message": f"结构识别完成，共识别 {len(table_structures)} 个表格",
+            "findings_count": 0,
+            "details": struct_details,
+        }, ensure_ascii=False)
+        await asyncio.sleep(0)
 
         # 2. 数值校验
         yield json.dumps({"status": "phase", "phase": "reconciliation", "message": "正在执行数值校验..."}, ensure_ascii=False)
+        await asyncio.sleep(0)
+
+        # 统计变量
+        amount_check_count = 0  # 报表vs附注比对的科目数
+        amount_match_count = 0  # 金额一致的科目数
+        integrity_check_count = 0  # 表内加总校验的表格数
+        integrity_match_count = 0  # 加总无误的表格数
+        formula_check_count = 0  # 余额变动公式校验的表格数
+        formula_match_count = 0  # 公式无误的表格数
+        sub_item_check_count = 0  # 其中项校验的表格数
+        sub_item_match_count = 0  # 其中项无误的表格数
+
         if session.matching_map:
             amount_findings = self.reconciliation.check_amount_consistency(
                 session.matching_map, session.statement_items, session.note_tables, table_structures
             )
+            # 统计报表vs附注比对
+            amount_check_count = len(session.matching_map.entries)
+            amount_match_count = amount_check_count - len(amount_findings)
             all_findings.extend(amount_findings)
 
             for note in session.note_tables:
                 ts = table_structures.get(note.id)
                 if ts:
-                    all_findings.extend(self.reconciliation.check_note_table_integrity(note, ts))
-                    all_findings.extend(self.reconciliation.check_balance_formula(note, ts))
-                    all_findings.extend(self.reconciliation.check_sub_items(note, ts))
+                    # 表内加总校验
+                    if ts.total_row_indices:
+                        integrity_check_count += 1
+                        integrity_f = self.reconciliation.check_note_table_integrity(note, ts)
+                        if not integrity_f:
+                            integrity_match_count += 1
+                        all_findings.extend(integrity_f)
 
-        # 变动分析
+                    # 余额变动公式校验
+                    if ts.has_balance_formula:
+                        formula_check_count += 1
+                        formula_f = self.reconciliation.check_balance_formula(note, ts)
+                        if not formula_f:
+                            formula_match_count += 1
+                        all_findings.extend(formula_f)
+
+                    # 其中项校验
+                    has_sub = any(r.role == "sub_item" for r in ts.rows)
+                    if has_sub:
+                        sub_item_check_count += 1
+                        sub_f = self.reconciliation.check_sub_items(note, ts)
+                        if not sub_f:
+                            sub_item_match_count += 1
+                        all_findings.extend(sub_f)
+
+        # 变动分析：1级报表科目 + 2级附注明细行
         changes = self.calculate_changes(session.statement_items)
         abnormal = self.flag_abnormal_changes(changes, config.change_threshold)
-        for item in abnormal:
-            try:
-                change_findings = await self.analyze_change_reasonableness(item, oai, config.custom_prompt)
-                all_findings.extend(change_findings)
-            except Exception as e:
-                logger.warning("变动分析失败 %s: %s", item.account_name, e)
+        threshold_pct = int(config.change_threshold * 100)
 
-        # 逐科目发送进度
+        # 排除不需要变动分析的科目
+        # 1. 未分配利润等权益类科目（变动由利润表决定，不属于异常变动）
+        # 2. 所有者权益变动表的结构行（如"一、上年年末余额"等）
+        CHANGE_EXCLUDE_KEYWORDS = [
+            "未分配利润", "盈余公积", "实收资本", "股本",
+            "上年年末余额", "本年年初余额", "本年增减变动", "本年年末余额",
+            "年初余额", "年末余额", "期初余额", "期末余额",
+            "本期增减", "本期变动", "综合收益总额",
+        ]
+        abnormal = [
+            chg for chg in abnormal
+            if not any(kw in chg.account_name for kw in CHANGE_EXCLUDE_KEYWORDS)
+        ]
+
+        # 构建 account_name → note_table_ids 映射
+        acct_note_map: Dict[str, List[str]] = {}
+        if session.matching_map:
+            item_map_tmp = {i.id: i for i in session.statement_items}
+            for entry in session.matching_map.entries:
+                itm = item_map_tmp.get(entry.statement_item_id)
+                if itm and entry.note_table_ids:
+                    acct_note_map.setdefault(itm.account_name, []).extend(entry.note_table_ids)
+
+        note_map_tmp = {n.id: n for n in session.note_tables}
+        change_findings: List[ReportReviewFinding] = []
+        detail_analyzed_accounts: set = set()  # 已通过明细分析的1级科目
+        detail_change_count = 0  # 明细行变动分析数
+        detail_abnormal_count = 0  # 明细行超阈值数
+
+        for chg in abnormal:
+            note_ids = acct_note_map.get(chg.account_name, [])
+            detail_rows_found = False
+
+            # 尝试从附注表格中提取明细行变动
+            for nid in note_ids:
+                note = note_map_tmp.get(nid)
+                ts = table_structures.get(nid)
+                if not note or not ts:
+                    continue
+
+                # 找到 opening_balance 和 closing_balance 列
+                opening_col = None
+                closing_col = None
+                for col in ts.columns:
+                    if col.semantic == "opening_balance" and opening_col is None:
+                        opening_col = col.col_index
+                    elif col.semantic == "closing_balance" and closing_col is None:
+                        closing_col = col.col_index
+                if opening_col is None or closing_col is None:
+                    continue
+
+                # 遍历 data 行（非 total/subtotal/sub_item_header）
+                for row_s in ts.rows:
+                    if row_s.role not in ("data",):
+                        continue
+                    label = row_s.label.strip() if row_s.label else ""
+                    if not label:
+                        continue
+
+                    opening_v = self.reconciliation._get_row_col_value(note, row_s.row_index, opening_col)
+                    closing_v = self.reconciliation._get_row_col_value(note, row_s.row_index, closing_col)
+                    if opening_v is None or closing_v is None:
+                        continue
+                    if abs(opening_v) < 0.01 and abs(closing_v) < 0.01:
+                        continue
+
+                    detail_change_count += 1
+                    change_amt = closing_v - opening_v
+                    change_pct_val = (change_amt / abs(opening_v)) if abs(opening_v) > 0.01 else None
+
+                    if change_pct_val is not None and abs(change_pct_val) > config.change_threshold:
+                        detail_abnormal_count += 1
+                        detail_rows_found = True
+                        pct_str = f"{change_pct_val * 100:.1f}%"
+                        # 位置：附注-科目-表格名称-具体行
+                        loc = f"附注-{chg.account_name}-{note.section_title}-第{row_s.row_index + 1}行'{label}'"
+                        change_findings.append(ReportReviewFinding(
+                            id=str(uuid.uuid4())[:8],
+                            category=ReportReviewFindingCategory.CHANGE_ABNORMAL,
+                            risk_level=RiskLevel.MEDIUM if abs(change_pct_val) > 1.0 else RiskLevel.LOW,
+                            account_name=chg.account_name,
+                            location=loc,
+                            description=f"明细项'{label}'变动 {pct_str}（期初 {opening_v:,.2f} → 期末 {closing_v:,.2f}，变动 {change_amt:,.2f}），超过阈值 {threshold_pct}%",
+                            suggestion=f"请关注'{label}'大幅变动的原因，核实变动合理性",
+                            statement_amount=opening_v,
+                            note_amount=closing_v,
+                            difference=round(change_amt, 2),
+                            analysis_reasoning=f"变动率 {pct_str} 超过阈值 {threshold_pct}%",
+                            note_table_ids=[nid],
+                            confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
+                            status=FindingStatus.OPEN,
+                        ))
+
+            if detail_rows_found:
+                detail_analyzed_accounts.add(chg.account_name)
+            else:
+                # 没有明细行可分析，对1级科目本身生成 finding
+                if chg.change_percentage is not None:
+                    pct_str = f"{chg.change_percentage * 100:.1f}%"
+                    # 位置：尝试关联附注表格名称
+                    nids = acct_note_map.get(chg.account_name, [])
+                    if nids:
+                        note_names = [note_map_tmp[nid].section_title for nid in nids if nid in note_map_tmp]
+                        loc = f"附注-{chg.account_name}-{'、'.join(note_names[:2])}"
+                    else:
+                        loc = f"报表-{chg.account_name}"
+                    change_findings.append(ReportReviewFinding(
+                        id=str(uuid.uuid4())[:8],
+                        category=ReportReviewFindingCategory.CHANGE_ABNORMAL,
+                        risk_level=RiskLevel.MEDIUM if abs(chg.change_percentage) > 1.0 else RiskLevel.LOW,
+                        account_name=chg.account_name,
+                        location=loc,
+                        description=f"'{chg.account_name}'整体变动 {pct_str}（期初 {chg.opening_balance:,.2f} → 期末 {chg.closing_balance:,.2f}，变动 {chg.change_amount:,.2f}），超过阈值 {threshold_pct}%",
+                        suggestion=f"请关注'{chg.account_name}'大幅变动的原因，核实变动合理性",
+                        statement_amount=chg.opening_balance,
+                        note_amount=chg.closing_balance,
+                        difference=round(chg.change_amount, 2),
+                        analysis_reasoning=f"变动率 {pct_str} 超过阈值 {threshold_pct}%",
+                        note_table_ids=nids,
+                        confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
+                        status=FindingStatus.OPEN,
+                    ))
+
+        all_findings.extend(change_findings)
+
+        recon_finding_count = len(all_findings)
+
+        # 统计报表中有数据的科目数
+        items_with_data = sum(
+            1 for item in session.statement_items
+            if item.closing_balance is not None or item.opening_balance is not None
+        )
+
+        # 构建数值校验详情
+        recon_details = []
+        if amount_check_count > 0:
+            match_str = "全部相符" if amount_match_count == amount_check_count else f"相符 {amount_match_count} 个，不符 {amount_check_count - amount_match_count} 个"
+            recon_details.append(f"报表中有数据的科目 {items_with_data} 个，与附注共校验 {amount_check_count} 个科目，{match_str}")
+        if integrity_check_count > 0:
+            if integrity_match_count == integrity_check_count:
+                recon_details.append(f"表内纵向加总校验：共校验 {integrity_check_count} 个表格，全部相符")
+            else:
+                recon_details.append(f"表内纵向加总校验：共校验 {integrity_check_count} 个表格，相符 {integrity_match_count} 个，不符 {integrity_check_count - integrity_match_count} 个")
+        if formula_check_count > 0:
+            if formula_match_count == formula_check_count:
+                recon_details.append(f"余额变动公式校验：共校验 {formula_check_count} 个表格，全部相符")
+            else:
+                recon_details.append(f"余额变动公式校验：共校验 {formula_check_count} 个表格，相符 {formula_match_count} 个，不符 {formula_check_count - formula_match_count} 个")
+        if sub_item_check_count > 0:
+            if sub_item_match_count == sub_item_check_count:
+                recon_details.append(f"其中项明细校验：共校验 {sub_item_check_count} 个表格，全部相符")
+            else:
+                recon_details.append(f"其中项明细校验：共校验 {sub_item_check_count} 个表格，相符 {sub_item_match_count} 个，不符 {sub_item_check_count - sub_item_match_count} 个")
+        if len(abnormal) > 0:
+            # 变动分析详情
+            level1_only = len(abnormal) - len(detail_analyzed_accounts)
+            parts = []
+            parts.append(f"报表科目变动超过阈值 {threshold_pct}% 的共 {len(abnormal)} 个")
+            if detail_analyzed_accounts:
+                parts.append(f"其中 {len(detail_analyzed_accounts)} 个已深入附注明细行分析（共分析 {detail_change_count} 个明细行，超阈值 {detail_abnormal_count} 个）")
+            if level1_only > 0:
+                parts.append(f"{level1_only} 个仅在报表层级标记变动")
+            recon_details.append("；".join(parts))
+
         for item in session.statement_items:
             item_findings = [f for f in all_findings if f.account_name == item.account_name]
             yield json.dumps({
@@ -109,55 +360,302 @@ class ReportReviewEngine:
                 "account_name": item.account_name,
                 "findings_count": len(item_findings),
             }, ensure_ascii=False)
+            await asyncio.sleep(0)
 
-        # 3. 正文复核
+        yield json.dumps({
+            "status": "phase_complete", "phase": "reconciliation",
+            "message": f"数值校验完成，发现 {recon_finding_count} 个问题",
+            "findings_count": recon_finding_count,
+            "details": recon_details,
+        }, ensure_ascii=False)
+        await asyncio.sleep(0)
+
+        # 3. 正文复核（并发执行多项检查）
         yield json.dumps({"status": "phase", "phase": "body_review", "message": "正在复核审计报告正文..."}, ensure_ascii=False)
-        report_body = session.file_classifications.get("report_body_text", "")
+        await asyncio.sleep(0)
+        report_body = "\n".join(
+            p.get("text", "") for p in session.audit_report_content if p.get("text")
+        ) if session.audit_report_content else ""
         if isinstance(report_body, str) and report_body:
             try:
-                body_findings = await self.body_reviewer.check_entity_name_consistency(
-                    report_body, session.statement_items, session.note_tables, oai
+                body_results = await asyncio.gather(
+                    self.body_reviewer.check_entity_name_consistency(
+                        report_body, session.statement_items, session.note_tables, oai
+                    ),
+                    self.body_reviewer.check_abbreviation_consistency(report_body, "", oai),
+                    self.body_reviewer.check_template_compliance(
+                        report_body, config.template_type, oai
+                    ),
+                    return_exceptions=True,
                 )
-                all_findings.extend(body_findings)
-                body_findings2 = await self.body_reviewer.check_abbreviation_consistency(report_body, "", oai)
-                all_findings.extend(body_findings2)
-                body_findings3 = await self.body_reviewer.check_template_compliance(
-                    report_body, config.template_type, oai
-                )
-                all_findings.extend(body_findings3)
+                for r in body_results:
+                    if isinstance(r, list):
+                        all_findings.extend(r)
+                    elif isinstance(r, Exception):
+                        logger.warning("正文复核子任务失败: %s", r)
             except Exception as e:
                 logger.warning("正文复核失败: %s", e)
 
-        # 4. 附注内容复核
+        body_finding_count = len(all_findings) - recon_finding_count
+        body_details = []
+        body_content_len = len(report_body) if isinstance(report_body, str) else 0
+        if body_content_len > 0:
+            body_details.append(f"审计报告正文共 {body_content_len} 字")
+            body_details.append("已检查：主体名称一致性、简称使用规范性、模板合规性")
+        else:
+            body_details.append("未检测到审计报告正文内容，跳过正文复核")
+        yield json.dumps({
+            "status": "phase_complete", "phase": "body_review",
+            "message": f"正文复核完成，发现 {body_finding_count} 个问题",
+            "findings_count": body_finding_count,
+            "details": body_details,
+        }, ensure_ascii=False)
+        await asyncio.sleep(0)
+
+        # 4. 附注内容复核（并发处理各章节，带进度反馈）
         yield json.dumps({"status": "phase", "phase": "note_review", "message": "正在复核附注内容..."}, ensure_ascii=False)
+        await asyncio.sleep(0)
+        total_sections = 0
+        total_paragraphs = 0
+        skipped_template_sections = 0
         try:
-            notes_text = " ".join(n.section_title for n in session.note_tables)
-            sections = self.note_reviewer.extract_narrative_sections(notes_text)
-            for section in sections:
-                expr_findings = await self.note_reviewer.check_expression_quality(section, oai)
-                all_findings.extend(expr_findings)
-                if section.section_type == "accounting_policy":
-                    policy_findings = await self.note_reviewer.check_policy_template_compliance(
-                        section, config.template_type, oai
-                    )
-                    all_findings.extend(policy_findings)
+            # 从 session.note_sections 树中提取有正文内容的叙述性章节
+            sections: List[NarrativeSection] = []
+
+            # 报表项目注释的关键词（这些章节下的内容是项目组自己写的，重点复核）
+            REPORT_ITEM_KEYWORDS = ["报表项目注释", "报表项目", "财务报表项目"]
+            # 模板化章节类型（内容来自模板，表达质量不需要重点复核）
+            TEMPLATE_SECTION_TYPES = {"basic_info", "accounting_policy", "tax"}
+
+            def _is_report_item_parent(title: str) -> bool:
+                return any(kw in title for kw in REPORT_ITEM_KEYWORDS)
+
+            def _flatten_note_sections(node_list: List[NoteSection], parent_title: str = "", under_report_item: bool = False):
+                """递归遍历附注层级树，将含正文段落的节点转为 NarrativeSection。
+                under_report_item: 是否在"报表项目注释"节点下（项目组自写内容）
+                """
+                for node in node_list:
+                    is_ri = under_report_item or _is_report_item_parent(node.title)
+                    if node.content_paragraphs:
+                        content = "\n".join(node.content_paragraphs)
+                        section_type = self.note_reviewer._classify_section(node.title)
+                        # 如果在报表项目注释下，标记为 report_item_note
+                        if is_ri and section_type == "other":
+                            section_type = "report_item_note"
+                        sections.append(NarrativeSection(
+                            id=node.id,
+                            section_type=section_type,
+                            title=node.title,
+                            content=content,
+                            source_location=f"附注-{parent_title + '/' if parent_title else ''}{node.title}",
+                        ))
+                    if node.children:
+                        _flatten_note_sections(node.children, node.title, is_ri)
+
+            if session.note_sections:
+                _flatten_note_sections(session.note_sections)
+            else:
+                # 降级：如果 note_sections 为空，尝试从 note_tables 标题拼接
+                notes_text = "\n".join(
+                    f"{n.section_title}\n" for n in session.note_tables if n.section_title
+                )
+                sections = self.note_reviewer.extract_narrative_sections(notes_text)
+
+            total_sections = len(sections)
+            total_paragraphs = sum(len(s.content.split("\n")) for s in sections)
+
+            if total_sections > 0:
+                yield json.dumps({
+                    "status": "phase_progress", "phase": "note_review",
+                    "message": f"共 {total_sections} 个叙述性章节（{total_paragraphs} 个段落）待复核",
+                }, ensure_ascii=False)
+                await asyncio.sleep(0)
+
+            async def _review_section(section):
+                results = []
+                try:
+                    # 模板化章节（会计政策、基本情况、税项）跳过表达质量检查
+                    # 这些内容来自模板，与模板相同或大体相同不需要作为问题
+                    if section.section_type in TEMPLATE_SECTION_TYPES:
+                        nonlocal skipped_template_sections
+                        skipped_template_sections += 1
+                        # 仅对会计政策做模板比对（检查是否偏离模板）
+                        if section.section_type == "accounting_policy":
+                            policy_findings = await self.note_reviewer.check_policy_template_compliance(
+                                section, config.template_type, oai
+                            )
+                            results.extend(policy_findings)
+                        return results
+
+                    # 报表项目注释及其他项目组自写内容：重点复核表达质量
+                    expr_findings = await self.note_reviewer.check_expression_quality(section, oai)
+                    results.extend(expr_findings)
+                except Exception as e:
+                    logger.warning("附注章节复核失败 %s: %s", section.title, e)
+                return results
+
+            if sections:
+                section_results = await asyncio.gather(
+                    *[_review_section(s) for s in sections],
+                    return_exceptions=True,
+                )
+                for r in section_results:
+                    if isinstance(r, list):
+                        all_findings.extend(r)
+
+                yield json.dumps({
+                    "status": "phase_progress", "phase": "note_review",
+                    "message": f"附注内容复核完成（{total_sections}/{total_sections}）",
+                }, ensure_ascii=False)
+                await asyncio.sleep(0)
         except Exception as e:
             logger.warning("附注内容复核失败: %s", e)
 
-        # 5. 文本质量检查
+        pre_text_count = len(all_findings)
+        note_finding_count = pre_text_count - recon_finding_count - body_finding_count
+        note_details = []
+        if total_sections > 0:
+            report_item_count = sum(1 for s in sections if s.section_type == "report_item_note")
+            template_count = sum(1 for s in sections if s.section_type in TEMPLATE_SECTION_TYPES)
+            other_count = total_sections - report_item_count - template_count
+            note_details.append(f"共提取 {total_sections} 个叙述性章节（{total_paragraphs} 个正文段落）")
+            review_parts = []
+            if report_item_count > 0:
+                review_parts.append(f"报表项目注释 {report_item_count} 个（重点复核）")
+            if other_count > 0:
+                review_parts.append(f"其他章节 {other_count} 个")
+            if template_count > 0:
+                review_parts.append(f"模板化章节 {template_count} 个（跳过表达检查）")
+            note_details.append(f"复核范围：{', '.join(review_parts)}")
+            # 统计章节类型分布
+            type_counts: Dict[str, int] = {}
+            for s in sections:
+                type_counts[s.section_type] = type_counts.get(s.section_type, 0) + 1
+            type_labels = {
+                "accounting_policy": "会计政策",
+                "basic_info": "基本情况",
+                "tax": "税项",
+                "related_party": "关联方",
+                "report_item_note": "报表项目注释",
+                "other": "其他",
+            }
+            type_parts = [f"{type_labels.get(k, k)} {v} 个" for k, v in type_counts.items()]
+            note_details.append(f"章节分布：{', '.join(type_parts)}")
+        else:
+            note_details.append("未提取到附注叙述性章节内容")
+        unique_accounts = len(set(n.account_name for n in session.note_tables))
+        note_details.append(f"附注表格共 {len(session.note_tables)} 个，涉及 {unique_accounts} 个报表科目")
+        # 表内数值校验关系汇总
+        table_check_lines = []
+        if integrity_check_count > 0:
+            status = "全部相符" if integrity_match_count == integrity_check_count else f"相符 {integrity_match_count} 个，不符 {integrity_check_count - integrity_match_count} 个"
+            table_check_lines.append(f"涉及小计/合计纵向加总校验的表格 {integrity_check_count} 个，{status}")
+        if formula_check_count > 0:
+            status = "全部相符" if formula_match_count == formula_check_count else f"相符 {formula_match_count} 个，不符 {formula_check_count - formula_match_count} 个"
+            table_check_lines.append(f"涉及期初±增减变动=期末横向校验的表格 {formula_check_count} 个，{status}")
+        if sub_item_check_count > 0:
+            status = "全部相符" if sub_item_match_count == sub_item_check_count else f"相符 {sub_item_match_count} 个，不符 {sub_item_check_count - sub_item_match_count} 个"
+            table_check_lines.append(f"涉及其中项明细校验的表格 {sub_item_check_count} 个，{status}")
+        # 统计无校验关系的表格（既无合计行也无余额变动也无其中项）
+        no_check_count = sum(
+            1 for n in session.note_tables
+            if n.id in table_structures
+            and not table_structures[n.id].total_row_indices
+            and not table_structures[n.id].has_balance_formula
+            and not any(r.role == "sub_item" for r in table_structures[n.id].rows)
+        )
+        if no_check_count > 0:
+            table_check_lines.append(f"无数值校验关系的表格 {no_check_count} 个（仅含明细数据）")
+        note_details.extend(table_check_lines)
+        yield json.dumps({
+            "status": "phase_complete", "phase": "note_review",
+            "message": f"附注复核完成，发现 {note_finding_count} 个问题",
+            "findings_count": note_finding_count,
+            "details": note_details,
+        }, ensure_ascii=False)
+        await asyncio.sleep(0)
+
+        # 5. 文本质量检查（并发执行）
         yield json.dumps({"status": "phase", "phase": "text_quality", "message": "正在检查文本质量..."}, ensure_ascii=False)
+        await asyncio.sleep(0)
         try:
-            all_text = report_body if isinstance(report_body, str) else ""
-            punct_findings = await self.text_analyzer.analyze_punctuation(all_text, oai)
-            all_findings.extend(punct_findings)
-            typo_findings = await self.text_analyzer.analyze_typos(all_text, oai)
-            all_findings.extend(typo_findings)
+            # 拼接报告正文 + 附注叙述性内容，作为全文检查范围
+            text_parts = []
+            body_char_count = 0
+            note_text_char_count = 0
+
+            if isinstance(report_body, str) and report_body:
+                text_parts.append(report_body)
+                body_char_count = len(report_body)
+
+            # 附注叙述性段落
+            note_text_parts = []
+            if session.note_sections:
+                def _collect_paragraphs(nodes: list):
+                    for node in nodes:
+                        for p in node.content_paragraphs:
+                            if p.strip():
+                                note_text_parts.append(p)
+                        if node.children:
+                            _collect_paragraphs(node.children)
+                _collect_paragraphs(session.note_sections)
+            if note_text_parts:
+                note_text = "\n".join(note_text_parts)
+                text_parts.append(note_text)
+                note_text_char_count = len(note_text)
+
+            all_text = "\n\n".join(text_parts)
+
+            if all_text.strip():
+                quality_results = await asyncio.gather(
+                    self.text_analyzer.analyze_punctuation(all_text, oai, body_char_count=body_char_count),
+                    self.text_analyzer.analyze_typos(all_text, oai, body_char_count=body_char_count),
+                    return_exceptions=True,
+                )
+                for r in quality_results:
+                    if isinstance(r, list):
+                        all_findings.extend(r)
+                    elif isinstance(r, Exception):
+                        logger.warning("文本质量子任务失败: %s", r)
         except Exception as e:
             logger.warning("文本质量检查失败: %s", e)
+
+        text_finding_count = len(all_findings) - pre_text_count
+        text_details = []
+        checked_parts = []
+        if body_char_count > 0:
+            checked_parts.append(f"审计报告正文 {body_char_count} 字")
+        if note_text_char_count > 0:
+            checked_parts.append(f"附注叙述性内容 {note_text_char_count} 字")
+        if checked_parts:
+            text_details.append(f"检查范围：{'、'.join(checked_parts)}，合计 {body_char_count + note_text_char_count} 字")
+            text_details.append("已检查：中英文标点混用、标点符号规范、错别字检测")
+        else:
+            text_details.append("未检测到正文或附注文本，跳过文本质量检查")
+        yield json.dumps({
+            "status": "phase_complete", "phase": "text_quality",
+            "message": f"文本质量检查完成，发现 {text_finding_count} 个问题",
+            "findings_count": text_finding_count,
+            "details": text_details,
+        }, ensure_ascii=False)
+        await asyncio.sleep(0)
 
         # 确保所有 Finding 为 pending_confirmation
         for f in all_findings:
             f.confirmation_status = FindingConfirmationStatus.PENDING_CONFIRMATION
+
+        # 补充 note_table_ids：对于没有 note_table_ids 的 finding，从 matching_map 反查
+        if session.matching_map:
+            # 构建 account_name → note_table_ids 映射
+            item_map = {i.id: i for i in session.statement_items}
+            acct_to_notes: Dict[str, List[str]] = {}
+            for entry in session.matching_map.entries:
+                item = item_map.get(entry.statement_item_id)
+                if item and entry.note_table_ids:
+                    acct_to_notes.setdefault(item.account_name, []).extend(entry.note_table_ids)
+            for f in all_findings:
+                if not f.note_table_ids and f.account_name in acct_to_notes:
+                    f.note_table_ids = list(dict.fromkeys(acct_to_notes[f.account_name]))  # 去重保序
 
         # 生成结果
         summary = self._build_summary(all_findings)
@@ -209,15 +707,14 @@ class ReportReviewEngine:
 
     def flag_abnormal_changes(
         self, changes: List[ChangeAnalysis], threshold: float = 0.3
-    ) -> List[StatementItem]:
-        """标记超阈值科目。返回需要 LLM 分析的 StatementItem 列表。"""
-        abnormal_ids = []
+    ) -> List[ChangeAnalysis]:
+        """标记超阈值科目，返回超阈值的 ChangeAnalysis 列表。"""
+        abnormal = []
         for c in changes:
             if c.change_percentage is not None and abs(c.change_percentage) > threshold:
                 c.exceeds_threshold = True
-                abnormal_ids.append(c.statement_item_id)
-        # 返回空列表（实际需要从 session 获取 items，这里简化）
-        return []
+                abnormal.append(c)
+        return abnormal
 
     async def analyze_change_reasonableness(
         self,

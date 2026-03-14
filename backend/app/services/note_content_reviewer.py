@@ -30,7 +30,11 @@ SECTION_TYPE_KEYWORDS = {
     "accounting_policy": ["会计政策", "重要会计政策", "主要会计政策"],
     "tax": ["税项", "税种", "主要税项", "适用税率"],
     "related_party": ["关联方", "关联方关系", "关联方交易"],
+    "report_item_note": ["报表项目注释", "报表项目", "财务报表项目"],
 }
+
+# 模板化章节类型（内容来自模板，不需要重点复核表达质量）
+TEMPLATE_SECTION_TYPES = {"basic_info", "accounting_policy", "tax"}
 
 
 class NoteContentReviewer:
@@ -89,13 +93,21 @@ class NoteContentReviewer:
 
         try:
             prompt = (
-                f"请检查以下审计报告附注章节的表达通顺性和逻辑连贯性。\n"
+                f"请检查以下审计报告附注中报表项目注释的正文内容。\n"
+                f"这些内容是项目组自行编写的，请重点关注：\n"
+                f"1. 表达是否通顺、逻辑是否连贯\n"
+                f"2. 专业术语使用是否准确\n"
+                f"3. 数据描述是否与上下文一致\n"
+                f"4. 是否有遗漏或多余的内容\n\n"
                 f"章节标题：{section.title}\n"
                 f"章节类型：{section.section_type}\n\n"
                 f"内容：\n{section.content[:5000]}\n\n"
-                "请以JSON数组格式返回发现的问题。"
+                "如果发现问题，请以JSON数组格式返回，每项必须包含以下字段：\n"
+                '{"location":"问题所在的具体段落或句子（引用原文片段）","description":"问题描述，必须包含原文上下文片段，如：「原文内容」存在XX问题","suggestion":"修改建议，给出具体的修改方式","risk_level":"low或medium"}\n'
+                "注意：location 和 description 中必须引用原文片段，让用户能定位到具体位置。\n"
+                "如果内容表达合理、无明显问题，返回空数组 []。不要对模板化的标准表述提出问题。"
             )
-            findings = await self._call_llm(openai_service, prompt, "表达通顺性")
+            findings = await self._call_llm(openai_service, prompt, "表达通顺性", section.title)
         except Exception as e:
             logger.warning("表达通顺性检查失败: %s", e)
 
@@ -136,9 +148,10 @@ class NoteContentReviewer:
                 f"模板内容：\n{template_content[:5000]}\n\n"
                 f"实际内容：\n{policy_section.content[:5000]}\n\n"
                 "对于每个偏差，返回JSON数组，每项包含：\n"
-                '{"location":"位置","description":"问题描述","template_reference":"模板原文","suggestion":"修改建议","risk_level":"low/medium"}'
+                '{"location":"问题所在的具体段落（引用原文片段）","description":"问题描述，引用实际内容原文","template_reference":"模板中对应的原文","suggestion":"修改建议","risk_level":"low/medium"}\n'
+                "注意：location 和 description 中必须引用原文片段，让用户能定位到具体位置。"
             )
-            findings = await self._call_llm(openai_service, prompt, "会计政策比对")
+            findings = await self._call_llm(openai_service, prompt, "会计政策比对", policy_section.title)
         except Exception as e:
             logger.warning("会计政策比对失败: %s", e)
 
@@ -153,11 +166,24 @@ class NoteContentReviewer:
                 return stype
         return "other"
 
+    @staticmethod
+    def _extract_field(item: dict, primary: str, fallbacks: List[str]) -> str:
+        """从 LLM 返回的 dict 中提取字段，支持多个备选字段名。"""
+        val = item.get(primary, "")
+        if val:
+            return str(val).strip()
+        for fb in fallbacks:
+            val = item.get(fb, "")
+            if val:
+                return str(val).strip()
+        return ""
+
     async def _call_llm(
         self,
         openai_service: OpenAIService,
         prompt: str,
         check_type: str,
+        section_title: str = "",
     ) -> List[ReportReviewFinding]:
         messages = [
             {"role": "system", "content": "你是审计报告附注复核专家。请以JSON数组格式返回发现的问题。"},
@@ -177,15 +203,29 @@ class NoteContentReviewer:
                 for item in items:
                     if not isinstance(item, dict):
                         continue
+                    desc = self._extract_field(item, "description", ["issue", "problem", "content", "错误描述", "问题"])
+                    suggestion = self._extract_field(item, "suggestion", ["fix", "recommendation", "修改建议", "建议"])
+                    if not desc:
+                        continue
+                    # 确保 location 有"附注-章节标题"前缀
+                    raw_loc = item.get("location", "")
+                    if section_title and raw_loc and not raw_loc.startswith("附注"):
+                        location = f"附注-{section_title}-{raw_loc}"
+                    elif section_title and not raw_loc:
+                        location = f"附注-{section_title}"
+                    elif raw_loc:
+                        location = raw_loc if raw_loc.startswith("附注") else f"附注-{raw_loc}"
+                    else:
+                        location = "附注"
                     findings.append(ReportReviewFinding(
                         id=str(uuid.uuid4())[:8],
                         category=ReportReviewFindingCategory.NOTE_CONTENT,
                         risk_level=RiskLevel(item.get("risk_level", "low")),
-                        account_name=item.get("account_name", check_type),
-                        location=item.get("location", "附注"),
-                        description=item.get("description", ""),
+                        account_name=item.get("account_name", section_title or check_type),
+                        location=location,
+                        description=desc,
                         template_reference=item.get("template_reference"),
-                        suggestion=item.get("suggestion", ""),
+                        suggestion=suggestion,
                         confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
                         status=FindingStatus.OPEN,
                     ))

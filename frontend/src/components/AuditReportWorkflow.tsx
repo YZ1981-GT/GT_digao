@@ -55,7 +55,7 @@ const AuditReportWorkflow: React.FC = () => {
       case 'confirmation':
         return <FindingConfirmationView sessionId={state.sessionId} onComplete={goNext} />;
       case 'result':
-        return <AuditReportResult sessionId={state.sessionId} />;
+        return <AuditReportResult sessionId={state.sessionId} onBack={goPrev} />;
       default:
         return null;
     }
