@@ -983,7 +983,7 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
 请返回以下 JSON 结构（不要包含其他文字）：
 {{
   "rows": [
-    {{"row_index": 0, "role": "data|total|subtotal|sub_item|header", "parent_row_index": null, "indent_level": 0, "label": "行标签"}}
+    {{"row_index": 0, "role": "data|total|subtotal|sub_item|header", "parent_row_index": null, "indent_level": 0, "label": "行标签", "sign": 1}}
   ],
   "columns": [
     {{"col_index": 0, "semantic": "label|opening_balance|closing_balance|current_increase|current_decrease|prior_period|current_period|book_value|total|other", "period": null}}
@@ -998,6 +998,7 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
 结构识别规则：
 - role 取值：data（普通数据行）、total（合计行）、subtotal（小计行）、sub_item（其中项明细）、header（表头行）
 - sub_item 的 parent_row_index 必须指向其所属主项行的索引（不是合计行）
+- sign 取值：1（默认，加法行）或 -1（减法行，如"减：未确认融资费用"、"减：坏账准备"等以"减："开头的行）
 - 如果表格含"期初+增加-减少=期末"结构，has_balance_formula 为 true
 - closing_balance_cell 和 opening_balance_cell 用 RxCy 格式（x=行索引, y=列索引）
 - 变动情况表中，closing_balance_cell 应指向"期末余额"列的合计行
@@ -1031,6 +1032,7 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
                     parent_row_index=r.get("parent_row_index"),
                     indent_level=r.get("indent_level", 0),
                     label=r.get("label", ""),
+                    sign=r.get("sign", 1),
                 )
                 for i, r in enumerate(data.get("rows", []))
             ]
@@ -1077,9 +1079,15 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
         # ── 第一遍：识别合计行和"其中"标记行 ──
         for i, row in enumerate(note_table.rows):
             label = str(row[0]).strip() if row and row[0] else ""
+            norm_label = label.replace(" ", "").replace("\u3000", "")
             role = "data"
             parent_row_index = None
             indent_level = 0
+            sign = 1
+
+            # 检测"减："前缀 → 纵向加总时应减去
+            if norm_label.startswith("减：") or norm_label.startswith("减:"):
+                sign = -1
 
             if self._is_total_row(label):
                 if any(kw in label for kw in self.SUBTOTAL_KEYWORDS):
@@ -1096,6 +1104,7 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
                 row_index=i, role=role,
                 parent_row_index=parent_row_index,
                 indent_level=indent_level, label=label,
+                sign=sign,
             ))
 
         # ── 第二遍：处理"其中"区域，将明细行标为 sub_item ──

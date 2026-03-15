@@ -160,6 +160,25 @@ class TestRuleBasedAnalysis:
         assert 2 in result.total_row_indices
         analyzer.clear_cache()
 
+    def test_subtraction_row_sign_detection(self):
+        """规则识别：'减：'前缀行的 sign 应为 -1。"""
+        analyzer = TableStructureAnalyzer()
+        nt = _make_note_table(
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[
+                ["租赁付款额", 10000, 12000],
+                ["减：未确认融资费用", 500, 600],
+                ["减：重分类至一年内到期的非流动负债", 2000, 3000],
+                ["租赁负债净额", 7500, 8400],
+            ],
+        )
+        result = _run(analyzer.analyze_table_structure(nt))
+        sign_map = {r.row_index: r.sign for r in result.rows}
+        assert sign_map[0] == 1   # 租赁付款额
+        assert sign_map[1] == -1  # 减：未确认融资费用
+        assert sign_map[2] == -1  # 减：重分类至一年内到期的非流动负债
+        analyzer.clear_cache()
+
 
 # ─── LLM 分析测试 ───
 

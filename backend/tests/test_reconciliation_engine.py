@@ -1745,6 +1745,82 @@ class TestNoteTableIntegrity:
         assert len(findings) >= 1
         assert findings[0].category == ReportReviewFindingCategory.RECONCILIATION_ERROR
 
+    def test_subtraction_row_sign(self):
+        """租赁负债表：'减：'行应在纵向加总中减去而非加上。"""
+        note = _note(
+            name="租赁负债", title="租赁负债",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[
+                ["租赁付款额", 6696617.86, 9862937.15],
+                ["减：未确认融资费用", 52070.03, 136141.69],
+                ["租赁负债净额", 6644547.83, 9726795.46],
+            ],
+        )
+        ts = _ts(note.id, rows=[
+            TableStructureRow(row_index=0, role="data", label="租赁付款额", sign=1),
+            TableStructureRow(row_index=1, role="data", label="减：未确认融资费用", sign=-1),
+            TableStructureRow(row_index=2, role="total", label="租赁负债净额"),
+        ], columns=[
+            TableStructureColumn(col_index=0, semantic="label"),
+            TableStructureColumn(col_index=1, semantic="closing_balance"),
+            TableStructureColumn(col_index=2, semantic="opening_balance"),
+        ], total_indices=[2])
+        findings = engine.check_note_table_integrity(note, ts)
+        # 6696617.86 - 52070.03 = 6644547.83 → 无差异
+        assert len(findings) == 0
+
+    def test_subtraction_row_with_reclassify(self):
+        """租赁负债表含重分类行：多个'减：'行均应减去。"""
+        note = _note(
+            name="租赁负债", title="租赁负债",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[
+                ["租赁付款额", 10000, 12000],
+                ["减：未确认融资费用", 500, 600],
+                ["减：重分类至一年内到期的非流动负债", 2000, 3000],
+                ["租赁负债净额", 7500, 8400],
+            ],
+        )
+        ts = _ts(note.id, rows=[
+            TableStructureRow(row_index=0, role="data", label="租赁付款额", sign=1),
+            TableStructureRow(row_index=1, role="data", label="减：未确认融资费用", sign=-1),
+            TableStructureRow(row_index=2, role="data", label="减：重分类至一年内到期的非流动负债", sign=-1),
+            TableStructureRow(row_index=3, role="total", label="租赁负债净额"),
+        ], columns=[
+            TableStructureColumn(col_index=0, semantic="label"),
+            TableStructureColumn(col_index=1, semantic="closing_balance"),
+            TableStructureColumn(col_index=2, semantic="opening_balance"),
+        ], total_indices=[3])
+        findings = engine.check_note_table_integrity(note, ts)
+        # 10000 - 500 - 2000 = 7500 → 无差异
+        assert len(findings) == 0
+
+    def test_subtraction_row_mismatch_detected(self):
+        """租赁负债表：纵向加总不平时应报差异。"""
+        note = _note(
+            name="租赁负债", title="租赁负债",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[
+                ["租赁付款额", 10000, 12000],
+                ["减：未确认融资费用", 500, 600],
+                ["租赁负债净额", 9000, 11400],  # 应为9500，故意错
+            ],
+        )
+        ts = _ts(note.id, rows=[
+            TableStructureRow(row_index=0, role="data", label="租赁付款额", sign=1),
+            TableStructureRow(row_index=1, role="data", label="减：未确认融资费用", sign=-1),
+            TableStructureRow(row_index=2, role="total", label="租赁负债净额"),
+        ], columns=[
+            TableStructureColumn(col_index=0, semantic="label"),
+            TableStructureColumn(col_index=1, semantic="closing_balance"),
+            TableStructureColumn(col_index=2, semantic="opening_balance"),
+        ], total_indices=[2])
+        findings = engine.check_note_table_integrity(note, ts)
+        # 10000 - 500 = 9500 ≠ 9000 → 差异500
+        closing_f = [f for f in findings if "列2" in f.location]
+        assert len(closing_f) == 1
+        assert closing_f[0].difference == 500.0
+
 
 # ─── 余额变动公式 ───
 

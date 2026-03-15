@@ -1130,10 +1130,15 @@ class ReconciliationEngine:
 
                 data_sum = 0.0
                 has_data = False
+                # 构建行索引→sign映射，用于纵向加总时区分加减行
+                row_sign_map: Dict[int, int] = {
+                    r.row_index: r.sign for r in table_structure.rows
+                }
                 for di in data_indices:
                     v = self._get_row_col_value(note_table, di, col.col_index)
                     if v is not None:
-                        data_sum += v
+                        sign = row_sign_map.get(di, 1)
+                        data_sum += sign * v
                         has_data = True
 
                 if has_data and not _amounts_equal(data_sum, total_val):

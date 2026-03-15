@@ -619,6 +619,7 @@ class TableStructureRow(BaseModel):
     parent_row_index: Optional[int] = Field(None, description="父行索引（其中项时指向所属主项行）")
     indent_level: int = Field(0, description="缩进层级")
     label: str = Field("", description="行标签/科目名称")
+    sign: int = Field(1, description="纵向加总符号：1=加，-1=减（如'减：未确认融资费用'）")
 
 
 class TableStructureColumn(BaseModel):
