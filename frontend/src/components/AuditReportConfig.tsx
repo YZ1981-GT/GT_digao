@@ -198,14 +198,14 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--gt-space-3)' }}>
           <input
             type="range"
-            min={0} max={1000} step={10} value={amountThreshold}
+            min={0} max={100000} step={100} value={amountThreshold}
             onChange={e => setAmountThreshold(Number(e.target.value))}
             style={{ flex: 1 }}
             aria-label="金额阈值滑块"
           />
           <input
             type="number"
-            min={0} max={100000} step={10} value={amountThreshold}
+            min={0} max={1000000} step={100} value={amountThreshold}
             onChange={e => setAmountThreshold(Math.max(0, Number(e.target.value)))}
             style={{ width: 80, padding: 4, border: '1px solid #ddd', borderRadius: 4, textAlign: 'center' }}
             aria-label="金额阈值数值"
