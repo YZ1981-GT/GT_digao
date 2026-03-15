@@ -979,9 +979,35 @@ class ReportReviewEngine:
                     *[_review_section(s) for s in sections],
                     return_exceptions=True,
                 )
+                # 收集数值校验阶段已覆盖的科目名（去重：避免附注复核重复报告同一科目的问题）
+                recon_covered_accounts: set = set()
+                for f in all_findings:
+                    if f.category in (
+                        ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
+                        ReportReviewFindingCategory.RECONCILIATION_ERROR,
+                    ):
+                        # 清洗科目名：去除编号、标点、空白
+                        clean = re.sub(r'[\s\d（()）、.．一二三四五六七八九十]+', '', f.account_name)
+                        if clean:
+                            recon_covered_accounts.add(clean)
+
+                def _is_recon_covered(acct_name: str) -> bool:
+                    """检查附注复核的科目是否已被数值校验覆盖。"""
+                    clean = re.sub(r'[\s\d（()）、.．一二三四五六七八九十]+', '', acct_name)
+                    if not clean:
+                        return False
+                    for covered in recon_covered_accounts:
+                        if clean in covered or covered in clean:
+                            return True
+                    return False
+
                 for r in section_results:
                     if isinstance(r, list):
-                        all_findings.extend(r)
+                        for f in r:
+                            if _is_recon_covered(f.account_name):
+                                logger.info("附注复核去重：跳过 '%s'（数值校验已覆盖）", f.account_name)
+                                continue
+                            all_findings.append(f)
 
                 yield json.dumps({
                     "status": "phase_progress", "phase": "note_review",
