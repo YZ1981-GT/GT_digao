@@ -198,6 +198,135 @@ class ReconciliationEngine:
         title = (note.section_title or "").replace(" ", "").replace("\u3000", "")
         return any(kw in title for kw in ReconciliationEngine._COMPONENT_SUBTABLE_KW)
 
+    # 资产组成部分子表关键词（国企报表中固定资产/无形资产等科目的附注
+    # 常拆分为多张独立表格：原价表、累计折旧表、减值准备表、账面价值表。
+    # 原价/累计折旧/减值准备表的合计值仅代表资产的某一组成部分，
+    # 不应直接与报表余额（账面价值）比对。）
+    _COMPONENT_SUBTABLE_KW = [
+        "原价", "原值", "账面原值",
+        "累计折旧", "累计摊销",
+        "减值准备",
+    ]
+
+    # 国企版资产负债表中，固定资产/无形资产等科目拆分为子行项目：
+    # "固定资产原价"、"累计折旧"、"固定资产减值准备"、"固定资产净值"等。
+    # 这些子行项目需要从合并附注表格的对应段落中提取值。
+    _COMPONENT_ITEM_TO_SECTION = {
+        "原价": "cost", "原值": "cost", "账面原值": "cost",
+        "累计折旧": "amort", "累计摊销": "amort",
+        "减值准备": "impair",
+    }
+    # 需要做子行段落提取的资产科目
+    _SECTION_EXTRACT_ACCOUNTS = [
+        "固定资产", "无形资产", "投资性房地产",
+        "使用权资产", "油气资产", "生产性生物资产",
+    ]
+
+    @staticmethod
+    def _is_component_subtable(note: NoteTable) -> bool:
+        """判断附注表格是否为资产组成部分子表（原价/累计折旧/减值准备）。
+
+        国企报表中，固定资产等科目的附注常拆分为多张独立表格，
+        其中原价表、累计折旧表、减值准备表的合计值仅代表资产的某一组成部分，
+        不应直接与报表余额（账面价值）比对。
+        """
+        title = (note.section_title or "").replace(" ", "").replace("\u3000", "")
+        return any(kw in title for kw in ReconciliationEngine._COMPONENT_SUBTABLE_KW)
+
+    @staticmethod
+    def _get_component_section_type(item_name: str) -> Optional[str]:
+        """判断报表科目名是否为资产子行项目，返回对应的段落类型。
+
+        例如："固定资产原价" → "cost"，"累计折旧" → "amort"
+        返回 None 表示不是子行项目（是净值/账面价值行或主科目行）。
+        """
+        for kw, section in ReconciliationEngine._COMPONENT_ITEM_TO_SECTION.items():
+            if kw in item_name:
+                return section
+        return None
+
+    @staticmethod
+    def _extract_component_section_totals(
+        note: NoteTable,
+        section_type: str,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """从合并附注表格中提取指定段落（cost/amort/impair）的期末/期初值。
+
+        国企版固定资产等科目的附注表格包含多个段落（原值、累计折旧、减值准备、账面价值），
+        每个段落有自己的合计行。本方法提取指定段落的合计值。
+        """
+        import re as _re
+        section_pattern = _re.compile(r"^[一二三四五六七八九十]+[、.]")
+        kw_map = {
+            "cost": ReconciliationEngine._COST_SECTION_KW,
+            "amort": ReconciliationEngine._AMORT_SECTION_KW,
+            "impair": ReconciliationEngine._IMPAIR_SECTION_KW,
+        }
+        target_kw = kw_map.get(section_type)
+        if not target_kw:
+            return (None, None)
+
+        closing_kw = ReconciliationEngine._CLOSING_COL_KW
+        opening_kw = ReconciliationEngine._OPENING_COL_KW
+        is_move = ReconciliationEngine._is_movement_col
+        norm_h = [str(h or "").replace(" ", "").replace("\u3000", "") for h in (note.headers or [])]
+
+        hdr_closing_idx = -1
+        hdr_opening_idx = -1
+        for ci, h in enumerate(norm_h):
+            if is_move(h):
+                continue
+            has_open = any(kw in h for kw in opening_kw)
+            if hdr_closing_idx < 0 and any(kw in h for kw in closing_kw) and not has_open:
+                hdr_closing_idx = ci
+            if hdr_opening_idx < 0 and has_open:
+                hdr_opening_idx = ci
+
+        if hdr_closing_idx <= 0 and hdr_opening_idx <= 0:
+            return (None, None)
+
+        total_col = -1
+        for ci in range(len(note.headers) - 1, 0, -1):
+            h = str(note.headers[ci] or "").replace(" ", "").replace("\u3000", "")
+            if h in ("合计", "总计"):
+                total_col = ci
+                break
+
+        closing_val: Optional[float] = None
+        opening_val: Optional[float] = None
+        in_target = False
+
+        for row in note.rows:
+            first = str(row[0] if row else "").replace(" ", "").replace("\u3000", "").strip()
+            if section_pattern.match(first):
+                in_target = any(kw in first for kw in target_kw)
+                if in_target:
+                    if hdr_closing_idx > 0 and hdr_closing_idx < len(row):
+                        v = _safe_float(row[hdr_closing_idx])
+                        if v is not None:
+                            closing_val = v
+                    if hdr_opening_idx > 0 and hdr_opening_idx < len(row):
+                        v = _safe_float(row[hdr_opening_idx])
+                        if v is not None:
+                            opening_val = v
+                continue
+            if not in_target:
+                continue
+            if "期末" in first or "年末" in first:
+                pick = total_col if total_col > 0 else hdr_closing_idx
+                if 0 < pick < len(row):
+                    v = _safe_float(row[pick])
+                    if v is not None:
+                        closing_val = v
+            if "期初" in first or "年初" in first:
+                pick = total_col if total_col > 0 else hdr_opening_idx
+                if 0 < pick < len(row):
+                    v = _safe_float(row[pick])
+                    if v is not None:
+                        opening_val = v
+
+        return (closing_val, opening_val)
+
     # 明细/分类子表关键词（国企报表中，多个科目的附注包含多张表格：
     # 只有1级汇总表直接与报表余额核对，
     # 其余明细表仅参与 check_cross_table_consistency 的表间核对。）
@@ -448,6 +577,17 @@ class ReconciliationEngine:
 
                 # 规则引擎：始终运行，用于兜底和交叉验证
                 rule_closing, rule_opening = self._extract_note_totals_by_rules(note)
+
+                # 国企版资产子行项目（如"固定资产原价"、"累计折旧"）：
+                # 从合并附注表格的对应段落提取值，而非使用账面价值合计
+                comp_section = self._get_component_section_type(item.account_name)
+                if comp_section and any(kw in (note.account_name or "") for kw in self._SECTION_EXTRACT_ACCOUNTS):
+                    sec_closing, sec_opening = self._extract_component_section_totals(note, comp_section)
+                    if sec_closing is not None or sec_opening is not None:
+                        note_closing = sec_closing
+                        note_opening = sec_opening
+                        rule_closing = sec_closing
+                        rule_opening = sec_opening
 
                 # 兜底：LLM 未识别出 cell 时，用规则引擎结果
                 if note_closing is None and rule_closing is not None:

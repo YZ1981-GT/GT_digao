@@ -799,6 +799,84 @@ class TestAmountConsistency:
         assert closing_f[0].note_amount == 430
         assert closing_f[0].difference == 5.0
 
+    def test_soe_fixed_asset_component_item_matches_section(self):
+        """国企版：报表"固定资产原价"应从附注合并表的原值段提取值。"""
+        note = _note(
+            name="固定资产", title="固定资产情况",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["一、账面原值合计", 1300, 300, 50, 1550],
+                ["其中：房屋", 500, 100, 0, 600],
+                ["设备", 800, 200, 50, 950],
+                ["二、累计折旧合计", 400, 100, 20, 480],
+                ["三、固定资产减值准备合计", 100, 10, 0, 110],
+                ["四、固定资产账面价值合计", 800, None, None, 960],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        # 报表科目"固定资产原价"，期末=1550，期初=1300
+        item = _item(name="固定资产原价", closing=1550, opening=1300)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        # 应该无差异：从原值段提取的值与报表一致
+        assert len(findings) == 0
+
+    def test_soe_depreciation_component_item_matches_section(self):
+        """国企版：报表"累计折旧"应从附注合并表的折旧段提取值。"""
+        note = _note(
+            name="固定资产", title="固定资产情况",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["一、账面原值合计", 1300, 300, 50, 1550],
+                ["二、累计折旧合计", 400, 100, 20, 480],
+                ["三、固定资产减值准备合计", 100, 10, 0, 110],
+                ["四、固定资产账面价值合计", 800, None, None, 960],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        item = _item(name="累计折旧", closing=480, opening=400)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        assert len(findings) == 0
+
+    def test_soe_component_item_mismatch_detected(self):
+        """国企版：报表"固定资产原价"与附注原值段不一致时应报差异。"""
+        note = _note(
+            name="固定资产", title="固定资产情况",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["一、账面原值合计", 1300, 300, 50, 1550],
+                ["二、累计折旧合计", 400, 100, 20, 480],
+                ["四、固定资产账面价值合计", 800, None, None, 960],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        # 报表原价=1600，但附注原值段=1550 → 差异50
+        item = _item(name="固定资产原价", closing=1600, opening=1300)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        closing_f = [f for f in findings if "期末" in f.location]
+        assert len(closing_f) == 1
+        assert closing_f[0].difference == 50.0
+
 
 # ─── 科目匹配评分 ───
 
@@ -1133,6 +1211,41 @@ class TestExtractNoteTotalsByRules:
         # 应提取"账面价值"列：期末770，期初580
         assert closing == 770, f"期末应为770，实际{closing}"
         assert opening == 580, f"期初应为580，实际{opening}"
+
+    def test_extract_component_section_cost(self):
+        """从国企固定资产合并表中提取原值段的期末/期初。"""
+        note = NoteTable(
+            id="soe-fa-comp", account_name="固定资产", section_title="固定资产情况",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["一、账面原值合计", 1300, 300, 50, 1550],
+                ["其中：房屋", 500, 100, 0, 600],
+                ["设备", 800, 200, 50, 950],
+                ["二、累计折旧合计", 400, 100, 20, 480],
+                ["三、固定资产减值准备合计", 100, 10, 0, 110],
+                ["四、固定资产账面价值合计", 800, None, None, 960],
+            ],
+        )
+        # 提取原值段
+        c, o = engine._extract_component_section_totals(note, "cost")
+        assert c == 1550
+        assert o == 1300
+        # 提取折旧段
+        c, o = engine._extract_component_section_totals(note, "amort")
+        assert c == 480
+        assert o == 400
+        # 提取减值段
+        c, o = engine._extract_component_section_totals(note, "impair")
+        assert c == 110
+        assert o == 100
+
+    def test_get_component_section_type(self):
+        """报表科目名 → 段落类型映射。"""
+        assert engine._get_component_section_type("固定资产原价") == "cost"
+        assert engine._get_component_section_type("累计折旧") == "amort"
+        assert engine._get_component_section_type("固定资产减值准备") == "impair"
+        assert engine._get_component_section_type("固定资产") is None
+        assert engine._get_component_section_type("固定资产净值") is None
 
 
 # ─── 营业收入/营业成本合并表格提取 ───
