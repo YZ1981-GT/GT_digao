@@ -70,6 +70,31 @@ class TestIdentifyStatementType:
 
     def test_default_type(self, parser):
         result = parser._identify_statement_type("Sheet1", [])
+        assert result is None  # 无法识别的 Sheet 应跳过
+
+    def test_skip_auxiliary_sheet(self, parser):
+        """辅助性 Sheet（横纵加、校验等）应返回 None。"""
+        for name in ["横纵加", "校验表", "辅助计算", "增加额", "勾稽"]:
+            result = parser._identify_statement_type(name, [])
+            assert result is None, f"Sheet '{name}' should be skipped"
+
+    def test_skip_sheet_with_weak_content(self, parser):
+        """Sheet 名称无法识别且内容不含强特征关键词时应跳过。"""
+        cells = [
+            CellData(row=1, col=1, value="项目"),
+            CellData(row=1, col=2, value="增加额"),
+            CellData(row=2, col=1, value="货币资金"),
+        ]
+        result = parser._identify_statement_type("增加额", cells)
+        assert result is None
+
+    def test_content_with_strong_keyword(self, parser):
+        """内容含强特征关键词（完整报表名称）时应正确识别。"""
+        cells = [
+            CellData(row=1, col=1, value="资产负债表"),
+            CellData(row=2, col=1, value="货币资金"),
+        ]
+        result = parser._identify_statement_type("Sheet1", cells)
         assert result == StatementType.BALANCE_SHEET
 
     def test_identify_by_content(self, parser):
@@ -122,6 +147,15 @@ class TestExtractSheets:
         excel_result = ExcelParseResult(
             sheets=[SheetData(name="空表", cells=[], merged_ranges=[])],
             sheet_names=["空表"],
+        )
+        sheets = parser.extract_sheets(excel_result)
+        assert len(sheets) == 0  # 无法识别类型的空表应被跳过
+
+    def test_empty_sheet_with_known_name(self, parser):
+        """名称可识别的空表仍应保留。"""
+        excel_result = ExcelParseResult(
+            sheets=[SheetData(name="资产负债表", cells=[], merged_ranges=[])],
+            sheet_names=["资产负债表"],
         )
         sheets = parser.extract_sheets(excel_result)
         assert len(sheets) == 1

@@ -1039,25 +1039,35 @@ class ReportParser(WorkpaperParser):
                 logger.info("[_identify_statement_type] Skipping auxiliary sheet: %s (matched '%s')", sheet_name, kw)
                 return None
 
+        # 按 Sheet 名称匹配报表类型
         for st_type, keywords in self.STATEMENT_TYPE_KEYWORDS.items():
             for kw in keywords:
                 if kw.lower() in name_lower:
                     return st_type
 
-        # 从内容中识别（取前几行文本）
+        # Sheet 名称无法识别时，从内容中识别（取前几行文本）
+        # 要求内容中包含明确的报表标题关键词（如"资产负债表"、"利润表"等）
         content_text = ""
         for cell in cells[:50]:
             if cell.value and isinstance(cell.value, str):
                 content_text += cell.value + " "
 
         content_lower = content_text.lower()
-        for st_type, keywords in self.STATEMENT_TYPE_KEYWORDS.items():
+        # 仅使用强特征关键词（完整报表名称），避免弱关键词（如"利润"）误匹配辅助 Sheet
+        STRONG_CONTENT_KEYWORDS: Dict[StatementType, List[str]] = {
+            StatementType.BALANCE_SHEET: ["资产负债表", "balance sheet"],
+            StatementType.INCOME_STATEMENT: ["利润表", "损益表", "income statement"],
+            StatementType.CASH_FLOW: ["现金流量表", "cash flow statement"],
+            StatementType.EQUITY_CHANGE: ["所有者权益变动表", "股东权益变动表"],
+        }
+        for st_type, keywords in STRONG_CONTENT_KEYWORDS.items():
             for kw in keywords:
                 if kw.lower() in content_lower:
                     return st_type
 
-        # 默认归类为资产负债表
-        return StatementType.BALANCE_SHEET
+        # 名称和内容都无法识别 → 跳过（不再默认归类为资产负债表）
+        logger.info("[_identify_statement_type] Skipping unrecognized sheet: %s (no statement type keywords found)", sheet_name)
+        return None
 
     @staticmethod
     def _extract_account_name(row: List[Any]) -> str:
