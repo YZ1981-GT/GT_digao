@@ -19,7 +19,7 @@ from app.models.audit_schemas import (
     TableStructureColumn,
     TableStructureRow,
 )
-from backend.app.services.reconciliation_engine import ReconciliationEngine
+from app.services.reconciliation_engine import ReconciliationEngine
 
 
 # ─── helpers ───
@@ -1932,7 +1932,7 @@ class TestSubItems:
 
     def test_sub_item_role_detection_by_rules(self):
         """验证 _analyze_with_rules 正确识别其中项明细行的角色和父行关系。"""
-        from backend.app.services.table_structure_analyzer import TableStructureAnalyzer
+        from app.services.table_structure_analyzer import TableStructureAnalyzer
         note = NoteTable(
             id="t-sub-detect", account_name="应收账款", section_title="坏账准备",
             headers=["项目", "期末余额", "期初余额"],
@@ -1960,7 +1960,7 @@ class TestSubItems:
 
     def test_total_excludes_sub_items(self):
         """合计行加总只包含顶层data行，不包含sub_item。"""
-        from backend.app.services.table_structure_analyzer import TableStructureAnalyzer
+        from app.services.table_structure_analyzer import TableStructureAnalyzer
         note = NoteTable(
             id="t-sub-excl", account_name="应收账款", section_title="坏账准备",
             headers=["项目", "期末余额", "期初余额"],
@@ -1980,7 +1980,7 @@ class TestSubItems:
 
     def test_multiple_sub_item_groups(self):
         """多组其中项场景：每组其中项分别归属不同的父行。"""
-        from backend.app.services.table_structure_analyzer import TableStructureAnalyzer
+        from app.services.table_structure_analyzer import TableStructureAnalyzer
         note = NoteTable(
             id="t-sub-multi", account_name="应收账款", section_title="坏账准备",
             headers=["项目", "期末余额"],
@@ -2015,7 +2015,7 @@ class TestSubItems:
 
 class TestReconciliationSummary:
     def test_summary(self):
-        from backend.app.models.audit_schemas import ReportReviewFinding, FindingStatus
+        from app.models.audit_schemas import ReportReviewFinding, FindingStatus
         findings = [
             ReportReviewFinding(
                 id="1", category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,

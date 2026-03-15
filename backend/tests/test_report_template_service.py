@@ -1,13 +1,13 @@
 """Report_Template_Service 单元测试（Task 6.7）。"""
 import pytest
 
-from backend.app.models.audit_schemas import (
+from app.models.audit_schemas import (
     ReportTemplateDocument,
     ReportTemplateType,
     TemplateCategory,
     TemplateTocEntry,
 )
-from backend.app.services.report_template_service import ReportTemplateService
+from app.services.report_template_service import ReportTemplateService
 
 SAMPLE_MD = """# 审计报告正文
 这是正文概述。
@@ -136,13 +136,13 @@ class TestPreloadTemplates:
     """验证内置模板已预加载到知识库（原 test_preload_templates.py）。"""
 
     def test_builtin_templates_loaded(self):
-        from backend.app.services.knowledge_service import KnowledgeService
+        from app.services.knowledge_service import KnowledgeService
         ks = KnowledgeService()
         docs = ks.get_documents('report_templates')
         assert len(docs) >= 2, f"预期至少2个内置模板，实际 {len(docs)}"
 
     def test_template_content_accessible(self):
-        from backend.app.services.knowledge_service import KnowledgeService
+        from app.services.knowledge_service import KnowledgeService
         ks = KnowledgeService()
         docs = ks.get_documents('report_templates')
         for d in docs:
@@ -155,13 +155,13 @@ class TestPreloadTemplates:
     """验证内置模板已预加载到知识库（原 test_preload_templates.py）。"""
 
     def test_builtin_templates_loaded(self):
-        from backend.app.services.knowledge_service import KnowledgeService
+        from app.services.knowledge_service import KnowledgeService
         ks = KnowledgeService()
         docs = ks.get_documents('report_templates')
         assert len(docs) >= 2, f"预期至少2个内置模板，实际 {len(docs)}"
 
     def test_template_content_accessible(self):
-        from backend.app.services.knowledge_service import KnowledgeService
+        from app.services.knowledge_service import KnowledgeService
         ks = KnowledgeService()
         docs = ks.get_documents('report_templates')
         for d in docs:

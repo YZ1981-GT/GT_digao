@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.app.models.audit_schemas import (
+from app.models.audit_schemas import (
     FindingConfirmationStatus,
     NarrativeSection,
     NoteTable,
@@ -21,9 +21,9 @@ from backend.app.models.audit_schemas import (
     StatementType,
     TemplateCategory,
 )
-from backend.app.services.report_body_reviewer import ReportBodyReviewer
-from backend.app.services.note_content_reviewer import NoteContentReviewer
-from backend.app.services.text_quality_analyzer import TextQualityAnalyzer
+from app.services.report_body_reviewer import ReportBodyReviewer
+from app.services.note_content_reviewer import NoteContentReviewer
+from app.services.text_quality_analyzer import TextQualityAnalyzer
 
 
 def _run(coro):

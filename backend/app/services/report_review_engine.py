@@ -1152,7 +1152,45 @@ class ReportReviewEngine:
         }, ensure_ascii=False)
         await asyncio.sleep(0)
 
-        # ── 去重：按 (category, account_name, location) 去除重复 finding ──
+        # ── 跨阶段去重：TEXT_QUALITY findings 与 REPORT_BODY_COMPLIANCE / NOTE_CONTENT 去重 ──
+        # Phase 3 (正文复核) 和 Phase 4 (附注复核) 的 LLM 可能已经报告了同一位置的问题，
+        # Phase 5 (文本质量) 的 LLM 可能再次报告相同位置的类似问题。
+        # 策略：如果 TEXT_QUALITY finding 的 location 中引用的原文片段与
+        #        REPORT_BODY_COMPLIANCE 或 NOTE_CONTENT finding 的 description 有重叠，则去除。
+        prior_phase_snippets: List[str] = []
+        for f in all_findings:
+            if f.category in (
+                ReportReviewFindingCategory.REPORT_BODY_COMPLIANCE,
+                ReportReviewFindingCategory.NOTE_CONTENT,
+            ):
+                # 提取 description 中的中文片段（去掉标点和空白后取连续中文子串）
+                for seg in re.findall(r'[\u4e00-\u9fff]{4,}', f.description or ""):
+                    prior_phase_snippets.append(seg)
+                for seg in re.findall(r'[\u4e00-\u9fff]{4,}', f.location or ""):
+                    prior_phase_snippets.append(seg)
+
+        if prior_phase_snippets:
+            cross_dedup_removed = 0
+            filtered_findings: List[ReportReviewFinding] = []
+            for f in all_findings:
+                if f.category == ReportReviewFindingCategory.TEXT_QUALITY:
+                    # 检查此 TEXT_QUALITY finding 是否与 Phase 3/4 的 finding 重叠
+                    desc_text = (f.description or "") + (f.location or "")
+                    is_dup = False
+                    for snippet in prior_phase_snippets:
+                        if snippet in desc_text:
+                            is_dup = True
+                            break
+                    if is_dup:
+                        cross_dedup_removed += 1
+                        logger.info("跨阶段去重：移除 TEXT_QUALITY finding '%s'（与正文/附注复核重叠）", f.description[:50] if f.description else "")
+                        continue
+                filtered_findings.append(f)
+            if cross_dedup_removed > 0:
+                logger.info("跨阶段去重：移除 %d 个与正文/附注复核重叠的文本质量 finding", cross_dedup_removed)
+            all_findings = filtered_findings
+
+        # ── 同阶段去重：按 (category, account_name, location) 去除重复 finding ──
         seen_keys: set = set()
         deduped_findings: List[ReportReviewFinding] = []
         for f in all_findings:

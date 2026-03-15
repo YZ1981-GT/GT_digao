@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.app.models.audit_schemas import (
+from app.models.audit_schemas import (
     MatchingAnalysis,
     NoteTable,
     StatementItem,
@@ -19,7 +19,7 @@ from backend.app.models.audit_schemas import (
     TableStructureColumn,
     TableStructureRow,
 )
-from backend.app.services.table_structure_analyzer import TableStructureAnalyzer
+from app.services.table_structure_analyzer import TableStructureAnalyzer
 
 
 # ─── helpers ───

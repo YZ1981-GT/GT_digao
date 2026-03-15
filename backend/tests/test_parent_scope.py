@@ -10,7 +10,7 @@ import uuid
 
 import pytest
 
-from backend.app.models.audit_schemas import (
+from app.models.audit_schemas import (
     MatchingEntry,
     MatchingMap,
     NoteSection,
@@ -21,7 +21,7 @@ from backend.app.models.audit_schemas import (
     TableStructureColumn,
     TableStructureRow,
 )
-from backend.app.services.reconciliation_engine import ReconciliationEngine
+from app.services.reconciliation_engine import ReconciliationEngine
 
 engine = ReconciliationEngine()
 

@@ -5,7 +5,7 @@
 import pytest
 from pydantic import ValidationError
 
-from backend.app.models.audit_schemas import (
+from app.models.audit_schemas import (
     # 枚举
     WorkMode,
     ReportFileType,

@@ -73,7 +73,8 @@ class ReportBodyReviewer:
             if openai_service:
                 prompt = (
                     "请检查以下审计报告正文和附注中的简称使用是否统一。\n"
-                    "规则：首次出现应使用全称并注明简称，后续统一使用简称。\n\n"
+                    "规则：首次出现应使用全称并注明简称，后续统一使用简称。\n"
+                    "注意：不要检查标点符号和错别字问题（由文本质量检查模块负责）。\n\n"
                     f"正文内容（前3000字）：\n{report_body_text[:3000]}\n\n"
                     f"附注内容（前3000字）：\n{notes_text[:3000]}\n\n"
                     "如果发现问题，请以JSON数组格式返回，每项必须包含以下字段：\n"
@@ -118,7 +119,8 @@ class ReportBodyReviewer:
         try:
             if openai_service:
                 prompt = (
-                    "请将以下审计报告正文与模板逐段比对，识别表述偏差。\n\n"
+                    "请将以下审计报告正文与模板逐段比对，识别表述偏差。\n"
+                    "注意：不要检查标点符号和错别字问题（由文本质量检查模块负责）。\n\n"
                     f"模板内容：\n{template_content[:5000]}\n\n"
                     f"实际正文：\n{report_body_text[:5000]}\n\n"
                     "对于每个偏差，请返回JSON数组，每项必须包含以下字段：\n"

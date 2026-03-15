@@ -6,10 +6,10 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.main import app
-from backend.app.routers.report_review import _sessions, _findings, _conversations
-from backend.app.services.report_template_service import report_template_service
-from backend.app.models.audit_schemas import (
+from app.main import app
+from app.routers.report_review import _sessions, _findings, _conversations
+from app.services.report_template_service import report_template_service
+from app.models.audit_schemas import (
     FindingConfirmationStatus,
     FindingStatus,
     ReportReviewFinding,

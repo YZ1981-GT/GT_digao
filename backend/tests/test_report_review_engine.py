@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.app.models.audit_schemas import (
+from app.models.audit_schemas import (
     ChangeAnalysis,
     FindingConfirmationStatus,
     FindingConversation,
@@ -25,7 +25,7 @@ from backend.app.models.audit_schemas import (
     StatementItem,
     StatementType,
 )
-from backend.app.services.report_review_engine import ReportReviewEngine
+from app.services.report_review_engine import ReportReviewEngine
 
 
 def _run(coro):
