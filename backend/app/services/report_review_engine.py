@@ -615,6 +615,11 @@ class ReportReviewEngine:
                 logger.warning("受限资产交叉披露验证失败: %s", e)
 
         # 变动分析：1级报表科目 + 2级附注明细行
+        logger.info(
+            "变动分析配置: change_threshold=%.2f, change_amount_threshold=%.2f (元) = %.2f (万元)",
+            config.change_threshold, config.change_amount_threshold,
+            config.change_amount_threshold / 10000 if config.change_amount_threshold else 0,
+        )
         changes = self.calculate_changes(session.statement_items)
         abnormal = self.flag_abnormal_changes(changes, config.change_threshold, config.change_amount_threshold)
         threshold_pct = int(config.change_threshold * 100)
@@ -1201,6 +1206,28 @@ class ReportReviewEngine:
         if len(deduped_findings) < len(all_findings):
             logger.info("去重：%d 个 finding 去重后剩余 %d 个", len(all_findings), len(deduped_findings))
         all_findings = deduped_findings
+
+        # ── 金额阈值过滤：差异金额低于阈值的数据校验 finding 不输出 ──
+        # 适用于 AMOUNT_INCONSISTENCY 和 RECONCILIATION_ERROR 类别
+        _amt_threshold = config.change_amount_threshold
+        if _amt_threshold > 0:
+            _filter_categories = (
+                ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
+                ReportReviewFindingCategory.RECONCILIATION_ERROR,
+            )
+            before_count = len(all_findings)
+            all_findings = [
+                f for f in all_findings
+                if f.category not in _filter_categories
+                or f.difference is None
+                or abs(f.difference) >= _amt_threshold
+            ]
+            filtered_count = before_count - len(all_findings)
+            if filtered_count > 0:
+                logger.info(
+                    "金额阈值过滤：阈值 %.2f 元（%.2f 万元），过滤 %d 个差异金额低于阈值的数据校验 finding",
+                    _amt_threshold, _amt_threshold / 10000, filtered_count,
+                )
 
         # 确保所有 Finding 为 pending_confirmation
         for f in all_findings:
