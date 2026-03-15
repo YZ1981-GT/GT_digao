@@ -408,7 +408,7 @@ class TableStructureAnalyzer:
         preset = cls._find_preset_for_note(note_table)
         if not preset:
             return None
-        if not note_table.headers or len(note_table.headers) < 6:
+        if not note_table.headers or len(note_table.headers) < 5:
             return None
 
         headers = [str(h or "") for h in note_table.headers]
@@ -431,6 +431,7 @@ class TableStructureAnalyzer:
             for seg in ["追加", "新增投资", "减少投资", "投资损益", "其他综合",
                          "其他权益", "现金股利", "宣告发放", "计提减值", "减值准备",
                          "本期增加", "本期减少", "转入固定", "本期摊销",
+                         "其他减少", "其他增加",
                          "内部开发", "确认为无形", "计入当期", "计提", "转回",
                          "转销", "企业合并", "处置", "账面价值",
                          "利息资本化", "投资成本"]:
@@ -670,11 +671,11 @@ class TableStructureAnalyzer:
         """判断是否为需要 LLM 公式分析的宽表候选。
 
         条件：
-        1. 列数 ≥ 6（含标签列）
+        1. 列数 ≥ 5（含标签列）— 如 项目|期初|增加|摊销|期末
         2. 科目名称匹配宽表关键词
         3. 表头中同时含有期初/期末类关键词和变动类关键词（排除分类表/余额对照表）
         """
-        if not note_table.headers or len(note_table.headers) < 6:
+        if not note_table.headers or len(note_table.headers) < 5:
             return False
         # 如果已有结构且标记了余额变动公式，说明已被常规 check_balance_formula 覆盖
         # 但如果列数很多（≥8），常规公式可能遗漏中间列，仍需宽表分析

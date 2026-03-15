@@ -66,9 +66,18 @@ def _ts_simple(note_id, num_cols=3, has_balance=False):
 
 class TestIsWideTableCandidate:
     def test_too_few_columns(self):
-        """列数 < 6 不是宽表候选"""
+        """列数 < 5 不是宽表候选"""
         note = _note(headers=["项目", "期初", "期末"])
         assert not analyzer.is_wide_table_candidate(note)
+
+    def test_5_cols_with_keyword(self):
+        """5列且科目匹配关键词 → 是宽表候选"""
+        note = _note(
+            name="长期待摊费用",
+            title="长期待摊费用",
+            headers=["项目", "期初余额", "本期增加额", "本期摊销额", "期末余额"],
+        )
+        assert analyzer.is_wide_table_candidate(note)
 
     def test_matching_keyword_6_cols(self):
         """科目匹配关键词且列数 ≥ 6"""
@@ -294,6 +303,75 @@ class TestBuildFormulaFromPreset:
         )
         result = analyzer.try_build_formula_from_preset(note)
         assert result is not None
+        findings = engine.check_wide_table_formula(note, result)
+        assert len(findings) == 0
+
+    def test_long_term_prepaid_with_e_suffix(self):
+        """长期待摊费用 — 表头带"额"后缀（如"本期增加额"）"""
+        note = _note(
+            name="长期待摊费用",
+            title="长期待摊费用",
+            headers=["项目", "期初余额", "本期增加额", "本期摊销额",
+                     "其他减少额", "期末余额"],
+            rows=[
+                ["装修费", 100, 20, 30, 0, 90],
+                ["合计", 100, 20, 30, 0, 90],
+            ],
+        )
+        result = analyzer.try_build_formula_from_preset(note)
+        assert result is not None
+        # 验证公式结构正确
+        cols = result["columns"]
+        movement_cols = [c for c in cols if c["role"] == "movement"]
+        assert len(movement_cols) == 3  # 本期增加额(+), 本期摊销额(-), 其他减少额(-)
+        plus_cols = [c for c in movement_cols if c["sign"] == "+"]
+        minus_cols = [c for c in movement_cols if c["sign"] == "-"]
+        assert len(plus_cols) == 1  # 本期增加额
+        assert len(minus_cols) == 2  # 本期摊销额, 其他减少额
+        # 验证公式计算正确
+        findings = engine.check_wide_table_formula(note, result)
+        assert len(findings) == 0
+
+    def test_long_term_prepaid_unbalanced(self):
+        """长期待摊费用 — 横向公式不平衡应报错"""
+        note = _note(
+            name="长期待摊费用",
+            title="长期待摊费用",
+            headers=["项目", "期初余额", "本期增加额", "本期摊销额",
+                     "其他减少额", "期末余额"],
+            rows=[
+                ["装修费", 100, 20, 30, 0, 999],  # 应为90，实际999
+                ["合计", 100, 20, 30, 0, 999],
+            ],
+        )
+        result = analyzer.try_build_formula_from_preset(note)
+        assert result is not None
+        findings = engine.check_wide_table_formula(note, result)
+        assert len(findings) == 2  # 两行都不平
+        assert all("宽表横向公式不平" in f.description for f in findings)
+
+    def test_long_term_prepaid_5_cols(self):
+        """长期待摊费用 — 5列（无"其他减少"列）也能匹配预设"""
+        note = _note(
+            name="长期待摊费用",
+            title="长期待摊费用",
+            headers=["项目", "期初余额", "本期增加额", "本期摊销额", "期末余额"],
+            rows=[
+                ["装修费", 100, 20, 30, 90],
+                ["合计", 100, 20, 30, 90],
+            ],
+        )
+        result = analyzer.try_build_formula_from_preset(note)
+        assert result is not None
+        # 验证公式结构：只有2个movement列（增加+, 摊销-）
+        cols = result["columns"]
+        movement_cols = [c for c in cols if c["role"] == "movement"]
+        assert len(movement_cols) == 2
+        plus_cols = [c for c in movement_cols if c["sign"] == "+"]
+        minus_cols = [c for c in movement_cols if c["sign"] == "-"]
+        assert len(plus_cols) == 1  # 本期增加额
+        assert len(minus_cols) == 1  # 本期摊销额
+        # 验证公式计算正确: 100 + 20 - 30 = 90
         findings = engine.check_wide_table_formula(note, result)
         assert len(findings) == 0
 
