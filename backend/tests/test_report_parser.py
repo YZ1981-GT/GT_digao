@@ -74,36 +74,43 @@ class TestIdentifyStatementType:
 
     def test_skip_auxiliary_sheet(self, parser):
         """辅助性 Sheet（横纵加、校验等）应返回 None。"""
-        for name in ["横纵加", "校验表", "辅助计算", "增加额", "勾稽"]:
+        for name in ["横纵加", "校验表", "辅助计算", "勾稽"]:
             result = parser._identify_statement_type(name, [])
             assert result is None, f"Sheet '{name}' should be skipped"
 
-    def test_skip_sheet_with_weak_content(self, parser):
-        """Sheet 名称无法识别且内容不含强特征关键词时应跳过。"""
-        cells = [
-            CellData(row=1, col=1, value="项目"),
-            CellData(row=1, col=2, value="增加额"),
-            CellData(row=2, col=1, value="货币资金"),
-        ]
-        result = parser._identify_statement_type("增加额", cells)
-        assert result is None
+    def test_skip_auxiliary_with_statement_keyword(self, parser):
+        """名称同时含报表关键词和辅助关键词时，辅助优先跳过。"""
+        # 国企版常见：利润及利润分配表增加额、资产负债表增加额
+        for name in ["利润及利润分配表增加额", "资产负债表增加额", "现金流量表调整"]:
+            result = parser._identify_statement_type(name, [])
+            assert result is None, f"Sheet '{name}' should be skipped (auxiliary keyword takes priority)"
 
-    def test_content_with_strong_keyword(self, parser):
-        """内容含强特征关键词（完整报表名称）时应正确识别。"""
+    def test_skip_unrecognized_sheet(self, parser):
+        """名称不含报表关键词的 Sheet 一律跳过，不管内容。"""
+        # 即使内容含"资产负债表"，名称不匹配也应跳过
         cells = [
             CellData(row=1, col=1, value="资产负债表"),
             CellData(row=2, col=1, value="货币资金"),
         ]
-        result = parser._identify_statement_type("Sheet1", cells)
-        assert result == StatementType.BALANCE_SHEET
+        for name in ["增加额", "Sheet1", "汇总", "数据"]:
+            result = parser._identify_statement_type(name, cells)
+            assert result is None, f"Sheet '{name}' should be skipped even with BS content"
 
-    def test_identify_by_content(self, parser):
+    def test_formal_sheet_by_name(self, parser):
+        """正式报表 Sheet 通过名称关键词识别。"""
+        assert parser._identify_statement_type("1,2-资产负债表(企财01表)", []) == StatementType.BALANCE_SHEET
+        assert parser._identify_statement_type("利润表(企财02表)", []) == StatementType.INCOME_STATEMENT
+        assert parser._identify_statement_type("现金流量表", []) == StatementType.CASH_FLOW
+        assert parser._identify_statement_type("所有者权益变动表", []) == StatementType.EQUITY_CHANGE
+
+    def test_identify_by_content_ignored(self, parser):
+        """内容检测已移除，名称不匹配时即使内容含关键词也应跳过。"""
         cells = [
             CellData(row=1, col=1, value="现金流量表"),
             CellData(row=2, col=1, value="经营活动"),
         ]
         result = parser._identify_statement_type("Sheet1", cells)
-        assert result == StatementType.CASH_FLOW
+        assert result is None
 
 
 # ─── Sheet 提取测试 ───

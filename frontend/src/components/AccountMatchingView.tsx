@@ -217,6 +217,9 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     // 附注中的科目（如投资收益、资产减值损失）应优先匹配利润表而非资产负债表
     const stmtTypePriority = (t: string) =>
       t === 'income_statement' ? 2 : t === 'cash_flow' ? 1 : 0;
+    // 正式报表 Sheet 名称关键词（优先匹配来自正式报表的科目）
+    const FORMAL_KW = ['资产负债', '利润', '损益', '现金流量', '权益变动'];
+    const isFormal = (name: string) => FORMAL_KW.some(kw => name.includes(kw));
     for (const entry of matching.entries) {
       const item = stmtItemMap.get(entry.statement_item_id);
       if (!item) continue;
@@ -229,6 +232,14 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
           m.set(nid, item);
         } else {
           const existAcct = existing.account_name.replace(/[\s（()）]/g, '');
+          // 正式报表优先：来自正式报表 Sheet 的科目优先于辅助 Sheet
+          const newFormal = isFormal(item.sheet_name);
+          const oldFormal = isFormal(existing.sheet_name);
+          if (newFormal && !oldFormal) {
+            m.set(nid, item);
+            continue;
+          }
+          if (!newFormal && oldFormal) continue;
           // 精确匹配优先：如果新 item 名称与附注科目完全一致，替换
           const newExact = noteAcct === itemAcct;
           const oldExact = noteAcct === existAcct;
@@ -270,19 +281,42 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     };
     const secName = cleanAcctName(sec.title);
     const stmtPri = (t: string) => t === 'income_statement' ? 2 : t === 'cash_flow' ? 1 : 0;
+    // 正式报表 Sheet 名称关键词（优先匹配来自正式报表的科目）
+    const FORMAL_SHEET_KW = ['资产负债', '利润', '损益', '现金流量', '权益变动'];
+    const isFormalSheet = (name: string) => FORMAL_SHEET_KW.some(kw => name.includes(kw));
 
     // ① 最高优先：section 名称与报表科目精确匹配（如"投资收益"→利润表投资收益）
+    // 国企版利润表中"营业收入"/"营业成本"是"其中："子项，需要也能匹配到
     let exactMatch: StatementItem | null = null;
+    let exactMatchSub: StatementItem | null = null;  // 子项的精确匹配（优先级低于非子项）
     for (const si of statementItems) {
-      if (si.is_sub_item) continue;
       const siName = cleanAcctName(si.account_name);
-      if (secName === siName) {
-        if (!exactMatch || stmtPri(si.statement_type) > stmtPri(exactMatch.statement_type)) {
-          exactMatch = si;
+      if (secName !== siName) continue;
+      const target = si.is_sub_item ? 'sub' : 'main';
+      const cur = target === 'sub' ? exactMatchSub : exactMatch;
+      if (!cur) {
+        if (target === 'sub') exactMatchSub = si; else exactMatch = si;
+      } else {
+        // 优先选择来自正式报表 Sheet 的科目
+        const curFormal = isFormalSheet(cur.sheet_name);
+        const newFormal = isFormalSheet(si.sheet_name);
+        if (newFormal && !curFormal) {
+          if (target === 'sub') exactMatchSub = si; else exactMatch = si;
+        } else if (newFormal === curFormal) {
+          if (stmtPri(si.statement_type) > stmtPri(cur.statement_type)) {
+            if (target === 'sub') exactMatchSub = si; else exactMatch = si;
+          } else if (stmtPri(si.statement_type) === stmtPri(cur.statement_type)) {
+            const curHasVal = (cur.closing_balance != null || cur.opening_balance != null);
+            const newHasVal = (si.closing_balance != null || si.opening_balance != null);
+            if (newHasVal && !curHasVal) {
+              if (target === 'sub') exactMatchSub = si; else exactMatch = si;
+            }
+          }
         }
       }
     }
     if (exactMatch) return exactMatch;
+    if (exactMatchSub) return exactMatchSub;
 
     // ② 通过 noteToStmtMap 查找（自身表格 → 子节点表格）
     for (const nid of sec.note_table_ids) {
@@ -303,29 +337,43 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     }
 
     // ③ 包含匹配回退
+    // ③ 包含匹配回退（先找非子项，找不到再找子项）
     let bestMatch: StatementItem | null = null;
     let bestMatchLen = 0;
+    let bestMatchSub: StatementItem | null = null;
+    let bestMatchSubLen = 0;
     for (const si of statementItems) {
-      if (si.is_sub_item) continue;
       const siName = cleanAcctName(si.account_name);
       if (secName.includes(siName) || siName.includes(secName)) {
         const matchLen = siName.length;
-        if (matchLen > bestMatchLen) {
-          bestMatch = si;
-          bestMatchLen = matchLen;
-        } else if (matchLen === bestMatchLen && bestMatch) {
-          if (stmtPri(si.statement_type) > stmtPri(bestMatch.statement_type)) {
-            bestMatch = si;
-          } else if (stmtPri(si.statement_type) === stmtPri(bestMatch.statement_type)) {
-            if (bestMatch.closing_balance == null && bestMatch.opening_balance == null
-              && (si.closing_balance != null || si.opening_balance != null)) {
-              bestMatch = si;
+        const ref = si.is_sub_item ? bestMatchSub : bestMatch;
+        const refLen = si.is_sub_item ? bestMatchSubLen : bestMatchLen;
+        const newFml = isFormalSheet(si.sheet_name);
+        const curFml = ref ? isFormalSheet(ref.sheet_name) : false;
+        let better = false;
+        if (matchLen > refLen) {
+          better = true;
+        } else if (matchLen === refLen && ref) {
+          if (newFml && !curFml) {
+            better = true;
+          } else if (newFml === curFml) {
+            if (stmtPri(si.statement_type) > stmtPri(ref.statement_type)) {
+              better = true;
+            } else if (stmtPri(si.statement_type) === stmtPri(ref.statement_type)) {
+              if (ref.closing_balance == null && ref.opening_balance == null
+                && (si.closing_balance != null || si.opening_balance != null)) {
+                better = true;
+              }
             }
           }
         }
+        if (better) {
+          if (si.is_sub_item) { bestMatchSub = si; bestMatchSubLen = matchLen; }
+          else { bestMatch = si; bestMatchLen = matchLen; }
+        }
       }
     }
-    return bestMatch;
+    return bestMatch || bestMatchSub;
   }, [noteToStmtMap, statementItems]);
 
   // ─── 附注分组：前段 / 主项目注释 / 其他专项披露 / 母公司 / 后段 ───
@@ -380,7 +428,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   }, [noteGroups]);
 
   // 所有 sheets 扁平化（过滤掉辅助性 sheet）
-  const SKIP_SHEET_KW = ['校验', 'custom', '辅助', '参数', '配置', 'config', 'setting', 'template', '横纵加', '勾稽', '目录', '封面', '说明', '备注'];
+  const SKIP_SHEET_KW = ['校验', 'custom', '辅助', '参数', '配置', 'config', 'setting', 'template', '横纵加', '勾稽', '目录', '封面', '说明', '备注', '增加额', '调整'];
   const allSheets = useMemo(() => {
     const result: { fileId: string; sheet: any }[] = [];
     for (const [fileId, sheets] of Object.entries(sheetData)) {
@@ -1376,29 +1424,44 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
 
     if (isCombinedRevenueCost) {
       // 找到营业收入和营业成本两个报表科目
+      // 国企版利润表中"营业收入"/"营业成本"可能是"其中："子项（is_sub_item=true）
+      // 优先找非子项，找不到再找子项
       const revenueItem = statementItems.find(si =>
         !si.is_sub_item && si.account_name === '营业收入'
       ) || statementItems.find(si =>
         !si.is_sub_item && si.account_name.includes('营业收入') && !si.account_name.includes('成本')
+      ) || statementItems.find(si =>
+        si.account_name === '营业收入'
+      ) || statementItems.find(si =>
+        si.account_name.includes('营业收入') && !si.account_name.includes('成本')
       );
       const costItem = statementItems.find(si =>
         !si.is_sub_item && si.account_name === '营业成本'
       ) || statementItems.find(si =>
         !si.is_sub_item && si.account_name.includes('营业成本') && !si.account_name.includes('收入')
+      ) || statementItems.find(si =>
+        si.account_name === '营业成本'
+      ) || statementItems.find(si =>
+        si.account_name.includes('营业成本') && !si.account_name.includes('收入')
       );
       if (revenueItem) entries.push({ si: revenueItem, subHint: '收入', label: '营业收入' });
       if (costItem) entries.push({ si: costItem, subHint: '成本', label: '营业成本' });
-      // 如果都没找到，回退到原始 item
-      if (entries.length === 0) entries.push({ si: item, label: item.account_name });
+      // 如果都没找到，仍然按收入/成本分别提取附注合计（用 item 作为占位）
+      if (entries.length === 0) {
+        entries.push({ si: item, subHint: '收入', label: '营业收入' });
+        entries.push({ si: item, subHint: '成本', label: '营业成本' });
+      }
     } else {
-      // 使用 sheet_name 作为标签；如果 sheet_name 看起来不像正式报表名，回退到报表类型名
+      // 使用报表类型中文名作为标签；仅当 sheet_name 是正式报表名时才用 sheet_name
       const STMT_TYPE_LABELS: Record<string, string> = {
         balance_sheet: '资产负债表',
         income_statement: '利润表',
         cash_flow: '现金流量表',
         equity_change: '所有者权益变动表',
       };
-      const sheetLabel = item.sheet_name || STMT_TYPE_LABELS[item.statement_type] || item.account_name;
+      const FORMAL_SHEET_KW = ['资产负债', '利润', '损益', '现金流量', '权益变动'];
+      const isFormalName = item.sheet_name && FORMAL_SHEET_KW.some(kw => item.sheet_name.includes(kw));
+      const sheetLabel = isFormalName ? item.sheet_name : (STMT_TYPE_LABELS[item.statement_type] || item.account_name);
       entries.push({ si: item, label: mode === 'parent' ? '母公司报表' : sheetLabel });
     }
 

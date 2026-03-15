@@ -42,6 +42,7 @@ class ReportParser(WorkpaperParser):
         "横纵加", "校验", "辅助", "参数", "配置", "勾稽",
         "custom", "config", "setting", "template",
         "目录", "封面", "说明", "备注",
+        "增加额", "调整",
     ]
 
     # 文件分类关键词
@@ -125,6 +126,46 @@ class ReportParser(WorkpaperParser):
                 pdf_result = await self.parse_pdf(file_path)
                 file_type = self.classify_report_file(filename, pdf_result.text)
                 file_classifications[file_id] = file_type
+
+        # ── 去重：同名科目保留来自正式报表 Sheet 的版本 ──
+        # 国企版 Excel 常含辅助 Sheet（增加额、横纵加等），可能产生重复科目
+        FORMAL_SHEET_KW = ["资产负债", "利润", "损益", "现金流量", "权益变动"]
+        def _is_formal_sheet(name: str) -> bool:
+            return any(kw in name for kw in FORMAL_SHEET_KW)
+
+        seen: Dict[str, StatementItem] = {}  # key = (account_name, statement_type)
+        deduped_items: List[StatementItem] = []
+        for item in all_statement_items:
+            key = f"{item.account_name}|{item.statement_type}|{item.is_sub_item}"
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = item
+                deduped_items.append(item)
+            else:
+                # 优先保留来自正式报表 Sheet 的科目
+                new_formal = _is_formal_sheet(item.sheet_name)
+                old_formal = _is_formal_sheet(existing.sheet_name)
+                if new_formal and not old_formal:
+                    # 替换：从 deduped 中移除旧的，加入新的
+                    deduped_items = [x for x in deduped_items if x.id != existing.id]
+                    deduped_items.append(item)
+                    seen[key] = item
+                    logger.info("[parse_report_files] 去重：'%s' 保留 Sheet '%s'，丢弃 Sheet '%s'",
+                                item.account_name, item.sheet_name, existing.sheet_name)
+                elif new_formal == old_formal and (
+                    (existing.closing_balance is None and existing.opening_balance is None)
+                    and (item.closing_balance is not None or item.opening_balance is not None)
+                ):
+                    # 都是正式/非正式时，保留有余额的
+                    deduped_items = [x for x in deduped_items if x.id != existing.id]
+                    deduped_items.append(item)
+                    seen[key] = item
+                # 否则保留已有的（先到先得）
+
+        if len(deduped_items) < len(all_statement_items):
+            logger.info("[parse_report_files] 科目去重：%d → %d",
+                        len(all_statement_items), len(deduped_items))
+        all_statement_items = deduped_items
 
         return ReportReviewSession(
             id=session_id,
@@ -742,6 +783,15 @@ class ReportParser(WorkpaperParser):
         current_parent_id: Optional[str] = None
         in_sub_items = False
 
+        logger.info(
+            "[extract_statement_items] Sheet '%s' type=%s, is_consolidated=%s, "
+            "column_map=%s, headers=%s, rows=%d",
+            sheet_data.sheet_name, sheet_data.statement_type,
+            sheet_data.is_consolidated, sheet_data.column_map,
+            sheet_data.headers[:8] if sheet_data.headers else [],
+            len(sheet_data.raw_data),
+        )
+
         for row_idx, row in enumerate(sheet_data.raw_data):
             if not row or all(v is None for v in row):
                 continue
@@ -798,6 +848,19 @@ class ReportParser(WorkpaperParser):
                 parse_warnings=warnings,
             )
             items.append(item)
+
+            # 前10个科目输出详细日志，帮助排查金额提取问题
+            if len(items) <= 10:
+                logger.info(
+                    "[extract_statement_items]   #%d '%s': closing=%s, opening=%s, "
+                    "co_closing=%s, co_opening=%s, row_data=%s, warnings=%s",
+                    len(items), account_name.strip(),
+                    closing_balance, opening_balance,
+                    company_closing if sheet_data.is_consolidated else '-',
+                    company_opening if sheet_data.is_consolidated else '-',
+                    [v for v in row[:8] if v is not None],
+                    warnings,
+                )
 
             # 非其中项时更新当前父科目
             if not is_sub:
@@ -1025,48 +1088,32 @@ class ReportParser(WorkpaperParser):
     # ─── Private helpers ───
 
     def _identify_statement_type(self, sheet_name: str, cells) -> Optional[StatementType]:
-        """根据 Sheet 名称和内容识别报表类型。
+        """根据 Sheet 名称识别报表类型。
+
+        仅通过 Sheet 名称关键词匹配，不做内容回退。
+        正式财务报表的 Sheet 名称一定包含"资产负债"、"利润"、"现金流量"等关键词；
+        辅助 Sheet（增加额、横纵加、校验等）即使内容中含有报表数据也应跳过。
 
         Returns:
-            StatementType 或 None（辅助性 Sheet 应跳过）
+            StatementType 或 None（非正式报表 Sheet 应跳过）
         """
-        name_lower = sheet_name.lower()
         name_clean = re.sub(r'\s+', '', sheet_name)
 
         # 先检查是否为辅助性 Sheet（应跳过）
         for kw in self.SKIP_SHEET_KEYWORDS:
-            if kw in name_clean or kw.lower() in name_lower:
+            if kw in name_clean or kw.lower() in sheet_name.lower():
                 logger.info("[_identify_statement_type] Skipping auxiliary sheet: %s (matched '%s')", sheet_name, kw)
                 return None
 
-        # 按 Sheet 名称匹配报表类型
+        # 仅按 Sheet 名称匹配报表类型
+        name_lower = sheet_name.lower()
         for st_type, keywords in self.STATEMENT_TYPE_KEYWORDS.items():
             for kw in keywords:
                 if kw.lower() in name_lower:
                     return st_type
 
-        # Sheet 名称无法识别时，从内容中识别（取前几行文本）
-        # 要求内容中包含明确的报表标题关键词（如"资产负债表"、"利润表"等）
-        content_text = ""
-        for cell in cells[:50]:
-            if cell.value and isinstance(cell.value, str):
-                content_text += cell.value + " "
-
-        content_lower = content_text.lower()
-        # 仅使用强特征关键词（完整报表名称），避免弱关键词（如"利润"）误匹配辅助 Sheet
-        STRONG_CONTENT_KEYWORDS: Dict[StatementType, List[str]] = {
-            StatementType.BALANCE_SHEET: ["资产负债表", "balance sheet"],
-            StatementType.INCOME_STATEMENT: ["利润表", "损益表", "income statement"],
-            StatementType.CASH_FLOW: ["现金流量表", "cash flow statement"],
-            StatementType.EQUITY_CHANGE: ["所有者权益变动表", "股东权益变动表"],
-        }
-        for st_type, keywords in STRONG_CONTENT_KEYWORDS.items():
-            for kw in keywords:
-                if kw.lower() in content_lower:
-                    return st_type
-
-        # 名称和内容都无法识别 → 跳过（不再默认归类为资产负债表）
-        logger.info("[_identify_statement_type] Skipping unrecognized sheet: %s (no statement type keywords found)", sheet_name)
+        # 名称无法识别 → 跳过
+        logger.info("[_identify_statement_type] Skipping unrecognized sheet: %s", sheet_name)
         return None
 
     @staticmethod

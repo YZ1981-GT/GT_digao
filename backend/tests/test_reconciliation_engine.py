@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from backend.app.models.audit_schemas import (
+from app.models.audit_schemas import (
     FindingConfirmationStatus,
     MatchingEntry,
     MatchingMap,

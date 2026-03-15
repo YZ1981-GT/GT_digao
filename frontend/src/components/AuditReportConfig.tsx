@@ -29,6 +29,7 @@ type PhaseKey = typeof REVIEW_PHASES[number]['key'];
 const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }) => {
   const [customPrompt, setCustomPrompt] = useState('');
   const [threshold, setThreshold] = useState(30);
+  const [amountThreshold, setAmountThreshold] = useState(0);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
@@ -69,6 +70,7 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
           template_type: templateType,
           custom_prompt: customPrompt || undefined,
           change_threshold: threshold / 100,
+          change_amount_threshold: amountThreshold * 10000,  // 前端输入万元，后端用元
         }),
       });
       if (!resp.ok) throw new Error(await resp.text());
@@ -127,7 +129,7 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
     } finally {
       setStarting(false);
     }
-  }, [sessionId, templateType, customPrompt, threshold, onStart]);
+  }, [sessionId, templateType, customPrompt, threshold, amountThreshold, onStart]);
 
   return (
     <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
@@ -185,6 +187,33 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
         </div>
         <p style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
           超过此阈值的科目变动将触发异常分析（默认30%）
+        </p>
+      </div>
+
+      {/* Amount Threshold */}
+      <div style={{ marginBottom: 'var(--gt-space-4)' }}>
+        <label style={{ fontSize: 14, fontWeight: 600, display: 'block', marginBottom: 8 }}>
+          金额阈值：{amountThreshold > 0 ? `${amountThreshold}万元` : '不限'}
+        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--gt-space-3)' }}>
+          <input
+            type="range"
+            min={0} max={1000} step={10} value={amountThreshold}
+            onChange={e => setAmountThreshold(Number(e.target.value))}
+            style={{ flex: 1 }}
+            aria-label="金额阈值滑块"
+          />
+          <input
+            type="number"
+            min={0} max={100000} step={10} value={amountThreshold}
+            onChange={e => setAmountThreshold(Math.max(0, Number(e.target.value)))}
+            style={{ width: 80, padding: 4, border: '1px solid #ddd', borderRadius: 4, textAlign: 'center' }}
+            aria-label="金额阈值数值"
+          />
+          <span style={{ fontSize: 13, color: '#666' }}>万元</span>
+        </div>
+        <p style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
+          变动金额低于此值的科目不报异常，用于过滤基数小但变动比率大的情况（0=不限）
         </p>
       </div>
 

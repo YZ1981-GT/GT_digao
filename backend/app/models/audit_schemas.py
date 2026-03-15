@@ -714,6 +714,7 @@ class ReportReviewConfig(BaseModel):
     prompt_id: Optional[str] = Field(None, description="选择的提示词ID")
     custom_prompt: Optional[str] = Field(None, description="自定义复核要求")
     change_threshold: float = Field(0.3, description="变动阈值，默认30%")
+    change_amount_threshold: float = Field(0, description="变动金额阈值（元），变动金额低于此值不报异常，默认0（不过滤）")
 
 
 class ReportReviewResult(BaseModel):

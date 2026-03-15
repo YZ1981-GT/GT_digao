@@ -616,7 +616,7 @@ class ReportReviewEngine:
 
         # 变动分析：1级报表科目 + 2级附注明细行
         changes = self.calculate_changes(session.statement_items)
-        abnormal = self.flag_abnormal_changes(changes, config.change_threshold)
+        abnormal = self.flag_abnormal_changes(changes, config.change_threshold, config.change_amount_threshold)
         threshold_pct = int(config.change_threshold * 100)
 
         # 排除不需要变动分析的科目
@@ -723,6 +723,9 @@ class ReportReviewEngine:
                     change_pct_val = (change_amt / abs(opening_v)) if abs(opening_v) > 0.01 else None
 
                     if change_pct_val is not None and abs(change_pct_val) > config.change_threshold:
+                        # 金额阈值过滤：变动金额低于阈值时跳过
+                        if config.change_amount_threshold > 0 and abs(change_amt) < config.change_amount_threshold:
+                            continue
                         detail_abnormal_count += 1
                         detail_rows_found = True
                         pct_str = f"{change_pct_val * 100:.1f}%"
@@ -1227,12 +1230,21 @@ class ReportReviewEngine:
         return changes
 
     def flag_abnormal_changes(
-        self, changes: List[ChangeAnalysis], threshold: float = 0.3
+        self, changes: List[ChangeAnalysis], threshold: float = 0.3,
+        amount_threshold: float = 0,
     ) -> List[ChangeAnalysis]:
-        """标记超阈值科目，返回超阈值的 ChangeAnalysis 列表。"""
+        """标记超阈值科目，返回超阈值的 ChangeAnalysis 列表。
+
+        Args:
+            threshold: 变动比率阈值（如 0.3 = 30%）
+            amount_threshold: 变动金额阈值（元），变动金额低于此值不报异常
+        """
         abnormal = []
         for c in changes:
             if c.change_percentage is not None and abs(c.change_percentage) > threshold:
+                # 金额阈值过滤：变动金额低于阈值时跳过
+                if amount_threshold > 0 and c.change_amount is not None and abs(c.change_amount) < amount_threshold:
+                    continue
                 c.exceeds_threshold = True
                 abnormal.append(c)
         return abnormal
