@@ -1207,28 +1207,6 @@ class ReportReviewEngine:
             logger.info("去重：%d 个 finding 去重后剩余 %d 个", len(all_findings), len(deduped_findings))
         all_findings = deduped_findings
 
-        # ── 金额阈值过滤：差异金额低于阈值的数据校验 finding 不输出 ──
-        # 适用于 AMOUNT_INCONSISTENCY 和 RECONCILIATION_ERROR 类别
-        _amt_threshold = config.change_amount_threshold
-        if _amt_threshold > 0:
-            _filter_categories = (
-                ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
-                ReportReviewFindingCategory.RECONCILIATION_ERROR,
-            )
-            before_count = len(all_findings)
-            all_findings = [
-                f for f in all_findings
-                if f.category not in _filter_categories
-                or f.difference is None
-                or abs(f.difference) >= _amt_threshold
-            ]
-            filtered_count = before_count - len(all_findings)
-            if filtered_count > 0:
-                logger.info(
-                    "金额阈值过滤：阈值 %.2f 元（%.2f 万元），过滤 %d 个差异金额低于阈值的数据校验 finding",
-                    _amt_threshold, _amt_threshold / 10000, filtered_count,
-                )
-
         # 确保所有 Finding 为 pending_confirmation
         for f in all_findings:
             f.confirmation_status = FindingConfirmationStatus.PENDING_CONFIRMATION
