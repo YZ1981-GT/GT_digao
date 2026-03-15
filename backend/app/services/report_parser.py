@@ -37,6 +37,13 @@ class ReportParser(WorkpaperParser):
         StatementType.EQUITY_CHANGE: ["所有者权益变动", "权益变动", "equity", "股东权益变动"],
     }
 
+    # 辅助性 Sheet 名称关键词 — 这些 Sheet 不是正式报表，应跳过科目提取
+    SKIP_SHEET_KEYWORDS: List[str] = [
+        "横纵加", "校验", "辅助", "参数", "配置", "勾稽",
+        "custom", "config", "setting", "template",
+        "目录", "封面", "说明", "备注",
+    ]
+
     # 文件分类关键词
     FILE_CLASSIFY_KEYWORDS: Dict[ReportFileType, List[str]] = {
         ReportFileType.AUDIT_REPORT_BODY: ["审计报告", "审计意见", "独立审计"],
@@ -199,6 +206,11 @@ class ReportParser(WorkpaperParser):
         for sheet_data in excel_result.sheets:
             sheet_name = sheet_data.name
             statement_type = self._identify_statement_type(sheet_name, sheet_data.cells)
+
+            # 跳过辅助性 Sheet
+            if statement_type is None:
+                logger.info("[extract_sheets] Skipping auxiliary sheet: %s", sheet_name)
+                continue
 
             # 按行组织单元格数据
             rows_map: Dict[int, List[Tuple[int, Any]]] = {}
@@ -1012,9 +1024,20 @@ class ReportParser(WorkpaperParser):
 
     # ─── Private helpers ───
 
-    def _identify_statement_type(self, sheet_name: str, cells) -> StatementType:
-        """根据 Sheet 名称和内容识别报表类型。"""
+    def _identify_statement_type(self, sheet_name: str, cells) -> Optional[StatementType]:
+        """根据 Sheet 名称和内容识别报表类型。
+
+        Returns:
+            StatementType 或 None（辅助性 Sheet 应跳过）
+        """
         name_lower = sheet_name.lower()
+        name_clean = re.sub(r'\s+', '', sheet_name)
+
+        # 先检查是否为辅助性 Sheet（应跳过）
+        for kw in self.SKIP_SHEET_KEYWORDS:
+            if kw in name_clean or kw.lower() in name_lower:
+                logger.info("[_identify_statement_type] Skipping auxiliary sheet: %s (matched '%s')", sheet_name, kw)
+                return None
 
         for st_type, keywords in self.STATEMENT_TYPE_KEYWORDS.items():
             for kw in keywords:

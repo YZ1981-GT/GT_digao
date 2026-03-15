@@ -671,7 +671,8 @@ class TableStructureAnalyzer:
 
         条件：
         1. 列数 ≥ 6（含标签列）
-        2. 已有 has_balance_formula=True 的结构识别，或科目名称匹配宽表关键词
+        2. 科目名称匹配宽表关键词
+        3. 表头中同时含有期初/期末类关键词和变动类关键词（排除分类表/余额对照表）
         """
         if not note_table.headers or len(note_table.headers) < 6:
             return False
@@ -679,15 +680,52 @@ class TableStructureAnalyzer:
         # 但如果列数很多（≥8），常规公式可能遗漏中间列，仍需宽表分析
         if table_structure and table_structure.has_balance_formula and len(note_table.headers) < 8:
             return False
+
+        headers_text = " ".join(str(h) for h in note_table.headers)
+        # 表头中是否含期初/期末类关键词
+        _balance_kw = ["期初", "年初", "期末", "年末"]
+        has_balance = any(k in headers_text for k in _balance_kw)
+        # 表头中是否含变动类关键词（增加/减少/计提/转回等）
+        # 逐列检查，排除百分比/比例列（如"计提比例(%)"含"计提"但不是变动列）
+        _movement_kw = ["增加", "减少", "增减", "变动", "摊销", "折旧",
+                        "转入", "转出", "计提", "转回", "转销", "处置",
+                        "追加", "投资损益", "综合收益", "权益变动"]
+        _pct_kw = ["比例", "%", "比率", "占比"]
+        movement_col_count = 0
+        for h in note_table.headers:
+            h_str = str(h or "")
+            if any(pk in h_str for pk in _pct_kw):
+                continue  # 跳过百分比列
+            if any(mk in h_str for mk in _movement_kw):
+                movement_col_count += 1
+        has_movement = movement_col_count >= 1
+        # 通用检测（无关键词匹配）需要至少2个变动列才算宽表
+        has_strong_movement = movement_col_count >= 2
+
         combined = (note_table.account_name or "") + (note_table.section_title or "")
+        title = note_table.section_title or ""
+        # 分类表/账龄表标题关键词 → 排除宽表候选
+        _classification_kw = ["按组合", "按单项", "分类", "组合方法", "账龄", "逾期"]
+        is_classification = any(ck in title for ck in _classification_kw)
+
         for kw in TableStructureAnalyzer.WIDE_TABLE_ACCOUNT_KEYWORDS:
             if kw in combined:
-                return True
-        # 通用检测：含"期初"和"期末"且列数 ≥ 8
-        headers_text = " ".join(str(h) for h in note_table.headers)
+                if is_classification:
+                    continue  # 分类表不是宽表
+                # 关键词匹配后，还需验证表头确实含有变动结构
+                # 排除余额对照表
+                if has_balance and has_movement:
+                    return True
+                # 列数 ≥ 8 且至少有变动关键词（可能表头用"本期"代替"期初"）
+                if has_movement and len(note_table.headers) >= 8:
+                    return True
+                # 不满足变动结构条件 → 不是宽表
+                continue
+
+        # 通用检测：含"期初"和"期末"且列数 ≥ 8 且有足够变动列
         has_opening = any(k in headers_text for k in ["期初", "年初"])
         has_closing = any(k in headers_text for k in ["期末", "年末"])
-        if has_opening and has_closing and len(note_table.headers) >= 8:
+        if has_opening and has_closing and has_strong_movement and len(note_table.headers) >= 8:
             return True
         return False
 

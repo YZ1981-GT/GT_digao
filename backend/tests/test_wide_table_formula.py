@@ -116,6 +116,26 @@ class TestIsWideTableCandidate:
         )
         assert not analyzer.is_wide_table_candidate(note)
 
+    def test_classification_table_not_wide(self):
+        """分类表（如按组合计提坏账准备）不应被识别为宽表"""
+        note = _note(
+            name="其他应收款",
+            title="采用其他组合方法计提坏账准备的其他应收款",
+            headers=["组合名称", "账面余额", "坏账准备", "计提比例(%)",
+                     "期初金额", "本期计提金额", "计提比例(%)", "期末金额"],
+        )
+        assert not analyzer.is_wide_table_candidate(note)
+
+    def test_bad_debt_provision_table_not_wide(self):
+        """坏账准备余额对照表（无变动列）不应被识别为宽表"""
+        note = _note(
+            name="应收账款",
+            title="坏账准备",
+            headers=["类别", "期末账面余额", "期末坏账准备", "期初账面余额",
+                     "期初坏账准备", "计提比例(%)", "账面价值"],
+        )
+        assert not analyzer.is_wide_table_candidate(note)
+
 
 # ─── _find_preset_for_note 测试 ───
 

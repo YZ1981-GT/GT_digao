@@ -41,6 +41,7 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
   interface PhaseResult {
     message: string;
     findingsCount: number;
+    changeFindingsCount?: number;
     details: string[];
   }
 
@@ -96,6 +97,7 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
                 [phase]: {
                   message: parsed.message || '',
                   findingsCount: parsed.findings_count ?? 0,
+                  changeFindingsCount: parsed.change_findings_count,
                   details: parsed.details || [],
                 },
               }));
@@ -284,7 +286,9 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
                         color: result.findingsCount > 0 ? 'var(--gt-danger, #e53935)' : 'var(--gt-success, green)',
                         fontWeight: 600,
                       }}>
-                        {result.findingsCount > 0 ? `发现 ${result.findingsCount} 个问题` : '未发现问题'}
+                        {result.findingsCount > 0
+                          ? `发现 ${result.findingsCount} 个问题` + (result.changeFindingsCount ? `，变动提示 ${result.changeFindingsCount} 个` : '')
+                          : (result.changeFindingsCount ? `变动提示 ${result.changeFindingsCount} 个` : '未发现问题')}
                       </span>
                     )}
                     {isCurrent && (

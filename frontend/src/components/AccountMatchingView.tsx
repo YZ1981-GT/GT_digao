@@ -380,7 +380,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   }, [noteGroups]);
 
   // 所有 sheets 扁平化（过滤掉辅助性 sheet）
-  const SKIP_SHEET_KW = ['校验', 'custom', '辅助', '参数', '配置', 'config', 'setting', 'template'];
+  const SKIP_SHEET_KW = ['校验', 'custom', '辅助', '参数', '配置', 'config', 'setting', 'template', '横纵加', '勾稽', '目录', '封面', '说明', '备注'];
   const allSheets = useMemo(() => {
     const result: { fileId: string; sheet: any }[] = [];
     for (const [fileId, sheets] of Object.entries(sheetData)) {
@@ -1391,7 +1391,15 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       // 如果都没找到，回退到原始 item
       if (entries.length === 0) entries.push({ si: item, label: item.account_name });
     } else {
-      entries.push({ si: item, label: mode === 'parent' ? '母公司报表' : item.sheet_name });
+      // 使用 sheet_name 作为标签；如果 sheet_name 看起来不像正式报表名，回退到报表类型名
+      const STMT_TYPE_LABELS: Record<string, string> = {
+        balance_sheet: '资产负债表',
+        income_statement: '利润表',
+        cash_flow: '现金流量表',
+        equity_change: '所有者权益变动表',
+      };
+      const sheetLabel = item.sheet_name || STMT_TYPE_LABELS[item.statement_type] || item.account_name;
+      entries.push({ si: item, label: mode === 'parent' ? '母公司报表' : sheetLabel });
     }
 
     // 渲染单个科目的报表金额行 + 勾稽校验行

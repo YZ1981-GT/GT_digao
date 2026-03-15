@@ -622,15 +622,48 @@ class ReportReviewEngine:
         # 排除不需要变动分析的科目
         # 1. 未分配利润等权益类科目（变动由利润表决定，不属于异常变动）
         # 2. 所有者权益变动表的结构行（如"一、上年年末余额"等）
+        # 3. 利润表中由其他科目计算得出的汇总行（如营业利润、利润总额、净利润等）
+        #    只要直接科目的变动有合理解释，汇总行的变动自然可解释
         CHANGE_EXCLUDE_KEYWORDS = [
             "未分配利润", "盈余公积", "实收资本", "股本",
             "上年年末余额", "本年年初余额", "本年增减变动", "本年年末余额",
             "年初余额", "年末余额", "期初余额", "期末余额",
             "本期增减", "本期变动", "综合收益总额",
         ]
+        # 利润表汇总行（由其他直接科目加减计算得出）
+        COMPUTED_ROW_NAMES = [
+            "营业利润", "利润总额", "净利润",
+            "归属于母公司所有者的净利润", "归属于母公司股东的净利润",
+            "少数股东损益",
+            "归属于母公司所有者的综合收益总额", "归属于母公司股东的综合收益总额",
+            "归属于少数股东的综合收益总额",
+            # 利润表拆分项（由净利润拆分，非独立科目）
+            "持续经营净利润", "终止经营净利润",
+            # 资产负债表汇总行
+            "流动资产合计", "非流动资产合计", "资产总计", "资产合计",
+            "流动负债合计", "非流动负债合计", "负债合计",
+            "所有者权益合计", "股东权益合计",
+            "负债和所有者权益总计", "负债和股东权益总计",
+            "归属于母公司所有者权益合计", "归属于母公司股东权益合计",
+            # 现金流量表汇总行/小计行
+            "经营活动现金流入小计", "经营活动现金流出小计", "经营活动产生的现金流量净额",
+            "投资活动现金流入小计", "投资活动现金流出小计", "投资活动产生的现金流量净额",
+            "筹资活动现金流入小计", "筹资活动现金流出小计", "筹资活动产生的现金流量净额",
+            "现金及现金等价物净增加额", "期末现金及现金等价物余额", "期初现金及现金等价物余额",
+            "汇率变动对现金及现金等价物的影响",
+        ]
+        def _is_computed_row(name: str) -> bool:
+            """判断是否为计算得出的汇总行，兼容带序号前缀（如'1.持续经营净利润'）。"""
+            # 去掉数字序号前缀：1. 2. (1) (2) 等
+            import re
+            cleaned = re.sub(r'^[\d]+[.、]\s*', '', name)
+            cleaned = re.sub(r'^[（(][\d]+[）)]\s*', '', cleaned)
+            return any(cleaned.startswith(cn) for cn in COMPUTED_ROW_NAMES)
+
         abnormal = [
             chg for chg in abnormal
             if not any(kw in chg.account_name for kw in CHANGE_EXCLUDE_KEYWORDS)
+            and not _is_computed_row(chg.account_name)
         ]
 
         # 构建 account_name → note_table_ids 映射
@@ -744,7 +777,8 @@ class ReportReviewEngine:
 
         all_findings.extend(change_findings)
 
-        recon_finding_count = len(all_findings)
+        change_finding_count = len(change_findings)
+        recon_finding_count = len(all_findings) - change_finding_count
 
         # 统计报表中有数据的科目数（排除余额为0的科目）
         items_with_data = sum(
@@ -809,8 +843,9 @@ class ReportReviewEngine:
 
         yield json.dumps({
             "status": "phase_complete", "phase": "reconciliation",
-            "message": f"数值校验完成，发现 {recon_finding_count} 个问题",
+            "message": f"数值校验完成，发现 {recon_finding_count} 个问题" + (f"，变动提示 {change_finding_count} 个" if change_finding_count > 0 else ""),
             "findings_count": recon_finding_count,
+            "change_findings_count": change_finding_count,
             "details": recon_details,
         }, ensure_ascii=False)
         await asyncio.sleep(0)
@@ -841,7 +876,7 @@ class ReportReviewEngine:
             except Exception as e:
                 logger.warning("正文复核失败: %s", e)
 
-        body_finding_count = len(all_findings) - recon_finding_count
+        body_finding_count = len(all_findings) - recon_finding_count - change_finding_count
         body_details = []
         body_content_len = len(report_body) if isinstance(report_body, str) else 0
         if body_content_len > 0:
@@ -957,7 +992,7 @@ class ReportReviewEngine:
             logger.warning("附注内容复核失败: %s", e)
 
         pre_text_count = len(all_findings)
-        note_finding_count = pre_text_count - recon_finding_count - body_finding_count
+        note_finding_count = pre_text_count - recon_finding_count - change_finding_count - body_finding_count
         note_details = []
         if total_sections > 0:
             report_item_count = sum(1 for s in sections if s.section_type == "report_item_note")
