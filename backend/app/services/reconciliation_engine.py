@@ -344,23 +344,35 @@ class ReconciliationEngine:
 
         # 收集目标段落内的数据行（用于没有"小计"行时的兜底）
         target_data_rows: List[list] = []
+        # 保存目标段落的标题行（带序号的行，如"一、递延所得税资产"），
+        # 当段落内没有"小计"行时，标题行本身可能就包含小计值
+        target_section_header_row: Optional[list] = None
         found_subtotal = False
 
         for row in note.rows:
             first = str(row[0] if row else "").replace(" ", "").replace("\u3000", "").strip()
 
-            # 检测段落标题行（包含段落关键词的行，如"递延所得税负债："）
+            # 检测段落标题行（包含段落关键词的行，如"递延所得税负债："或"一、递延所得税资产"）
             # 注意：如果行同时包含所有标记词（如"递延所得税资产和递延所得税负债"），
-            # 则是表格标题行而非段落标题行，应跳过
+            # 则是表格标题行而非段落标题行，应跳过。
+            # 段落标题行的特征：去掉序号后，剩余部分应精确等于标记词（可带冒号/标点后缀）
+            # 不应匹配：包含标记词但有额外内容的行（如"递延所得税资产净额"、"减：递延所得税资产抵销"）
             is_section_header = False
             markers = ReconciliationEngine._COMBINED_SUBTOTAL_TABLE_MARKERS
             matched_markers = [kw for kw in markers if kw in first]
             if matched_markers and len(matched_markers) < len(markers):
-                # 只匹配了部分标记词 → 是段落标题行
-                is_section_header = True
-                in_target = any(skw in first for skw in section_keywords)
-                if in_target:
-                    target_data_rows = []  # 重置，开始新段落
+                import re as _re_sec
+                # 去掉中文序号前缀（如"一、"）
+                _stripped = _re_sec.sub(r'^[一二三四五六七八九十]+[、.]\s*', '', first)
+                # 去掉尾部标点（冒号等）
+                _stripped_clean = _stripped.rstrip('：:')
+                # 精确匹配：去掉序号和尾部标点后，必须等于某个标记词
+                if any(_stripped_clean == kw for kw in matched_markers):
+                    is_section_header = True
+                    in_target = any(skw in first for skw in section_keywords)
+                    if in_target:
+                        target_data_rows = []  # 重置，开始新段落
+                        target_section_header_row = row  # 保存标题行
 
             if is_section_header:
                 continue
@@ -398,18 +410,28 @@ class ReconciliationEngine:
                 # 收集数据行（用于兜底）
                 target_data_rows.append(row)
 
-        # 兜底：段落内没有"小计"/"合计"行，但只有一行数据 → 直接取该行的值
-        # 例如：递延所得税资产段只有一个明细项，没有小计行
-        if not found_subtotal and len(target_data_rows) == 1:
-            row = target_data_rows[0]
-            if hdr_closing_idx > 0 and hdr_closing_idx < len(row):
-                v = _safe_float(row[hdr_closing_idx])
-                if v is not None:
-                    closing_val = v
-            if hdr_opening_idx > 0 and hdr_opening_idx < len(row):
-                v = _safe_float(row[hdr_opening_idx])
-                if v is not None:
-                    opening_val = v
+        # 兜底：段落内没有"小计"/"合计"行时的回退策略
+        if not found_subtotal:
+            # 优先：段落标题行本身带有数值（如"一、递延所得税资产 | xxx | 7000"）
+            # 这种情况下标题行就是小计行
+            fallback_row = None
+            if target_section_header_row is not None:
+                has_num = any(_safe_float(c) is not None for c in target_section_header_row[1:])
+                if has_num:
+                    fallback_row = target_section_header_row
+            # 其次：段落内只有一行数据 → 直接取该行的值
+            if fallback_row is None and len(target_data_rows) == 1:
+                fallback_row = target_data_rows[0]
+
+            if fallback_row is not None:
+                if hdr_closing_idx > 0 and hdr_closing_idx < len(fallback_row):
+                    v = _safe_float(fallback_row[hdr_closing_idx])
+                    if v is not None:
+                        closing_val = v
+                if hdr_opening_idx > 0 and hdr_opening_idx < len(fallback_row):
+                    v = _safe_float(fallback_row[hdr_opening_idx])
+                    if v is not None:
+                        opening_val = v
 
         return (closing_val, opening_val)
 

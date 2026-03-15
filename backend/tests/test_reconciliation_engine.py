@@ -1047,6 +1047,34 @@ class TestAmountConsistency:
         assert len(closing_f) == 1
         assert abs(closing_f[0].difference - (50000000.00 - 40120854.15)) < 0.01
 
+    def test_soe_deferred_tax_section_header_as_subtotal(self):
+        """递延所得税合并表无小计行时，用段落标题行（带序号）的值作为小计。"""
+        note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="递延所得税资产和递延所得税负债相互抵销后净额",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["一、递延所得税资产", 50000, 7000, 40000, 5000],
+                ["减：递延所得税资产抵销", 10000, 2000, 8000, 1000],
+                ["递延所得税资产净额", 40000, 5000, 32000, 4000],
+                ["二、递延所得税负债", 30000, 3000, 20000, 2000],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        item = _item(name="递延所得税资产", closing=7000, opening=5000)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        assert len(findings) == 0, (
+            f"段落标题行应作为小计行: {[f.description for f in findings]}"
+        )
+
 
 # ─── 科目匹配评分 ───
 
