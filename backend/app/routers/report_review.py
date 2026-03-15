@@ -61,6 +61,7 @@ class StartReviewRequest(BaseModel):
     prompt_id: Optional[str] = None
     custom_prompt: Optional[str] = None
     change_threshold: float = 0.3
+    change_amount_threshold: float = 0
 
 class EditFindingRequest(BaseModel):
     description: Optional[str] = None
@@ -376,6 +377,7 @@ async def start_review(req: StartReviewRequest):
         prompt_id=req.prompt_id,
         custom_prompt=req.custom_prompt,
         change_threshold=req.change_threshold,
+        change_amount_threshold=req.change_amount_threshold,
     )
 
     async def event_stream():
