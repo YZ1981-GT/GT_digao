@@ -4200,3 +4200,175 @@ class TestBalanceLabelRowExtraction:
         closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
         assert closing == 60000.0
         assert opening == 50000.0
+
+
+class TestCombinedSubtotalFallback:
+    """测试合并小计表格在没有"小计"行时的兜底提取。"""
+
+    def test_single_data_row_no_subtotal(self):
+        """段落内只有一行数据没有小计行时，应直接取该行的值。"""
+        note = NoteTable(
+            id="dt_fb1",
+            account_name="递延所得税资产和递延所得税负债",
+            section_title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["资产减值准备", 1080.10, 405.06, 1965.10, 491.30],
+                # 没有"小计"行
+                ["递延所得税负债:", None, None, None, None],
+                ["资产评估增值", 163431416.60, 40120854.15, 8265217.92, 2066304.48],
+                # 没有"小计"行
+            ],
+        )
+        # 递延所得税资产段只有一行数据，应直接取该行
+        c, o = ReconciliationEngine._extract_combined_subtotal(
+            note, ["递延所得税资产"],
+        )
+        assert c == 405.06
+        assert o == 491.30
+
+        # 递延所得税负债段也只有一行数据
+        c2, o2 = ReconciliationEngine._extract_combined_subtotal(
+            note, ["递延所得税负债"],
+        )
+        assert c2 == 40120854.15
+        assert o2 == 2066304.48
+
+    def test_multiple_data_rows_no_subtotal_returns_none(self):
+        """段落内有多行数据但没有小计行时，不应猜测，返回 None。"""
+        note = NoteTable(
+            id="dt_fb2",
+            account_name="递延所得税资产和递延所得税负债",
+            section_title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["资产减值准备", 1080.10, 405.06, 1965.10, 491.30],
+                ["应收账款坏账", 500.00, 125.00, 600.00, 150.00],
+                # 没有"小计"行，有多行数据
+                ["递延所得税负债:", None, None, None, None],
+                ["资产评估增值", 163431416.60, 40120854.15, 8265217.92, 2066304.48],
+            ],
+        )
+        # 递延所得税资产段有2行数据没有小计 → 不应猜测
+        c, o = ReconciliationEngine._extract_combined_subtotal(
+            note, ["递延所得税资产"],
+        )
+        assert c is None
+        assert o is None
+
+    def test_with_subtotal_still_works(self):
+        """有小计行时，仍然优先使用小计行（回归测试）。"""
+        note = NoteTable(
+            id="dt_fb3",
+            account_name="递延所得税资产和递延所得税负债",
+            section_title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["资产减值准备", 1080.10, 405.06, 1965.10, 491.30],
+                ["应收账款坏账", 500.00, 125.00, 600.00, 150.00],
+                ["小计", 1580.10, 530.06, 2565.10, 641.30],
+                ["递延所得税负债:", None, None, None, None],
+                ["资产评估增值", 163431416.60, 40120854.15, 8265217.92, 2066304.48],
+                ["小计", 163431416.60, 40120854.15, 8265217.92, 2066304.48],
+            ],
+        )
+        c, o = ReconciliationEngine._extract_combined_subtotal(
+            note, ["递延所得税资产"],
+        )
+        assert c == 530.06
+        assert o == 641.30
+
+
+class TestMultiSectionMovementTable:
+    """测试多段变动表（原价→累计折旧→账面价值）的正确提取。"""
+
+    def test_right_of_use_asset_multi_section_extracts_book_value(self):
+        """使用权资产合并变动表：应提取账面价值段的值，而非原价段或累计折旧段的合计。"""
+        note = NoteTable(
+            id="rou1", account_name="使用权资产", section_title="使用权资产",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["一、账面原值", None, None, None, None],
+                ["房屋", 500000, 100000, 0, 600000],
+                ["设备", 300000, 50000, 20000, 330000],
+                ["合计", 800000, 150000, 20000, 930000],
+                ["二、累计折旧", None, None, None, None],
+                ["房屋", 100000, 50000, 0, 150000],
+                ["设备", 60000, 30000, 5000, 85000],
+                ["合计", 160000, 80000, 5000, 235000],
+                ["三、减值准备", None, None, None, None],
+                ["合计", 0, 0, 0, 0],
+                ["四、账面价值", None, None, None, None],
+                ["期末账面价值", None, None, None, 695000],
+                ["期初账面价值", None, None, None, 640000],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        # 应提取账面价值段的值（695000/640000），而非原价段的合计（930000/800000）
+        assert closing == 695000.0, f"Expected 695000, got {closing}"
+        assert opening == 640000.0, f"Expected 640000, got {opening}"
+
+    def test_fixed_asset_multi_section_extracts_book_value_row(self):
+        """固定资产合并变动表：最后一个"合计"在减值准备段，应跳过策略1，用策略2提取账面价值。"""
+        note = NoteTable(
+            id="fa_ms1", account_name="固定资产", section_title="固定资产",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["一、账面原值", None, None, None, None],
+                ["房屋", 1000000, 200000, 0, 1200000],
+                ["合计", 1000000, 200000, 0, 1200000],
+                ["二、累计折旧", None, None, None, None],
+                ["房屋", 200000, 100000, 0, 300000],
+                ["合计", 200000, 100000, 0, 300000],
+                ["三、减值准备", None, None, None, None],
+                ["合计", 0, 0, 0, 0],
+                ["四、账面价值", None, None, None, None],
+                ["期末账面价值", None, None, None, 900000],
+                ["期初账面价值", None, None, None, 800000],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 900000.0, f"Expected 900000, got {closing}"
+        assert opening == 800000.0, f"Expected 800000, got {opening}"
+
+    def test_simple_table_with_single_total_still_works(self):
+        """普通表格（只有一个合计行）不受多段检测影响。"""
+        note = NoteTable(
+            id="simple1", account_name="应收账款", section_title="应收账款",
+            headers=["项目", "期初余额", "期末余额"],
+            rows=[
+                ["A类", 50, 100],
+                ["B类", 50, 100],
+                ["合计", 100, 200],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 200.0
+        assert opening == 100.0
+
+    def test_multi_section_with_book_value_total_row(self):
+        """多段变动表中账面价值段也有"合计"行时，策略2/3应能正确提取。"""
+        note = NoteTable(
+            id="fa_ms2", account_name="无形资产", section_title="无形资产",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["一、账面原值", None, None, None, None],
+                ["软件", 500000, 50000, 0, 550000],
+                ["合计", 500000, 50000, 0, 550000],
+                ["二、累计摊销", None, None, None, None],
+                ["软件", 100000, 50000, 0, 150000],
+                ["合计", 100000, 50000, 0, 150000],
+                ["三、账面价值", None, None, None, None],
+                ["期末账面价值", None, None, None, 400000],
+                ["期初账面价值", None, None, None, 400000],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 400000.0
+        assert opening == 400000.0

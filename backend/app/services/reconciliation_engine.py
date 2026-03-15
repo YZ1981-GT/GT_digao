@@ -329,6 +329,10 @@ class ReconciliationEngine:
         closing_val: Optional[float] = None
         opening_val: Optional[float] = None
 
+        # 收集目标段落内的数据行（用于没有"小计"行时的兜底）
+        target_data_rows: List[list] = []
+        found_subtotal = False
+
         for row in note.rows:
             first = str(row[0] if row else "").replace(" ", "").replace("\u3000", "").strip()
 
@@ -338,6 +342,8 @@ class ReconciliationEngine:
                 if kw in first:
                     is_section_header = True
                     in_target = any(skw in first for skw in section_keywords)
+                    if in_target:
+                        target_data_rows = []  # 重置，开始新段落
                     break
 
             if is_section_header:
@@ -348,6 +354,7 @@ class ReconciliationEngine:
 
             # 在目标段落内找"小计"行
             if first in ("小计", "合计"):
+                found_subtotal = True
                 if hdr_closing_idx > 0 and hdr_closing_idx < len(row):
                     v = _safe_float(row[hdr_closing_idx])
                     if v is not None:
@@ -371,6 +378,22 @@ class ReconciliationEngine:
                         closing_val = _safe_float(row[numeric_indices[0]])
 
                 break  # 找到小计行就停止
+            else:
+                # 收集数据行（用于兜底）
+                target_data_rows.append(row)
+
+        # 兜底：段落内没有"小计"/"合计"行，但只有一行数据 → 直接取该行的值
+        # 例如：递延所得税资产段只有一个明细项，没有小计行
+        if not found_subtotal and len(target_data_rows) == 1:
+            row = target_data_rows[0]
+            if hdr_closing_idx > 0 and hdr_closing_idx < len(row):
+                v = _safe_float(row[hdr_closing_idx])
+                if v is not None:
+                    closing_val = v
+            if hdr_opening_idx > 0 and hdr_opening_idx < len(row):
+                v = _safe_float(row[hdr_opening_idx])
+                if v is not None:
+                    opening_val = v
 
         return (closing_val, opening_val)
 
@@ -3621,12 +3644,31 @@ class ReconciliationEngine:
         norm_headers = [str(h or "").replace(" ", "").replace("\u3000", "") for h in headers]
 
         # ── 策略 1：找"合计"/"总计"行 ──
+        # 对于多段变动表（包含原价/累计折旧等段落），表格中有多个"合计"行，
+        # 每个段落各有一个。简单取最后一个"合计"行可能取到错误段落的值
+        # （如累计折旧合计而非账面价值合计）。此时应跳过策略1，
+        # 让策略2（账面价值行）或策略3（段落计算）来处理。
+        import re as _re_local
+        _section_pat = _re_local.compile(r"^[一二三四五六七八九十]+[、.]")
+        _has_multi_section = False
+        _total_count = 0
+        for _row in note.rows:
+            _first = str(_row[0] if _row else "").replace(" ", "").replace("\u3000", "").strip()
+            if _first in ("合计", "总计"):
+                _total_count += 1
+            if _section_pat.match(_first) and any(
+                kw in _first for kw in ReconciliationEngine._COST_SECTION_KW + ReconciliationEngine._AMORT_SECTION_KW
+            ):
+                _has_multi_section = True
+
         total_row = None
-        for ri in range(len(note.rows) - 1, -1, -1):
-            first = str(note.rows[ri][0] if note.rows[ri] else "").replace(" ", "").replace("\u3000", "").strip()
-            if first in ("合计", "总计"):
-                total_row = note.rows[ri]
-                break
+        if not (_has_multi_section and _total_count > 1):
+            # 非多段变动表，或只有一个合计行 → 正常取最后一个合计行
+            for ri in range(len(note.rows) - 1, -1, -1):
+                first = str(note.rows[ri][0] if note.rows[ri] else "").replace(" ", "").replace("\u3000", "").strip()
+                if first in ("合计", "总计"):
+                    total_row = note.rows[ri]
+                    break
 
         if total_row is not None:
             return ReconciliationEngine._extract_from_total_row(
