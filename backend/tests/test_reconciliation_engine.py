@@ -4002,3 +4002,111 @@ class TestUndistributedProfit:
         formula_f = [f for f in findings if "纵向公式" in f.description]
         assert len(formula_f) == 0
 
+
+
+# ─── 金额核对跳过条件测试 ───
+
+
+class TestSkipAmountCheck:
+    """测试 _should_skip_amount_check 的各种跳过条件。"""
+
+    def test_skip_sub_item(self):
+        """子项（is_sub_item=True）应跳过金额核对。"""
+        item = StatementItem(
+            id="sub1", account_name="短期薪酬",
+            statement_type=StatementType.BALANCE_SHEET,
+            sheet_name="资产负债表", opening_balance=100, closing_balance=200,
+            row_index=1, is_sub_item=True,
+        )
+        assert engine._should_skip_amount_check(item) is True
+
+    def test_skip_note_section_number_paren(self):
+        """附注编号格式 (1) 开头的科目应跳过。"""
+        item = StatementItem(
+            id="ns1", account_name="(1) 固定资产情况",
+            statement_type=StatementType.BALANCE_SHEET,
+            sheet_name="资产负债表", opening_balance=100, closing_balance=200,
+            row_index=1,
+        )
+        assert engine._should_skip_amount_check(item) is True
+
+    def test_skip_note_section_number_dot(self):
+        """附注编号格式 4. 开头的科目应跳过。"""
+        item = StatementItem(
+            id="ns2", account_name="4.递延所得税资产和递延所得税负债",
+            statement_type=StatementType.BALANCE_SHEET,
+            sheet_name="资产负债表", opening_balance=100, closing_balance=200,
+            row_index=1,
+        )
+        assert engine._should_skip_amount_check(item) is True
+
+    def test_skip_offset_net_amount(self):
+        """相抵后净额科目应跳过。"""
+        item = StatementItem(
+            id="off1", account_name="递延所得税资产和递延所得税负债相抵后净额",
+            statement_type=StatementType.BALANCE_SHEET,
+            sheet_name="资产负债表", opening_balance=100, closing_balance=200,
+            row_index=1,
+        )
+        assert engine._should_skip_amount_check(item) is True
+
+    def test_skip_cashflow_supplement_item(self):
+        """现金流量表补充资料项目应跳过。"""
+        item = StatementItem(
+            id="cfs1", account_name="固定资产折旧、油气资产折耗、生产性生物资产折旧",
+            statement_type=StatementType.CASH_FLOW,
+            sheet_name="现金流量表", opening_balance=100, closing_balance=200,
+            row_index=1,
+        )
+        assert engine._should_skip_amount_check(item) is True
+
+    def test_normal_item_not_skipped(self):
+        """正常报表科目不应跳过。"""
+        item = _item("应收账款", opening=100, closing=200)
+        assert engine._should_skip_amount_check(item) is False
+
+    def test_normal_income_item_not_skipped(self):
+        """正常利润表科目不应跳过。"""
+        item = StatementItem(
+            id="inc1", account_name="所得税费用",
+            statement_type=StatementType.INCOME_STATEMENT,
+            sheet_name="利润表", opening_balance=100, closing_balance=200,
+            row_index=1,
+        )
+        assert engine._should_skip_amount_check(item) is False
+
+
+class TestBookValueExtraction:
+    """测试合并表头中优先提取账面价值列。"""
+
+    def test_prefer_book_value_column_in_merged_headers(self):
+        """合并表头中有"期末余额-账面余额"和"期末余额-账面价值"时，应取账面价值。"""
+        note = NoteTable(
+            id="bv1", account_name="应收账款", section_title="应收账款",
+            headers=["项目", "期末余额-账面余额", "期末余额-坏账准备", "期末余额-账面价值",
+                      "期初余额-账面余额", "期初余额-坏账准备", "期初余额-账面价值"],
+            rows=[
+                ["A类", 30000, 5000, 25000, 20000, 3000, 17000],
+                ["B类", 18163.55, 7010, 11153.55, 15000, 4000, 11000],
+                ["合计", 48163.55, 12010, 36153.55, 35000, 7000, 28000],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 36153.55  # 账面价值，不是账面余额
+        assert opening == 28000.0
+
+    def test_compute_net_value_when_no_book_value_column(self):
+        """合并表头中只有"账面余额"和"坏账准备"没有"账面价值"时，应计算净值。"""
+        note = NoteTable(
+            id="bv2", account_name="其他应收款", section_title="其他应收款",
+            headers=["项目", "期末余额-账面余额", "期末余额-坏账准备",
+                      "期初余额-账面余额", "期初余额-坏账准备"],
+            rows=[
+                ["A类", 30000, 5000, 20000, 3000],
+                ["B类", 18000, 7000, 15000, 4000],
+                ["合计", 48000, 12000, 35000, 7000],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 36000.0  # 48000 - 12000
+        assert opening == 28000.0  # 35000 - 7000

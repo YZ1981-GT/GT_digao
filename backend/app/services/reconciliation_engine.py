@@ -130,6 +130,11 @@ class ReconciliationEngine:
         "合计", "总计", "总额", "小计", "净额",
     ]
 
+    # 不应做金额核对的特殊科目名称关键词（包含即跳过）
+    SKIP_AMOUNT_CHECK_KEYWORDS = [
+        "相抵后净额", "抵销后净额",  # 递延所得税资产和负债相抵后净额
+    ]
+
     # 现金流量表中有附注披露的科目关键词（仅"其他与XX活动有关的现金"等有明细表）
     # 其余现金流量表科目（如"处置固定资产收回的现金净额"、"投资支付的现金"等）无附注披露
     CASH_FLOW_NOTE_KEYWORDS = [
@@ -149,12 +154,25 @@ class ReconciliationEngine:
 
     def _should_skip_amount_check(self, item: StatementItem) -> bool:
         """判断报表科目是否应跳过金额一致性核对。"""
+        import re
         name = item.account_name
         # 所有者权益变动表：结构行/过程行，不对应具体附注披露表格
         if item.statement_type == StatementType.EQUITY_CHANGE:
             return True
         # 汇总行（如"非流动负债合计"）
         if any(name.endswith(kw) for kw in self.STATEMENT_SUBTOTAL_KEYWORDS):
+            return True
+        # 特殊科目（如"递延所得税资产和递延所得税负债相抵后净额"）
+        if any(kw in name for kw in self.SKIP_AMOUNT_CHECK_KEYWORDS):
+            return True
+        # 报表中的"其中"子项（如"应付职工薪酬-短期薪酬"、"当期所得税费用"等）：
+        # 子项没有独立的附注披露表格，其金额包含在父科目的附注表格中，
+        # 不应单独与附注合计值比对（否则会用父科目的合计值来比对子项金额，必然不一致）。
+        if item.is_sub_item:
+            return True
+        # 附注编号格式的科目名（如"(1) 固定资产情况"、"4.递延所得税"等）：
+        # 这些是附注章节标题被误解析为报表科目，不是真正的报表行
+        if re.match(r'^[（(]\d+[）)]', name) or re.match(r'^\d+[.、．]', name):
             return True
         # 现金流量表科目：仅白名单内的科目有附注披露
         is_cash_flow = (
@@ -164,7 +182,25 @@ class ReconciliationEngine:
         if is_cash_flow:
             if not any(kw in name for kw in self.CASH_FLOW_NOTE_KEYWORDS):
                 return True
+        # 现金流量表补充资料项目：这些项目的名称来自补充资料表格，
+        # 不是独立的报表科目，不应与附注表格核对
+        if any(kw in name for kw in self.CASHFLOW_SUPPLEMENT_ITEM_KEYWORDS):
+            return True
         return False
+
+    # 现金流量表补充资料中的项目名称关键词
+    # 这些项目出现在补充资料中，不是独立的报表科目，不应与附注表格做金额核对
+    CASHFLOW_SUPPLEMENT_ITEM_KEYWORDS = [
+        "固定资产折旧", "油气资产折耗", "生产性生物资产折旧",
+        "无形资产摊销", "长期待摊费用摊销",
+        "处置固定资产", "固定资产报废",
+        "公允价值变动损失", "财务费用",
+        "投资损失", "递延所得税资产减少", "递延所得税负债增加",
+        "存货的减少", "经营性应收项目", "经营性应付项目",
+        "现金的期末余额", "现金的期初余额",
+        "现金等价物的期末余额", "现金等价物的期初余额",
+        "现金及现金等价物净增加额",
+    ]
 
     # 附注表格标题中含这些关键词时，表示仅披露重要/主要项目，
     # 报表金额应 ≥ 附注合计（附注是部分明细，不是全部）
@@ -3759,7 +3795,19 @@ class ReconciliationEngine:
                     opening_parent = ci
 
             def _pick_from_range(start: int, end: int) -> Optional[float]:
-                """在列范围内找第一个非变动列的数值。"""
+                """在列范围内找第一个非变动列的数值。
+                优先选择含"账面价值"的列（应收类科目的表头中，
+                同一期间组下有"账面余额"、"坏账准备"、"账面价值"三列，
+                应取"账面价值"列的值）。
+                """
+                bv_kw_local = ReconciliationEngine._BOOK_VALUE_KW
+                # 先找含"账面价值"的列
+                for ci, v in nums:
+                    if start <= ci < end:
+                        h = last_row_h[ci] if ci < len(last_row_h) else ""
+                        if not is_move(h) and any(kw in h for kw in bv_kw_local):
+                            return v
+                # 回退：取第一个非变动列
                 for ci, v in nums:
                     if start <= ci < end:
                         h = last_row_h[ci] if ci < len(last_row_h) else ""
@@ -3792,16 +3840,66 @@ class ReconciliationEngine:
                     return (c_val, o_val)
 
         # ── 单行表头或多行表头策略都未命中 → 用 norm_headers ──
+        # 优先选择含"账面价值"的期末/期初列（应收类科目的合并表头如
+        # "期末余额-账面余额"、"期末余额-坏账准备"、"期末余额-账面价值"，
+        # 应取"账面价值"列而非"账面余额"列）
+        bv_kw = ReconciliationEngine._BOOK_VALUE_KW
         closing_idx = -1
         opening_idx = -1
+        closing_bv_idx = -1  # 含"账面价值"的期末列
+        opening_bv_idx = -1  # 含"账面价值"的期初列
         for ci, h in enumerate(norm_headers):
             if is_move(h):
                 continue
             has_open = any(kw in h for kw in opening_kw)
-            if closing_idx < 0 and any(kw in h for kw in closing_kw) and not has_open:
-                closing_idx = ci
-            if opening_idx < 0 and has_open:
-                opening_idx = ci
+            has_close = any(kw in h for kw in closing_kw) and not has_open
+            has_bv = any(kw in h for kw in bv_kw)
+            if has_close:
+                if closing_idx < 0:
+                    closing_idx = ci
+                if has_bv and closing_bv_idx < 0:
+                    closing_bv_idx = ci
+            if has_open:
+                if opening_idx < 0:
+                    opening_idx = ci
+                if has_bv and opening_bv_idx < 0:
+                    opening_bv_idx = ci
+        # 优先使用含"账面价值"的列
+        if closing_bv_idx >= 0:
+            closing_idx = closing_bv_idx
+        if opening_bv_idx >= 0:
+            opening_idx = opening_bv_idx
+
+        # ── 当表头含"账面余额"+"坏账准备"但无"账面价值"时，计算净值 ──
+        # 应收类科目的合并表头可能是 ["项目", "期末余额-账面余额", "期末余额-坏账准备",
+        # "期初余额-账面余额", "期初余额-坏账准备"]，没有"账面价值"列。
+        # 此时需要计算 账面价值 = 账面余额 - 坏账准备。
+        provision_kw = ["坏账准备", "减值准备", "跌价准备"]
+        balance_kw_net = ["账面余额", "原值"]
+        c_bal_idx, c_prov_idx, o_bal_idx, o_prov_idx = -1, -1, -1, -1
+        for ci, h in enumerate(norm_headers):
+            has_open = any(kw in h for kw in opening_kw)
+            has_close_h = any(kw in h for kw in closing_kw) and not has_open
+            has_bal = any(kw in h for kw in balance_kw_net)
+            has_prov = any(kw in h for kw in provision_kw)
+            if has_close_h and has_bal and c_bal_idx < 0:
+                c_bal_idx = ci
+            if has_close_h and has_prov and c_prov_idx < 0:
+                c_prov_idx = ci
+            if has_open and has_bal and o_bal_idx < 0:
+                o_bal_idx = ci
+            if has_open and has_prov and o_prov_idx < 0:
+                o_prov_idx = ci
+        # 如果有"账面余额"和"坏账准备"列但没有"账面价值"列，计算净值
+        if c_bal_idx >= 0 and c_prov_idx >= 0 and closing_bv_idx < 0:
+            cb = _safe_float(total_row[c_bal_idx]) if c_bal_idx < len(total_row) else None
+            cp = _safe_float(total_row[c_prov_idx]) if c_prov_idx < len(total_row) else None
+            ob = _safe_float(total_row[o_bal_idx]) if o_bal_idx >= 0 and o_bal_idx < len(total_row) else None
+            op = _safe_float(total_row[o_prov_idx]) if o_prov_idx >= 0 and o_prov_idx < len(total_row) else None
+            c_net = (cb - (cp or 0)) if cb is not None else None
+            o_net = (ob - (op or 0)) if ob is not None else None
+            if c_net is not None or o_net is not None:
+                return (c_net, o_net)
         if closing_idx < 0:
             for ci, h in enumerate(norm_headers):
                 if ("本期" in h or "本年" in h) and not is_move(h) and not any(kw in h for kw in opening_kw):
