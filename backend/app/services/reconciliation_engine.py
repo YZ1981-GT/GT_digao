@@ -337,14 +337,17 @@ class ReconciliationEngine:
             first = str(row[0] if row else "").replace(" ", "").replace("\u3000", "").strip()
 
             # 检测段落标题行（包含段落关键词的行，如"递延所得税负债："）
+            # 注意：如果行同时包含所有标记词（如"递延所得税资产和递延所得税负债"），
+            # 则是表格标题行而非段落标题行，应跳过
             is_section_header = False
-            for kw in ReconciliationEngine._COMBINED_SUBTOTAL_TABLE_MARKERS:
-                if kw in first:
-                    is_section_header = True
-                    in_target = any(skw in first for skw in section_keywords)
-                    if in_target:
-                        target_data_rows = []  # 重置，开始新段落
-                    break
+            markers = ReconciliationEngine._COMBINED_SUBTOTAL_TABLE_MARKERS
+            matched_markers = [kw for kw in markers if kw in first]
+            if matched_markers and len(matched_markers) < len(markers):
+                # 只匹配了部分标记词 → 是段落标题行
+                is_section_header = True
+                in_target = any(skw in first for skw in section_keywords)
+                if in_target:
+                    target_data_rows = []  # 重置，开始新段落
 
             if is_section_header:
                 continue

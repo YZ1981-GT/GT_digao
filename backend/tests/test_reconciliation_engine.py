@@ -4441,3 +4441,39 @@ class TestTotalRowPreference:
         closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
         assert closing == 1750000.0, f"Expected 1750000, got {closing}"
         assert opening == 1200000.0, f"Expected 1200000, got {opening}"
+
+
+class TestCombinedSubtotalTitleRow:
+    """测试合并小计表格中标题行不被误识别为段落标题。"""
+
+    def test_title_row_not_treated_as_section_header(self):
+        """表格首行包含所有标记词（如"递延所得税资产和递延所得税负债"）时，
+        不应被视为段落标题行，应正确跳过。"""
+        note = NoteTable(
+            id="cst1", account_name="递延所得税资产和递延所得税负债",
+            section_title="递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-递延所得税", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产和递延所得税负债", None, None],  # 标题行
+                ["递延所得税资产:", None, None],  # 段落标题
+                ["可抵扣暂时性差异A", 100, 200],
+                ["可抵扣暂时性差异B", 300, 400],
+                ["小计", 400, 600],
+                ["递延所得税负债:", None, None],  # 段落标题
+                ["应纳税暂时性差异", 50, 80],
+                ["小计", 50, 80],
+            ],
+        )
+        # 提取递延所得税资产
+        closing, opening = ReconciliationEngine._extract_combined_subtotal(
+            note, ["递延所得税资产"],
+        )
+        assert closing == 400.0, f"Expected 400, got {closing}"
+        assert opening == 600.0, f"Expected 600, got {opening}"
+
+        # 提取递延所得税负债
+        closing, opening = ReconciliationEngine._extract_combined_subtotal(
+            note, ["递延所得税负债"],
+        )
+        assert closing == 50.0, f"Expected 50, got {closing}"
+        assert opening == 80.0, f"Expected 80, got {opening}"
