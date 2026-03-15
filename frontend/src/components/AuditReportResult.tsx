@@ -279,7 +279,6 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
                   const riskBg = f.risk_level === 'high' ? '#fff1f0' : f.risk_level === 'medium' ? '#fffbe6' : '#e6f7ff';
                   const st = statusStyle(f.confirmation_status);
                   const isDismissed = f.confirmation_status === 'dismissed';
-                  const isEditing = editingId === f.id;
 
                   return (
                     <div key={f.id} style={{
@@ -313,45 +312,27 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
                       </div>
                       {/* 内容 */}
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        {isEditing ? (
-                          <div>
-                            <textarea
-                              value={editDesc}
-                              onChange={e => setEditDesc(e.target.value)}
-                              style={{ width: '100%', minHeight: 60, fontSize: 13, padding: 8, border: '1px solid #d9d9d9', borderRadius: 6, resize: 'vertical' }}
-                            />
-                            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-                              <button onClick={saveEdit} style={btnSm('var(--gt-primary, #4b2d77)', '#fff')}>保存</button>
-                              <button onClick={cancelEdit} style={btnSm('#fff', '#666')}>取消</button>
-                            </div>
+                        <div style={{ fontSize: 13, color: '#333', lineHeight: 1.6 }}>{f.description}</div>
+                        {f.location && <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>📍 {f.location}</div>}
+                        {f.suggestion && (
+                          <div style={{ fontSize: 12, color: '#52c41a', marginTop: 4, background: '#f6ffed', padding: '4px 10px', borderRadius: 6, display: 'inline-block' }}>
+                            💡 {f.suggestion}
                           </div>
-                        ) : (
-                          <>
-                            <div style={{ fontSize: 13, color: '#333', lineHeight: 1.6 }}>{f.description}</div>
-                            {f.location && <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>📍 {f.location}</div>}
-                            {f.suggestion && (
-                              <div style={{ fontSize: 12, color: '#52c41a', marginTop: 4, background: '#f6ffed', padding: '4px 10px', borderRadius: 6, display: 'inline-block' }}>
-                                💡 {f.suggestion}
-                              </div>
-                            )}
-                          </>
                         )}
                       </div>
                       {/* 操作按钮 */}
-                      {!isEditing && (
-                        <div style={{ display: 'flex', gap: 4, flexShrink: 0, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-                          {f.confirmation_status !== 'confirmed' && (
-                            <button onClick={() => updateStatus(f.id, 'confirm')} style={btnSm('#52c41a', '#fff')}>确认</button>
-                          )}
-                          {f.confirmation_status !== 'dismissed' && (
-                            <button onClick={() => updateStatus(f.id, 'dismiss')} style={btnSm('#999', '#fff')}>忽略</button>
-                          )}
-                          {isDismissed && (
-                            <button onClick={() => updateStatus(f.id, 'restore')} style={btnSm('#fff', '#4b2d77')}>恢复</button>
-                          )}
-                          <button onClick={() => startEdit(f)} style={btnSm('#fff', '#666')}>编辑</button>
-                        </div>
-                      )}
+                      <div style={{ display: 'flex', gap: 4, flexShrink: 0, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                        {f.confirmation_status !== 'confirmed' && (
+                          <button onClick={() => updateStatus(f.id, 'confirm')} style={btnSm('#52c41a', '#fff')}>确认</button>
+                        )}
+                        {f.confirmation_status !== 'dismissed' && (
+                          <button onClick={() => updateStatus(f.id, 'dismiss')} style={btnSm('#999', '#fff')}>忽略</button>
+                        )}
+                        {isDismissed && (
+                          <button onClick={() => updateStatus(f.id, 'restore')} style={btnSm('#fff', '#4b2d77')}>恢复</button>
+                        )}
+                        <button onClick={() => startEdit(f)} style={btnSm('#fff', '#666')}>编辑</button>
+                      </div>
                     </div>
                   );
                 })}
@@ -362,6 +343,44 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
       })}
 
       {allFindings.length === 0 && <p style={{ textAlign: 'center', color: '#999', padding: 40 }}>暂无问题</p>}
+
+      {/* 编辑弹窗 */}
+      {editingId && (
+        <div
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 1000,
+          }}
+          onClick={cancelEdit}
+          role="dialog" aria-modal="true" aria-label="编辑问题描述"
+        >
+          <div
+            style={{
+              background: '#fff', borderRadius: 12, padding: '24px 28px',
+              width: '90%', maxWidth: 720, maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 16, fontWeight: 600, color: '#333', marginBottom: 16 }}>编辑问题描述</div>
+            <textarea
+              value={editDesc}
+              onChange={e => setEditDesc(e.target.value)}
+              autoFocus
+              style={{
+                width: '100%', flex: 1, minHeight: 240, fontSize: 14, padding: 12,
+                border: '1px solid #d9d9d9', borderRadius: 8, resize: 'vertical',
+                lineHeight: 1.8, fontFamily: 'inherit', boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 10, marginTop: 16, justifyContent: 'flex-end' }}>
+              <button onClick={cancelEdit} style={{ padding: '8px 24px', border: '1px solid #ddd', borderRadius: 6, background: '#fff', cursor: 'pointer', color: '#666', fontSize: 14 }}>取消</button>
+              <button onClick={saveEdit} style={{ padding: '8px 24px', border: 'none', borderRadius: 6, background: 'var(--gt-primary, #4b2d77)', cursor: 'pointer', color: '#fff', fontSize: 14 }}>保存</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 底部操作栏 */}
       <div style={{
