@@ -1275,16 +1275,16 @@ class ReportParser(WorkpaperParser):
                 if stripped not in ('-', '—', '/', ''):
                     warnings.append(f"金额无法解析：'{val}'")
 
-        # 过滤掉可能的附注编号：位于前半部分且为小整数（1-999）的值
-        if len(col_values) >= 3:
-            half = len(row) // 2
-            filtered = []
-            for col_idx, val in col_values:
-                if col_idx < half and val is not None and val == int(val) and 1 <= val <= 999:
-                    continue
-                filtered.append((col_idx, val))
-            if len(filtered) >= 2:
-                col_values = filtered
+        # 过滤掉可能的附注编号：
+        # 附注编号通常是紧跟科目名称之后的第一个小整数（1-999），
+        # 位于金额列之前。当第一个数值列是小整数且后面还有其他数值列时，
+        # 将其视为附注编号并跳过。
+        if len(col_values) >= 2:
+            first_ci, first_val = col_values[0]
+            if (first_val is not None
+                    and first_val == int(first_val)
+                    and 1 <= first_val <= 999):
+                col_values = col_values[1:]
 
         closing_balance = None
         opening_balance = None
