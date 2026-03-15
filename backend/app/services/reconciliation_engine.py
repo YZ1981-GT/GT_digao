@@ -700,14 +700,16 @@ class ReconciliationEngine:
             if self._should_skip_amount_check(item):
                 continue
 
-            # 收集所有匹配表格的校验结果
-            closing_matched = False
-            opening_matched = False
-            closing_findings: List[ReportReviewFinding] = []
-            opening_findings: List[ReportReviewFinding] = []
-            # 跟踪是否有任何表格提取到了对应值
-            any_closing_value_found = False
-            any_opening_value_found = False
+            # ── 按口径分别追踪校验状态 ──
+            # 合并报表（is_consolidated=True）时，合并附注和母公司附注各自独立校验；
+            # 非合并报表时，所有附注统一校验（scope_key="default"）。
+            # scope_key: "consolidated" | "parent" | "default"
+            scope_matched_closing: Dict[str, bool] = {}
+            scope_matched_opening: Dict[str, bool] = {}
+            scope_findings_closing: Dict[str, List[ReportReviewFinding]] = {}
+            scope_findings_opening: Dict[str, List[ReportReviewFinding]] = {}
+            scope_any_closing_found: Dict[str, bool] = {}
+            scope_any_opening_found: Dict[str, bool] = {}
             # 收集所有有效匹配的附注表格 ID（用于"未找到值"时的 finding）
             valid_note_ids: List[str] = []
 
@@ -748,10 +750,25 @@ class ReconciliationEngine:
                     stmt_closing = item.company_closing_balance
                     stmt_opening = item.company_opening_balance
                     scope_label = "母公司"
+                    scope_key = "parent"
+                elif item.is_consolidated:
+                    stmt_closing = item.closing_balance
+                    stmt_opening = item.opening_balance
+                    scope_label = "合并"
+                    scope_key = "consolidated"
                 else:
                     stmt_closing = item.closing_balance
                     stmt_opening = item.opening_balance
-                    scope_label = "合并" if is_parent_note is False and item.is_consolidated else ""
+                    scope_label = ""
+                    scope_key = "default"
+
+                # 初始化该口径的追踪状态
+                scope_matched_closing.setdefault(scope_key, False)
+                scope_matched_opening.setdefault(scope_key, False)
+                scope_findings_closing.setdefault(scope_key, [])
+                scope_findings_opening.setdefault(scope_key, [])
+                scope_any_closing_found.setdefault(scope_key, False)
+                scope_any_opening_found.setdefault(scope_key, False)
 
                 # 获取附注合计值（优先用 LLM 识别的 cell，兜底用规则引擎）
                 note_closing = self._get_cell_value(note, ts.closing_balance_cell)
@@ -813,22 +830,22 @@ class ReconciliationEngine:
                     note_closing, note_opening = rule_closing, rule_opening
 
                 if note_closing is not None:
-                    any_closing_value_found = True
+                    scope_any_closing_found[scope_key] = True
                 if note_opening is not None:
-                    any_opening_value_found = True
+                    scope_any_opening_found[scope_key] = True
 
                 # 期末余额比对
                 if stmt_closing is not None and note_closing is not None:
                     if _amounts_equal(stmt_closing, note_closing):
-                        closing_matched = True
+                        scope_matched_closing[scope_key] = True
                     elif is_partial and stmt_closing >= note_closing - TOLERANCE:
-                        closing_matched = True
+                        scope_matched_closing[scope_key] = True
                     elif (rule_closing is not None
                           and not _amounts_equal(note_closing, rule_closing)
                           and _amounts_equal(stmt_closing, rule_closing)):
                         # LLM 指向了错误行（如原价合计而非账面价值合计），
                         # 规则引擎的值与报表一致 → 采信规则引擎，视为通过
-                        closing_matched = True
+                        scope_matched_closing[scope_key] = True
                     else:
                         # 如果规则引擎值与报表更接近，用规则引擎值报告差异
                         effective_closing = note_closing
@@ -838,7 +855,7 @@ class ReconciliationEngine:
                             effective_closing = rule_closing
                         diff = round(stmt_closing - effective_closing, 2)
                         scope_desc = f"（{scope_label}）" if scope_label else ""
-                        closing_findings.append(self._make_finding(
+                        scope_findings_closing[scope_key].append(self._make_finding(
                             category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
                             account_name=item.account_name,
                             statement_amount=stmt_closing,
@@ -854,14 +871,14 @@ class ReconciliationEngine:
                 # 期初余额比对
                 if stmt_opening is not None and note_opening is not None:
                     if _amounts_equal(stmt_opening, note_opening):
-                        opening_matched = True
+                        scope_matched_opening[scope_key] = True
                     elif is_partial and stmt_opening >= note_opening - TOLERANCE:
-                        opening_matched = True
+                        scope_matched_opening[scope_key] = True
                     elif (rule_opening is not None
                           and not _amounts_equal(note_opening, rule_opening)
                           and _amounts_equal(stmt_opening, rule_opening)):
                         # LLM 指向了错误行，规则引擎的值与报表一致 → 采信规则引擎
-                        opening_matched = True
+                        scope_matched_opening[scope_key] = True
                     else:
                         effective_opening = note_opening
                         if (rule_opening is not None
@@ -870,7 +887,7 @@ class ReconciliationEngine:
                             effective_opening = rule_opening
                         diff = round(stmt_opening - effective_opening, 2)
                         scope_desc = f"（{scope_label}）" if scope_label else ""
-                        opening_findings.append(self._make_finding(
+                        scope_findings_opening[scope_key].append(self._make_finding(
                             category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
                             account_name=item.account_name,
                             statement_amount=stmt_opening,
@@ -884,12 +901,14 @@ class ReconciliationEngine:
                         ))
 
             # 只有当所有匹配表格都不一致时，才报告差异最小的那个 finding
-            if not closing_matched and closing_findings:
-                best = min(closing_findings, key=lambda f: abs(f.difference or 0))
-                findings.append(best)
-            if not opening_matched and opening_findings:
-                best = min(opening_findings, key=lambda f: abs(f.difference or 0))
-                findings.append(best)
+            # 按口径分别聚合：每个 scope 独立判断是否通过
+            for sk in set(list(scope_matched_closing.keys()) + list(scope_matched_opening.keys())):
+                if not scope_matched_closing.get(sk, False) and scope_findings_closing.get(sk):
+                    best = min(scope_findings_closing[sk], key=lambda f: abs(f.difference or 0))
+                    findings.append(best)
+                if not scope_matched_opening.get(sk, False) and scope_findings_opening.get(sk):
+                    best = min(scope_findings_opening[sk], key=lambda f: abs(f.difference or 0))
+                    findings.append(best)
 
             # 报表科目有余额但所有附注表格都没提取到对应值 → 生成警告
             # 但如果所有匹配表格的表头中都没有对应的期初/期末列，说明该表格本身
@@ -921,7 +940,13 @@ class ReconciliationEngine:
                 suppress_closing_warn = any_table_has_period_col and not any_table_has_closing_col
                 suppress_opening_warn = any_table_has_period_col and not any_table_has_opening_col
 
-                if has_closing and not any_closing_value_found and not closing_matched and not suppress_closing_warn:
+                # 聚合所有口径的追踪状态
+                any_closing_value_found = any(scope_any_closing_found.values()) if scope_any_closing_found else False
+                any_opening_value_found = any(scope_any_opening_found.values()) if scope_any_opening_found else False
+                any_closing_matched = any(scope_matched_closing.values()) if scope_matched_closing else False
+                any_opening_matched = any(scope_matched_opening.values()) if scope_matched_opening else False
+
+                if has_closing and not any_closing_value_found and not any_closing_matched and not suppress_closing_warn:
                     findings.append(self._make_finding(
                         category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
                         account_name=item.account_name,
@@ -935,7 +960,7 @@ class ReconciliationEngine:
                         note_table_ids=valid_note_ids,
                     ))
 
-                if has_opening and not any_opening_value_found and not opening_matched and not suppress_opening_warn:
+                if has_opening and not any_opening_value_found and not any_opening_matched and not suppress_opening_warn:
                     findings.append(self._make_finding(
                         category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
                         account_name=item.account_name,

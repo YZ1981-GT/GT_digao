@@ -400,6 +400,72 @@ class TestAmountConsistency:
         findings = engine.check_amount_consistency(mm, [item], [note], {note.id: ts})
         assert len(findings) == 0
 
+    def test_scope_separation_consolidated_ok_parent_mismatch(self):
+        """合并附注匹配但母公司附注不匹配时，应只报母公司差异。"""
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="长期股权投资",
+            statement_type=StatementType.BALANCE_SHEET,
+            sheet_name="资产负债表",
+            closing_balance=5000, opening_balance=3000,
+            company_closing_balance=800, company_opening_balance=600,
+            is_consolidated=True, row_index=1,
+        )
+        # 合并附注：与合并数一致
+        note_c = _note("长期股权投资", title="长期股权投资分类",
+                        rows=[["对联营企业投资", 3000, 5000], ["合计", 3000, 5000]])
+        # 母公司附注：与公司数不一致（期末900≠800，期初700≠600）
+        note_p = _note("长期股权投资",
+                        title="母公司财务报表主要项目注释-长期股权投资",
+                        rows=[["对子公司投资", 700, 900], ["合计", 700, 900]])
+        ts_c = _ts(note_c.id)
+        ts_p = _ts(note_p.id)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_c.id, note_p.id],
+            match_confidence=1.0,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_c, note_p],
+            {note_c.id: ts_c, note_p.id: ts_p},
+        )
+        # 合并口径通过，母公司口径不通过 → 应报母公司差异
+        assert len(findings) == 2  # 期末+期初各一个
+        for f in findings:
+            assert "母公司" in f.description
+
+    def test_scope_separation_parent_ok_consolidated_mismatch(self):
+        """母公司附注匹配但合并附注不匹配时，应只报合并差异。"""
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="长期股权投资",
+            statement_type=StatementType.BALANCE_SHEET,
+            sheet_name="资产负债表",
+            closing_balance=5000, opening_balance=3000,
+            company_closing_balance=800, company_opening_balance=600,
+            is_consolidated=True, row_index=1,
+        )
+        # 合并附注：与合并数不一致（期末4000≠5000）
+        note_c = _note("长期股权投资", title="长期股权投资分类",
+                        rows=[["对联营企业投资", 3000, 4000], ["合计", 3000, 4000]])
+        # 母公司附注：与公司数一致
+        note_p = _note("长期股权投资",
+                        title="母公司财务报表主要项目注释-长期股权投资",
+                        rows=[["对子公司投资", 600, 800], ["合计", 600, 800]])
+        ts_c = _ts(note_c.id)
+        ts_p = _ts(note_p.id)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_c.id, note_p.id],
+            match_confidence=1.0,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_c, note_p],
+            {note_c.id: ts_c, note_p.id: ts_p},
+        )
+        # 母公司口径通过，合并口径不通过 → 应报合并差异
+        assert len(findings) == 1
+        assert "合并" in findings[0].description
+        assert findings[0].difference == 1000.0
+
     def test_equity_change_items_skipped(self):
         """所有者权益变动表科目应跳过金额一致性核对。"""
         item = StatementItem(
