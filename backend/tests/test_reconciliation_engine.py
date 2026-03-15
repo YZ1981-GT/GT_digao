@@ -4075,6 +4075,38 @@ class TestSkipAmountCheck:
         )
         assert engine._should_skip_amount_check(item) is False
 
+    def test_skip_note_section_title_suffix(self):
+        """附注章节标题（以"情况"/"说明"等结尾）应跳过。"""
+        for name in ["固定资产情况", "在建工程情况", "无形资产说明", "长期股权投资明细"]:
+            item = StatementItem(
+                id="nst1", account_name=name,
+                statement_type=StatementType.BALANCE_SHEET,
+                sheet_name="资产负债表", opening_balance=100, closing_balance=200,
+                row_index=1,
+            )
+            assert engine._should_skip_amount_check(item) is True, f"{name} should be skipped"
+
+    def test_skip_parenthetical_sub_item(self):
+        """括号内含子项说明的科目名应跳过（即使 is_sub_item 未标记）。"""
+        for name in ["应付职工薪酬（短期薪酬）", "长期借款（1年内到期）", "应付职工薪酬(短期薪酬)"]:
+            item = StatementItem(
+                id="psi1", account_name=name,
+                statement_type=StatementType.BALANCE_SHEET,
+                sheet_name="资产负债表", opening_balance=100, closing_balance=200,
+                row_index=1, is_sub_item=False,
+            )
+            assert engine._should_skip_amount_check(item) is True, f"{name} should be skipped"
+
+    def test_normal_parenthetical_account_not_skipped(self):
+        """正常科目名中间有括号但不以括号结尾的不应跳过。"""
+        item = StatementItem(
+            id="npa1", account_name="应收账款",
+            statement_type=StatementType.BALANCE_SHEET,
+            sheet_name="资产负债表", opening_balance=100, closing_balance=200,
+            row_index=1,
+        )
+        assert engine._should_skip_amount_check(item) is False
+
 
 class TestBookValueExtraction:
     """测试合并表头中优先提取账面价值列。"""

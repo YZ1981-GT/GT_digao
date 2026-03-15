@@ -174,6 +174,14 @@ class ReconciliationEngine:
         # 这些是附注章节标题被误解析为报表科目，不是真正的报表行
         if re.match(r'^[（(]\d+[）)]', name) or re.match(r'^\d+[.、．]', name):
             return True
+        # 附注章节标题特征词：科目名以"情况"/"说明"/"明细"/"详情"结尾，
+        # 如"固定资产情况"、"在建工程情况"等，是附注章节标题被误解析为报表科目
+        if any(name.endswith(kw) for kw in self.NOTE_SECTION_TITLE_SUFFIXES):
+            return True
+        # 括号内含子项说明的科目名（如"应付职工薪酬（短期薪酬）"、"长期借款（1年内到期）"等）：
+        # 即使 is_sub_item 未被标记，通过名称模式也能识别为子项
+        if re.search(r'[（(].+[）)]$', name):
+            return True
         # 现金流量表科目：仅白名单内的科目有附注披露
         is_cash_flow = (
             item.statement_type == StatementType.CASH_FLOW
@@ -187,6 +195,11 @@ class ReconciliationEngine:
         if any(kw in name for kw in self.CASHFLOW_SUPPLEMENT_ITEM_KEYWORDS):
             return True
         return False
+
+    # 附注章节标题后缀词 — 真正的报表科目不会以这些词结尾
+    NOTE_SECTION_TITLE_SUFFIXES = [
+        "情况", "说明", "明细", "详情",
+    ]
 
     # 现金流量表补充资料中的项目名称关键词
     # 这些项目出现在补充资料中，不是独立的报表科目，不应与附注表格做金额核对
