@@ -277,6 +277,25 @@ class TestAmountConsistency:
         not_found = [f for f in findings if engine.NOTE_VALUE_NOT_FOUND_TAG in f.description]
         assert len(not_found) == 0
 
+    def test_single_data_row_treated_as_total(self):
+        """表格有多行但只有一行含数值 → 该行视为合计行，正常比对。"""
+        item = _item("应收账款", opening=100, closing=200)
+        note = _note("应收账款",
+                      headers=["项目", "期初余额", "期末余额"],
+                      rows=[["应收账款", 100, 200], ["", None, None]])
+        ts = _ts(note.id, closing_cell=None, opening_cell=None,
+                 total_indices=[], rows=[
+                     TableStructureRow(row_index=0, role="data", label="应收账款"),
+                     TableStructureRow(row_index=1, role="data", label=""),
+                 ])
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id, note_table_ids=[note.id], match_confidence=1.0,
+        )])
+        findings = engine.check_amount_consistency(mm, [item], [note], {note.id: ts})
+        assert len(findings) == 0, (
+            f"单数据行应视为合计行: {[f.description for f in findings]}"
+        )
+
     def test_reconciliation_summary_unchecked(self):
         """get_reconciliation_summary 正确统计 unchecked（未找到值）的数量。"""
         item = _item("应收账款", opening=100, closing=200)

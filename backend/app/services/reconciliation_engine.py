@@ -3750,10 +3750,12 @@ class ReconciliationEngine:
         if balance_row_result != (None, None):
             return balance_row_result
 
-        # ── 策略 5：单行表格回退 ──
-        if len(note.rows) == 1:
+        # ── 策略 5：单数据行回退 ──
+        # 当表格只有一行含有效数值的数据行时，该行即为合计行
+        data_rows = [r for r in note.rows if any(_safe_float(c) is not None for c in r[1:])]
+        if len(data_rows) == 1:
             return ReconciliationEngine._extract_from_total_row(
-                note.rows[0], norm_headers, header_rows,
+                data_rows[0], norm_headers, header_rows,
             )
 
         return (None, None)
