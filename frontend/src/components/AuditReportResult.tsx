@@ -1,11 +1,13 @@
 /**
  * AuditReportResult - 复核报告组件
- * 统计仪表盘 + 按科目分组的卡片式问题清单 + 导出
+ * 统计仪表盘 + 按科目分组的卡片式问题清单 + 单条确认/忽略/编辑 + 批量操作 + 导出
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   ReportReviewFinding, ReportReviewResult, ReportReviewFindingCategory,
+  FindingConfirmationStatus,
   FINDING_CATEGORY_LABELS, FINDING_CATEGORY_COLORS, RISK_LEVEL_COLORS,
+  CONFIRMATION_STATUS_LABELS,
 } from '../types/audit';
 
 const API = process.env.REACT_APP_API_URL || (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:9980');
@@ -22,16 +24,22 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDesc, setEditDesc] = useState('');
 
-  useEffect(() => {
+  const loadResult = useCallback(async () => {
     if (!sessionId) return;
     setLoading(true);
-    fetch(`${API}/api/report-review/result/${sessionId}`)
-      .then(r => r.json())
-      .then(data => setResult(data))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    try {
+      const r = await fetch(`${API}/api/report-review/result/${sessionId}`);
+      const data = await r.json();
+      setResult(data);
+    } catch { /* ignore */ }
+    setLoading(false);
   }, [sessionId]);
+
+  useEffect(() => { loadResult(); }, [loadResult]);
 
   const handleExport = useCallback(async (format: 'word' | 'pdf') => {
     if (!sessionId) return;
@@ -42,10 +50,7 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, format }),
       });
-      if (!resp.ok) {
-        const errText = await resp.text();
-        throw new Error(errText || '导出失败');
-      }
+      if (!resp.ok) throw new Error(await resp.text() || '导出失败');
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -67,6 +72,55 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
     });
   };
 
+  const toggleCheck = (id: string) => {
+    setCheckedIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  /* 单条确认/忽略/恢复 */
+  const updateStatus = async (id: string, action: 'confirm' | 'dismiss' | 'restore') => {
+    try {
+      await fetch(`${API}/api/report-review/finding/${id}/${action}`, { method: 'PATCH' });
+    } catch { /* ignore */ }
+    loadResult();
+  };
+
+  /* 批量操作 */
+  const batchAction = async (action: 'confirm' | 'dismiss') => {
+    if (checkedIds.size === 0) return;
+    try {
+      await fetch(`${API}/api/report-review/findings/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ finding_ids: Array.from(checkedIds), action }),
+      });
+    } catch { /* ignore */ }
+    setCheckedIds(new Set());
+    loadResult();
+  };
+
+  /* 编辑描述 */
+  const startEdit = (f: ReportReviewFinding) => {
+    setEditingId(f.id);
+    setEditDesc(f.description || '');
+  };
+  const saveEdit = async () => {
+    if (!editingId) return;
+    try {
+      await fetch(`${API}/api/report-review/finding/${editingId}/edit`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: editDesc }),
+      });
+    } catch { /* ignore */ }
+    setEditingId(null);
+    loadResult();
+  };
+  const cancelEdit = () => { setEditingId(null); };
+
   if (loading) return <div style={{ textAlign: 'center', padding: 40, color: '#888' }}>加载中...</div>;
   if (!result) return (
     <div style={{ textAlign: 'center', padding: 60 }}>
@@ -82,7 +136,9 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
   const allFindings = result.findings ?? [];
   const riskSummary = result.risk_summary || { high: 0, medium: 0, low: 0 };
   const categorySummary = result.category_summary || {};
-  const confirmationSummary = result.confirmation_summary || { confirmed: allFindings.length, dismissed: 0, pending: 0 };
+  const confirmed = allFindings.filter(f => f.confirmation_status === 'confirmed').length;
+  const dismissed = allFindings.filter(f => f.confirmation_status === 'dismissed').length;
+  const pending = allFindings.filter(f => f.confirmation_status === 'pending_confirmation').length;
 
   // Group by account_name, preserve order
   const groupOrder: string[] = [];
@@ -94,6 +150,19 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
     }
     grouped[f.account_name].push(f);
   }
+
+  /* 状态标签颜色 */
+  const statusStyle = (s: FindingConfirmationStatus) => {
+    if (s === 'confirmed') return { bg: '#f6ffed', color: '#52c41a', label: '已确认' };
+    if (s === 'dismissed') return { bg: '#f5f5f5', color: '#999', label: '已忽略' };
+    return { bg: '#fffbe6', color: '#faad14', label: '待确认' };
+  };
+
+  /* 按钮通用样式 */
+  const btnSm = (bg: string, color: string): React.CSSProperties => ({
+    fontSize: 11, padding: '3px 10px', border: bg === '#fff' ? '1px solid #ddd' : 'none', borderRadius: 4,
+    cursor: 'pointer', background: bg, color, whiteSpace: 'nowrap',
+  });
 
   return (
     <div style={{ maxWidth: 960, margin: '0 auto' }}>
@@ -127,15 +196,15 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
           <div style={{ fontSize: 12, color: '#999', marginBottom: 12 }}>确认状态</div>
           <div style={{ display: 'flex', justifyContent: 'center', gap: 24 }}>
             <div>
-              <div style={{ fontSize: 28, fontWeight: 700, color: '#52c41a', lineHeight: 1.2 }}>{confirmationSummary.confirmed}</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: '#52c41a', lineHeight: 1.2 }}>{confirmed}</div>
               <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>已确认</div>
             </div>
             <div>
-              <div style={{ fontSize: 28, fontWeight: 700, color: '#bbb', lineHeight: 1.2 }}>{confirmationSummary.dismissed}</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: '#bbb', lineHeight: 1.2 }}>{dismissed}</div>
               <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>已忽略</div>
             </div>
             <div>
-              <div style={{ fontSize: 28, fontWeight: 700, color: '#faad14', lineHeight: 1.2 }}>{confirmationSummary.pending}</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: '#faad14', lineHeight: 1.2 }}>{pending}</div>
               <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>待确认</div>
             </div>
           </div>
@@ -150,15 +219,24 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
         </div>
       )}
 
-      {/* 问题清单标题 */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+      {/* 问题清单标题 + 批量操作 */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: '#333' }}>
           问题清单
           <span style={{ fontSize: 12, color: '#999', fontWeight: 400, marginLeft: 8 }}>
             共 {allFindings.length} 个问题，{groupOrder.length} 个科目
           </span>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          {checkedIds.size > 0 && (
+            <>
+              <span style={{ fontSize: 12, color: '#666' }}>已选 {checkedIds.size} 项</span>
+              <button onClick={() => batchAction('confirm')} style={btnSm('#52c41a', '#fff')}>批量确认</button>
+              <button onClick={() => batchAction('dismiss')} style={btnSm('#999', '#fff')}>批量忽略</button>
+              <button onClick={() => setCheckedIds(new Set())} style={btnSm('#fff', '#666')}>取消选择</button>
+            </>
+          )}
+          <button onClick={() => setCheckedIds(new Set(allFindings.map(f => f.id)))} style={{ fontSize: 11, padding: '4px 12px', border: '1px solid #ddd', borderRadius: 6, background: '#fff', cursor: 'pointer', color: '#666' }}>全选</button>
           <button onClick={() => setCollapsedGroups(new Set())} style={{ fontSize: 11, padding: '4px 12px', border: '1px solid #ddd', borderRadius: 6, background: '#fff', cursor: 'pointer', color: '#666' }}>全部展开</button>
           <button onClick={() => setCollapsedGroups(new Set(groupOrder))} style={{ fontSize: 11, padding: '4px 12px', border: '1px solid #ddd', borderRadius: 6, background: '#fff', cursor: 'pointer', color: '#666' }}>全部折叠</button>
         </div>
@@ -195,10 +273,88 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
 
             {/* 问题列表 */}
             {!isCollapsed && (
-              <div style={{ padding: '0' }}>
-                {findings.map((f, idx) => (
-                  <FindingRow key={f.id} finding={f} isLast={idx === findings.length - 1} />
-                ))}
+              <div>
+                {findings.map((f, idx) => {
+                  const riskColor = f.risk_level === 'high' ? '#cf1322' : f.risk_level === 'medium' ? '#d48806' : '#096dd9';
+                  const riskBg = f.risk_level === 'high' ? '#fff1f0' : f.risk_level === 'medium' ? '#fffbe6' : '#e6f7ff';
+                  const st = statusStyle(f.confirmation_status);
+                  const isDismissed = f.confirmation_status === 'dismissed';
+                  const isEditing = editingId === f.id;
+
+                  return (
+                    <div key={f.id} style={{
+                      padding: '14px 16px',
+                      borderBottom: idx === findings.length - 1 ? 'none' : '1px solid #f5f5f5',
+                      opacity: isDismissed ? 0.5 : 1,
+                      display: 'flex', gap: 10, alignItems: 'flex-start',
+                    }}>
+                      {/* 勾选框 */}
+                      <input
+                        type="checkbox"
+                        checked={checkedIds.has(f.id)}
+                        onChange={() => toggleCheck(f.id)}
+                        style={{ marginTop: 4, flexShrink: 0 }}
+                        aria-label={`选择 ${f.account_name}`}
+                      />
+                      {/* 标签列 */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0, paddingTop: 2 }}>
+                        <span style={{
+                          fontSize: 10, padding: '2px 8px', borderRadius: 10, textAlign: 'center',
+                          backgroundColor: FINDING_CATEGORY_COLORS[f.category] || '#888', color: '#fff', whiteSpace: 'nowrap',
+                        }}>
+                          {FINDING_CATEGORY_LABELS[f.category] || '未分类'}
+                        </span>
+                        <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, textAlign: 'center', backgroundColor: riskBg, color: riskColor, whiteSpace: 'nowrap' }}>
+                          {RISK_LABELS[f.risk_level]}风险
+                        </span>
+                        <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, textAlign: 'center', backgroundColor: st.bg, color: st.color, whiteSpace: 'nowrap' }}>
+                          {st.label}
+                        </span>
+                      </div>
+                      {/* 内容 */}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        {isEditing ? (
+                          <div>
+                            <textarea
+                              value={editDesc}
+                              onChange={e => setEditDesc(e.target.value)}
+                              style={{ width: '100%', minHeight: 60, fontSize: 13, padding: 8, border: '1px solid #d9d9d9', borderRadius: 6, resize: 'vertical' }}
+                            />
+                            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                              <button onClick={saveEdit} style={btnSm('var(--gt-primary, #4b2d77)', '#fff')}>保存</button>
+                              <button onClick={cancelEdit} style={btnSm('#fff', '#666')}>取消</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <div style={{ fontSize: 13, color: '#333', lineHeight: 1.6 }}>{f.description}</div>
+                            {f.location && <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>📍 {f.location}</div>}
+                            {f.suggestion && (
+                              <div style={{ fontSize: 12, color: '#52c41a', marginTop: 4, background: '#f6ffed', padding: '4px 10px', borderRadius: 6, display: 'inline-block' }}>
+                                💡 {f.suggestion}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {/* 操作按钮 */}
+                      {!isEditing && (
+                        <div style={{ display: 'flex', gap: 4, flexShrink: 0, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                          {f.confirmation_status !== 'confirmed' && (
+                            <button onClick={() => updateStatus(f.id, 'confirm')} style={btnSm('#52c41a', '#fff')}>确认</button>
+                          )}
+                          {f.confirmation_status !== 'dismissed' && (
+                            <button onClick={() => updateStatus(f.id, 'dismiss')} style={btnSm('#999', '#fff')}>忽略</button>
+                          )}
+                          {isDismissed && (
+                            <button onClick={() => updateStatus(f.id, 'restore')} style={btnSm('#fff', '#4b2d77')}>恢复</button>
+                          )}
+                          <button onClick={() => startEdit(f)} style={btnSm('#fff', '#666')}>编辑</button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -227,41 +383,6 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
         >
           {exporting ? '导出中...' : '导出 Word'}
         </button>
-      </div>
-    </div>
-  );
-};
-
-/* 单条问题行组件 */
-const FindingRow: React.FC<{ finding: ReportReviewFinding; isLast: boolean }> = ({ finding: f, isLast }) => {
-  const riskColor = f.risk_level === 'high' ? '#cf1322' : f.risk_level === 'medium' ? '#d48806' : '#096dd9';
-  const riskBg = f.risk_level === 'high' ? '#fff1f0' : f.risk_level === 'medium' ? '#fffbe6' : '#e6f7ff';
-
-  return (
-    <div style={{ padding: '14px 16px', borderBottom: isLast ? 'none' : '1px solid #f5f5f5', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-      {/* 左侧标签列 */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0, paddingTop: 2 }}>
-        <span style={{
-          fontSize: 10, padding: '2px 8px', borderRadius: 10, textAlign: 'center',
-          backgroundColor: FINDING_CATEGORY_COLORS[f.category] || '#888', color: '#fff', whiteSpace: 'nowrap',
-        }}>
-          {FINDING_CATEGORY_LABELS[f.category] || '未分类'}
-        </span>
-        <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, textAlign: 'center', backgroundColor: riskBg, color: riskColor, whiteSpace: 'nowrap' }}>
-          {RISK_LABELS[f.risk_level]}风险
-        </span>
-      </div>
-      {/* 右侧内容 */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, color: '#333', lineHeight: 1.6 }}>{f.description}</div>
-        {f.location && (
-          <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>📍 {f.location}</div>
-        )}
-        {f.suggestion && (
-          <div style={{ fontSize: 12, color: '#52c41a', marginTop: 4, background: '#f6ffed', padding: '4px 10px', borderRadius: 6, display: 'inline-block' }}>
-            💡 {f.suggestion}
-          </div>
-        )}
       </div>
     </div>
   );
