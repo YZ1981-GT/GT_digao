@@ -4110,3 +4110,93 @@ class TestBookValueExtraction:
         closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
         assert closing == 36000.0  # 48000 - 12000
         assert opening == 28000.0  # 35000 - 7000
+
+
+class TestCashflowSupplementSkip:
+    """测试现金流量表补充资料项目的跳过逻辑。"""
+
+    def test_skip_goodwill_impairment_loss(self):
+        """商誉减值损失应跳过金额核对。"""
+        item = StatementItem(
+            id="gw1", account_name="商誉减值损失",
+            statement_type=StatementType.CASH_FLOW,
+            sheet_name="现金流量表", opening_balance=0, closing_balance=500,
+            row_index=1,
+        )
+        assert engine._should_skip_amount_check(item) is True
+
+    def test_skip_asset_impairment_provision(self):
+        """资产减值准备应跳过金额核对。"""
+        item = StatementItem(
+            id="ai1", account_name="资产减值准备",
+            statement_type=StatementType.CASH_FLOW,
+            sheet_name="现金流量表", opening_balance=0, closing_balance=300,
+            row_index=1,
+        )
+        assert engine._should_skip_amount_check(item) is True
+
+
+class TestBalanceLabelRowExtraction:
+    """测试从变动表中提取"期末余额"/"期初余额"行的值（策略4）。"""
+
+    def test_undistributed_profit_movement_table(self):
+        """未分配利润变动表：期初+增减=期末，无"合计"行。"""
+        note = NoteTable(
+            id="up1", account_name="未分配利润", section_title="未分配利润",
+            headers=["项目", "金额"],
+            rows=[
+                ["期初未分配利润", -1305501.53],
+                ["加：本期归属于母公司所有者的净利润", 200000],
+                ["减：提取法定盈余公积", 0],
+                ["期末未分配利润", -1105501.53],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == -1105501.53
+        assert opening == -1305501.53
+
+    def test_balance_label_with_year_end(self):
+        """年末余额/年初余额标签行。"""
+        note = NoteTable(
+            id="up2", account_name="盈余公积", section_title="盈余公积",
+            headers=["项目", "金额"],
+            rows=[
+                ["年初余额", 50000],
+                ["本年增加", 10000],
+                ["年末余额", 60000],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 60000.0
+        assert opening == 50000.0
+
+    def test_no_balance_label_rows_returns_none(self):
+        """没有期末/期初标签行时返回 (None, None)。"""
+        note = NoteTable(
+            id="up3", account_name="某科目", section_title="某科目",
+            headers=["项目", "数据A", "数据B"],
+            rows=[
+                ["甲", 100, 200],
+                ["乙", 300, 400],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        # 没有合计行也没有期末/期初标签行，应返回 (None, None)
+        # (策略4不命中，策略5也不命中因为有2行)
+        assert closing is None
+        assert opening is None
+
+    def test_movement_table_with_multiple_columns(self):
+        """变动表有多列时，从期末/期初行取第一个数值。"""
+        note = NoteTable(
+            id="up4", account_name="未分配利润", section_title="未分配利润",
+            headers=["项目", "本年金额", "上年金额"],
+            rows=[
+                ["期初余额", 50000, 30000],
+                ["本期增加", 10000, 20000],
+                ["期末余额", 60000, 50000],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 60000.0
+        assert opening == 50000.0

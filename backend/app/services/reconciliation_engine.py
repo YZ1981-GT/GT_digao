@@ -197,6 +197,7 @@ class ReconciliationEngine:
         "公允价值变动损失", "财务费用",
         "投资损失", "递延所得税资产减少", "递延所得税负债增加",
         "存货的减少", "经营性应收项目", "经营性应付项目",
+        "商誉减值损失", "资产减值准备",
         "现金的期末余额", "现金的期初余额",
         "现金等价物的期末余额", "现金等价物的期初余额",
         "现金及现金等价物净增加额",
@@ -3642,13 +3643,62 @@ class ReconciliationEngine:
         if calc_result != (None, None):
             return calc_result
 
-        # ── 策略 4：单行表格回退 ──
+        # ── 策略 4：变动表中找"期末余额"/"期末未分配利润"行 ──
+        # 未分配利润等科目的附注表格是变动表（期初+增减=期末），
+        # 没有"合计"行，但有"期末余额"/"期末未分配利润"行直接包含期末值。
+        balance_row_result = ReconciliationEngine._extract_from_balance_label_rows(
+            note, norm_headers, header_rows,
+        )
+        if balance_row_result != (None, None):
+            return balance_row_result
+
+        # ── 策略 5：单行表格回退 ──
         if len(note.rows) == 1:
             return ReconciliationEngine._extract_from_total_row(
                 note.rows[0], norm_headers, header_rows,
             )
 
         return (None, None)
+
+    @staticmethod
+    def _extract_from_balance_label_rows(
+        note: NoteTable,
+        norm_headers: List[str],
+        header_rows: List[List[str]],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """从变动表中找"期末余额"/"期末未分配利润"/"期初余额"行提取值。
+
+        未分配利润等科目的附注表格是变动表（期初+增减变动=期末），
+        没有"合计"行，但有标签行直接包含期末/期初值。
+        """
+        closing_label_kw = ["期末余额", "期末未分配", "本期期末余额", "年末余额", "期末数"]
+        opening_label_kw = ["期初余额", "期初未分配", "本期期初余额", "年初余额", "期初数"]
+
+        closing_val: Optional[float] = None
+        opening_val: Optional[float] = None
+
+        for row in note.rows:
+            if not row:
+                continue
+            first = str(row[0] if row else "").replace(" ", "").replace("\u3000", "").strip()
+
+            is_closing_row = any(kw in first for kw in closing_label_kw)
+            is_opening_row = any(kw in first for kw in opening_label_kw)
+
+            if not is_closing_row and not is_opening_row:
+                continue
+
+            # 从该行提取第一个数值（跳过标签列）
+            for ci in range(1, len(row)):
+                v = _safe_float(row[ci])
+                if v is not None:
+                    if is_closing_row and closing_val is None:
+                        closing_val = v
+                    elif is_opening_row and opening_val is None:
+                        opening_val = v
+                    break
+
+        return (closing_val, opening_val)
 
     @staticmethod
     def _extract_from_total_row(
