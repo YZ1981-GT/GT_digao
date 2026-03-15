@@ -30,10 +30,10 @@ engine = ReconciliationEngine()
 
 def _item(name, opening=100.0, closing=200.0,
           company_opening=None, company_closing=None,
-          is_consolidated=False):
+          is_consolidated=False, stmt_type=None):
     return StatementItem(
         id=str(uuid.uuid4()), account_name=name,
-        statement_type=StatementType.BALANCE_SHEET,
+        statement_type=stmt_type or StatementType.BALANCE_SHEET,
         sheet_name="资产负债表",
         opening_balance=opening, closing_balance=closing,
         company_opening_balance=company_opening,
@@ -689,4 +689,121 @@ class TestParentScopeAmountConsistency:
         assert len(entry.note_table_ids) >= 4 or note4.id in entry.note_table_ids, (
             f"母公司附注(note4)被排除在匹配映射之外! "
             f"matched={entry.note_table_ids}, note4.id={note4.id}"
+        )
+
+    def test_parent_scope_fallback_when_no_note_identified_as_parent(self):
+        """当 ancestor_map 和启发式都未能识别母公司附注时，
+        补充校验应使用公司余额与非合并口径附注比对，检出母公司不一致。"""
+        engine = ReconciliationEngine()
+        # 合并期末=5000, 期初=3000; 母公司期末=800, 期初=600
+        item = _item(
+            "投资收益",
+            closing=5000, opening=3000,
+            company_closing=800, company_opening=600,
+            is_consolidated=True,
+            stmt_type=StatementType.INCOME_STATEMENT,
+        )
+        # 合并附注：值=5000/3000（与合并余额一致）
+        note_c = _note("投资收益", title="投资收益", rows=[
+            ["合计", 3000, 5000],
+        ])
+        # 母公司附注：值=800/500（期初与母公司余额600不一致）
+        # section_title 不含母公司关键词，ancestor_map 也为空
+        note_p = _note("投资收益", title="投资收益", rows=[
+            ["合计", 500, 800],
+        ])
+        ts_c = _ts(note_c.id, closing_cell="R0C2", opening_cell="R0C1")
+        ts_p = _ts(note_p.id, closing_cell="R0C2", opening_cell="R0C1")
+        ts_map = {note_c.id: ts_c, note_p.id: ts_p}
+
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_c.id, note_p.id],
+            match_confidence=1.0,
+        )])
+
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_c, note_p], ts_map, note_sections=None,
+        )
+        # 母公司期初 600 vs 附注 500 → 应检出不一致
+        parent_opening_findings = [
+            f for f in findings
+            if "母公司" in f.description and "期初" in f.description
+        ]
+        assert len(parent_opening_findings) >= 1, (
+            f"应检出母公司期初不一致，实际 findings={[f.description for f in findings]}"
+        )
+
+    def test_parent_scope_fallback_both_notes_same_closing(self):
+        """当合并和母公司期末值相同但期初不同时，
+        补充校验应在启发式失败的情况下检出母公司期初不一致。"""
+        engine = ReconciliationEngine()
+        # 合并和母公司期末都是5000，但期初不同
+        item = _item(
+            "投资收益",
+            closing=5000, opening=3000,
+            company_closing=5000, company_opening=2000,
+            is_consolidated=True,
+            stmt_type=StatementType.INCOME_STATEMENT,
+        )
+        # 合并附注：5000/3000
+        note_c = _note("投资收益", title="投资收益", rows=[
+            ["合计", 3000, 5000],
+        ])
+        # 母公司附注：5000/1500（期初与母公司余额2000不一致）
+        note_p = _note("投资收益", title="投资收益", rows=[
+            ["合计", 1500, 5000],
+        ])
+        ts_c = _ts(note_c.id, closing_cell="R0C2", opening_cell="R0C1")
+        ts_p = _ts(note_p.id, closing_cell="R0C2", opening_cell="R0C1")
+        ts_map = {note_c.id: ts_c, note_p.id: ts_p}
+
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_c.id, note_p.id],
+            match_confidence=1.0,
+        )])
+
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_c, note_p], ts_map, note_sections=None,
+        )
+        # 母公司期初 2000 vs 附注 1500 → 应检出
+        parent_findings = [f for f in findings if "母公司" in f.description]
+        assert len(parent_findings) >= 1, (
+            f"应检出母公司不一致，实际 findings={[f.description for f in findings]}"
+        )
+
+    def test_parent_scope_fallback_no_false_positive_when_matched(self):
+        """当母公司附注金额与公司余额一致时，补充校验不应产生误报。"""
+        engine = ReconciliationEngine()
+        item = _item(
+            "投资收益",
+            closing=5000, opening=3000,
+            company_closing=800, company_opening=600,
+            is_consolidated=True,
+            stmt_type=StatementType.INCOME_STATEMENT,
+        )
+        note_c = _note("投资收益", title="投资收益", rows=[
+            ["合计", 3000, 5000],
+        ])
+        # 母公司附注金额与公司余额完全一致
+        note_p = _note("投资收益", title="投资收益", rows=[
+            ["合计", 600, 800],
+        ])
+        ts_c = _ts(note_c.id, closing_cell="R0C2", opening_cell="R0C1")
+        ts_p = _ts(note_p.id, closing_cell="R0C2", opening_cell="R0C1")
+        ts_map = {note_c.id: ts_c, note_p.id: ts_p}
+
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_c.id, note_p.id],
+            match_confidence=1.0,
+        )])
+
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_c, note_p], ts_map, note_sections=None,
+        )
+        # 合并 5000/3000 一致，母公司 800/600 一致 → 无 finding
+        assert len(findings) == 0, (
+            f"不应有 finding，实际={[f.description for f in findings]}"
         )

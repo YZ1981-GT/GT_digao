@@ -635,15 +635,6 @@ class ReconciliationEngine:
     ]
 
     @staticmethod
-    def _is_parent_company_note(note: NoteTable) -> bool:
-        """判断附注表格是否属于母公司报表附注（而非合并报表附注）。
-
-        母公司附注表格的 section_title 通常包含"母公司财务报表主要项目注释"等关键词。
-        """
-        title = (note.section_title or "")
-        return any(kw in title for kw in ReconciliationEngine.PARENT_COMPANY_NOTE_KEYWORDS)
-
-    @staticmethod
     def _is_parent_company_note(
         note: NoteTable,
         ancestor_titles: Optional[List[str]] = None,
@@ -962,6 +953,98 @@ class ReconciliationEngine:
                             reasoning=f"校验公式: 报表期初余额{scope_desc}({stmt_opening}) - 附注合计({effective_opening}) = {diff}",
                             note_table_ids=[note_id],
                         ))
+
+            # ── 母公司口径补充校验 ──
+            # 当 is_consolidated=True 且报表有公司余额，但没有任何附注被识别为母公司口径时，
+            # ancestor_map 和启发式都未能识别母公司附注。
+            # 此时遍历所有有效附注表格，用公司余额逐个比对，确保母公司口径不被遗漏。
+            if (item.is_consolidated
+                    and "parent" not in scope_matched_closing
+                    and "parent" not in scope_matched_opening
+                    and (item.company_closing_balance is not None
+                         or item.company_opening_balance is not None)
+                    and valid_note_ids):
+                _p_matched_c = False
+                _p_matched_o = False
+                _p_findings_c: List[ReportReviewFinding] = []
+                _p_findings_o: List[ReportReviewFinding] = []
+                _p_any_c = False
+                _p_any_o = False
+
+                for note_id in valid_note_ids:
+                    note = note_map.get(note_id)
+                    ts = table_structures.get(note_id)
+                    if not note or not ts:
+                        continue
+                    n_c = self._get_cell_value(note, ts.closing_balance_cell)
+                    n_o = self._get_cell_value(note, ts.opening_balance_cell)
+                    if self._is_revenue_cost_combined_table(note):
+                        rc_c, rc_o = self._extract_revenue_cost_from_combined_table(note, item.account_name)
+                        if rc_c is not None:
+                            n_c = rc_c
+                        if rc_o is not None:
+                            n_o = rc_o
+                    r_c, r_o = self._extract_note_totals_by_rules(note)
+                    if n_c is None and r_c is not None:
+                        n_c = r_c
+                    if n_o is None and r_o is not None:
+                        n_o = r_o
+
+                    # 跳过与合并余额一致的附注（合并口径）
+                    if (_amounts_equal(n_c, item.closing_balance)
+                            and _amounts_equal(n_o, item.opening_balance)):
+                        continue
+
+                    if n_c is not None:
+                        _p_any_c = True
+                        if item.company_closing_balance is not None:
+                            if _amounts_equal(item.company_closing_balance, n_c):
+                                _p_matched_c = True
+                            else:
+                                diff = round(item.company_closing_balance - n_c, 2)
+                                _p_findings_c.append(self._make_finding(
+                                    category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
+                                    account_name=item.account_name,
+                                    statement_amount=item.company_closing_balance,
+                                    note_amount=n_c,
+                                    difference=diff,
+                                    location=f"附注-{item.account_name}-{note.section_title}-期末余额",
+                                    description=f"报表期末余额（母公司）{item.company_closing_balance}与附注合计{n_c}不一致，差异{diff}",
+                                    risk_level=self._assess_risk(abs(diff), item.company_closing_balance),
+                                    reasoning=f"校验公式: 报表期末余额（母公司）({item.company_closing_balance}) - 附注合计({n_c}) = {diff}",
+                                    note_table_ids=[note_id],
+                                ))
+                    if n_o is not None:
+                        _p_any_o = True
+                        if item.company_opening_balance is not None:
+                            if _amounts_equal(item.company_opening_balance, n_o):
+                                _p_matched_o = True
+                            else:
+                                diff = round(item.company_opening_balance - n_o, 2)
+                                _p_findings_o.append(self._make_finding(
+                                    category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
+                                    account_name=item.account_name,
+                                    statement_amount=item.company_opening_balance,
+                                    note_amount=n_o,
+                                    difference=diff,
+                                    location=f"附注-{item.account_name}-{note.section_title}-期初余额",
+                                    description=f"报表期初余额（母公司）{item.company_opening_balance}与附注合计{n_o}不一致，差异{diff}",
+                                    risk_level=self._assess_risk(abs(diff), item.company_opening_balance),
+                                    reasoning=f"校验公式: 报表期初余额（母公司）({item.company_opening_balance}) - 附注合计({n_o}) = {diff}",
+                                    note_table_ids=[note_id],
+                                ))
+
+                if not _p_matched_c and _p_findings_c:
+                    best = min(_p_findings_c, key=lambda f: abs(f.difference or 0))
+                    findings.append(best)
+                if not _p_matched_o and _p_findings_o:
+                    best = min(_p_findings_o, key=lambda f: abs(f.difference or 0))
+                    findings.append(best)
+                # 合并到 scope 字典供后续"未找到值"警告使用
+                scope_matched_closing["parent"] = _p_matched_c
+                scope_matched_opening["parent"] = _p_matched_o
+                scope_any_closing_found["parent"] = _p_any_c
+                scope_any_opening_found["parent"] = _p_any_o
 
             # 只有当所有匹配表格都不一致时，才报告差异最小的那个 finding
             # 按口径分别聚合：每个 scope 独立判断是否通过
