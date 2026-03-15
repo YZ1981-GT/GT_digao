@@ -206,8 +206,8 @@ class TestParentScopeAmountConsistency:
         # 母公司余额 800/600 与附注 800/600 一致 → 无 finding
         assert len(findings) == 0
 
-    def test_only_parent_note_without_sections_uses_consolidated(self):
-        """无 note_sections 时，section_title 不含关键词 → 用合并余额（旧行为）。"""
+    def test_only_parent_note_without_sections_uses_heuristic(self):
+        """无 note_sections 时，启发式推断附注与公司余额更接近 → 用母公司口径。"""
         item = _item(
             "长期股权投资",
             opening=5000, closing=8000,
@@ -224,12 +224,11 @@ class TestParentScopeAmountConsistency:
             match_confidence=1.0,
         )])
 
-        # 不传 note_sections → 无法识别母公司口径 → 用合并余额 8000 vs 附注 800 → 不一致
+        # 不传 note_sections → 启发式推断附注800与公司余额800一致 → 母公司口径 → 通过
         findings = engine.check_amount_consistency(
             mm, [item], [note_p], {note_p.id: ts_p},
         )
-        assert len(findings) >= 1
-        assert any("8000" in (f.description or "") for f in findings)
+        assert len(findings) == 0
 
     def test_both_notes_with_sections(self):
         """同时有合并和母公司附注，通过 NoteSection 层级正确区分口径。"""
@@ -329,3 +328,128 @@ class TestParentScopeAmountConsistency:
         )
         # 母公司 500/300 vs 附注 500/300 → 一致
         assert len(findings) == 0
+
+    def test_investment_income_parent_mismatch_with_consolidated_match(self):
+        """上市版：合并投资收益一致但母公司投资收益不一致时，应报告母公司差异。"""
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="投资收益",
+            statement_type=StatementType.INCOME_STATEMENT,
+            sheet_name="利润表",
+            opening_balance=1000, closing_balance=2000,
+            company_opening_balance=300, company_closing_balance=500,
+            is_consolidated=True, row_index=1,
+        )
+        # 合并附注：2000/1000 → 与合并报表一致
+        note_consolidated = _note(
+            "投资收益", title="投资收益",
+            rows=[["权益法投资收益", 1000, 2000], ["合计", 1000, 2000]],
+        )
+        # 母公司附注：999/300 → 期末与母公司报表500不一致
+        note_parent = _note(
+            "投资收益", title="投资收益",
+            rows=[["对子公司投资收益", 300, 999], ["合计", 300, 999]],
+        )
+        ts_map = {
+            note_consolidated.id: _ts(note_consolidated.id, is_income=True),
+            note_parent.id: _ts(note_parent.id, is_income=True),
+        }
+
+        sections = _build_sections_with_parent(
+            note_consolidated_id=note_consolidated.id,
+            note_parent_id=note_parent.id,
+        )
+
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_consolidated.id, note_parent.id],
+            match_confidence=1.0,
+        )])
+
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_consolidated, note_parent], ts_map,
+            note_sections=sections,
+        )
+        # 合并 2000/1000 vs 附注 2000/1000 → 一致（无 finding）
+        # 母公司 500/300 vs 附注 999/300 → 期末不一致（应有 finding）
+        assert len(findings) >= 1
+        parent_findings = [f for f in findings if "母公司" in f.description]
+        assert len(parent_findings) >= 1
+        assert "500" in parent_findings[0].description or "999" in parent_findings[0].description
+
+    def test_parent_scope_heuristic_when_ancestor_map_empty(self):
+        """当 note_sections 为空导致 ancestor_map 无法识别母公司附注时，
+        启发式金额推断应正确将附注归入母公司口径。"""
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="投资收益",
+            statement_type=StatementType.INCOME_STATEMENT,
+            sheet_name="利润表",
+            closing_balance=50000000, opening_balance=40000000,
+            company_closing_balance=5981811.76, company_opening_balance=171681711.32,
+            is_consolidated=True, row_index=1,
+        )
+        # 合并附注：50000000/40000000 → 与合并报表一致
+        note_consolidated = _note(
+            "投资收益", title="投资收益",
+            rows=[["权益法投资收益", 40000000, 50000000],
+                  ["合计", 40000000, 50000000]],
+        )
+        # 母公司附注：5981811.76/4243663.30 → 期末与母公司一致，期初不一致
+        note_parent = _note(
+            "投资收益", title="投资收益",
+            rows=[["投资收益", 4243663.30, 5367048.22],
+                  ["债券利息", 0, 614763.54],
+                  ["合计", 4243663.30, 5981811.76]],
+        )
+        ts_map = {
+            note_consolidated.id: _ts(note_consolidated.id, is_income=True),
+            note_parent.id: _ts(note_parent.id, is_income=True),
+        }
+
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_consolidated.id, note_parent.id],
+            match_confidence=1.0,
+        )])
+
+        # 不传 note_sections → ancestor_map 为空
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_consolidated, note_parent], ts_map,
+            note_sections=None,
+        )
+        # 合并 50000000/40000000 vs 附注 50000000/40000000 → 一致
+        # 母公司 5981811.76/171681711.32 vs 附注 5981811.76/4243663.30
+        #   → 期末一致，期初不一致（差异 167438048.02）
+        assert len(findings) >= 1
+        parent_findings = [f for f in findings if "母公司" in f.description]
+        assert len(parent_findings) >= 1
+        assert "171681711.32" in parent_findings[0].description or "167438048.02" in parent_findings[0].description
+
+    def test_parent_scope_heuristic_no_false_positive(self):
+        """启发式推断不应将合并附注误判为母公司附注。"""
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="投资收益",
+            statement_type=StatementType.INCOME_STATEMENT,
+            sheet_name="利润表",
+            closing_balance=50000, opening_balance=30000,
+            company_closing_balance=5000, company_opening_balance=3000,
+            is_consolidated=True, row_index=1,
+        )
+        # 只有合并附注，金额与合并余额一致
+        note_c = _note(
+            "投资收益", title="投资收益",
+            rows=[["合计", 30000, 50000]],
+        )
+        ts_map = {note_c.id: _ts(note_c.id, is_income=True)}
+
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_c.id],
+            match_confidence=1.0,
+        )])
+
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_c], ts_map, note_sections=None,
+        )
+        # 合并附注匹配合并余额 → 不应误报
+        assert len(findings) == 0
+

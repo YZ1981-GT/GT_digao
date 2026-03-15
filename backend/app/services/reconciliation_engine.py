@@ -766,6 +766,25 @@ class ReconciliationEngine:
                 ancestors = ancestor_map.get(note_id)
                 is_parent_note = self._is_parent_company_note(note, ancestors)
 
+                # ── 启发式补救：当 ancestor_map 未能识别母公司附注时，
+                # 通过金额接近度推断口径。如果附注合计值与公司余额更接近
+                # 而非合并余额，则视为母公司口径。
+                if (not is_parent_note
+                        and item.is_consolidated
+                        and item.company_closing_balance is not None):
+                    _note_val = self._get_cell_value(note, ts.closing_balance_cell)
+                    if _note_val is None:
+                        _rule_c, _rule_o = self._extract_note_totals_by_rules(note)
+                        _note_val = _rule_c
+                    if _note_val is not None:
+                        _diff_cons = abs(_note_val - (item.closing_balance or 0))
+                        _diff_comp = abs(_note_val - (item.company_closing_balance or 0))
+                        # 附注值与公司余额一致或明显更接近 → 推断为母公司附注
+                        if (_amounts_equal(_note_val, item.company_closing_balance)
+                                or (_diff_comp < _diff_cons * 0.5
+                                    and not _amounts_equal(_note_val, item.closing_balance))):
+                            is_parent_note = True
+
                 # 根据附注口径选择对应的报表余额：
                 # 母公司附注 → 用公司数；合并附注 → 用合并数
                 if is_parent_note and item.is_consolidated:
