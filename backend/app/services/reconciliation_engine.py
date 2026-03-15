@@ -1734,6 +1734,11 @@ class ReconciliationEngine:
                 is_bare_header = stripped in ("其中：", "其中:", "其中")
                 if is_bare_header:
                     continue
+                # 跳过被 LLM 错误标记为 sub_item 的合计/小计行
+                norm_label = stripped.replace(" ", "").replace("\u3000", "")
+                if any(kw == norm_label or norm_label.endswith(kw)
+                       for kw in ("合计", "小计", "总计", "总额")):
+                    continue
                 parent_children.setdefault(row.parent_row_index, []).append(row.row_index)
 
         for parent_idx, child_indices in parent_children.items():
