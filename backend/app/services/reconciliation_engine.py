@@ -75,6 +75,10 @@ class ReconciliationEngine:
         matched_note_ids: set = set()
         unmatched_items: List[str] = []
 
+        # 上市版报表一个科目可能有：合并附注 + 多个明细子表 + 母公司附注，
+        # 限制过小会导致母公司附注被截断，无法进行母公司口径的金额校验。
+        MAX_NOTES_PER_ITEM = 10
+
         for item in items:
             # 1) 优先使用模板映射
             template_notes: List[Tuple[str, float]] = []
@@ -85,7 +89,7 @@ class ReconciliationEngine:
                     template_notes.append((note.id, 1.0))
 
             if template_notes:
-                note_ids = [n[0] for n in template_notes[:3]]
+                note_ids = [n[0] for n in template_notes[:MAX_NOTES_PER_ITEM]]
                 entries.append(MatchingEntry(
                     statement_item_id=item.id,
                     note_table_ids=note_ids,
@@ -104,7 +108,7 @@ class ReconciliationEngine:
             best_notes.sort(key=lambda x: x[1], reverse=True)
 
             if best_notes:
-                note_ids = [n[0] for n in best_notes[:3]]
+                note_ids = [n[0] for n in best_notes[:MAX_NOTES_PER_ITEM]]
                 confidence = best_notes[0][1]
                 entries.append(MatchingEntry(
                     statement_item_id=item.id,
@@ -783,7 +787,25 @@ class ReconciliationEngine:
                         if (_amounts_equal(_note_val, item.company_closing_balance)
                                 or (_diff_comp < _diff_cons * 0.5
                                     and not _amounts_equal(_note_val, item.closing_balance))):
-                            is_parent_note = True
+                            # 当期末值同时匹配合并和母公司时（两者相等），
+                            # 进一步用期初值区分：如果期初值更接近母公司期初 → 母公司
+                            if (_amounts_equal(_note_val, item.closing_balance)
+                                    and item.company_opening_balance is not None):
+                                _note_opening_val = self._get_cell_value(note, ts.opening_balance_cell)
+                                if _note_opening_val is None:
+                                    _r_c, _r_o = self._extract_note_totals_by_rules(note)
+                                    _note_opening_val = _r_o
+                                if _note_opening_val is not None:
+                                    # 期初值与合并期初一致 → 这是合并附注，不是母公司
+                                    if (_amounts_equal(_note_opening_val, item.opening_balance)
+                                            and not _amounts_equal(_note_opening_val, item.company_opening_balance)):
+                                        is_parent_note = False
+                                    else:
+                                        is_parent_note = True
+                                else:
+                                    is_parent_note = True
+                            else:
+                                is_parent_note = True
 
                 # 根据附注口径选择对应的报表余额：
                 # 母公司附注 → 用公司数；合并附注 → 用合并数

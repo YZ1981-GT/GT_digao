@@ -453,3 +453,240 @@ class TestParentScopeAmountConsistency:
         # 合并附注匹配合并余额 → 不应误报
         assert len(findings) == 0
 
+
+    def test_parent_note_closing_equals_consolidated_opening_differs(self):
+        """当母公司附注期末值恰好等于合并期末值时，启发式无法区分口径，
+        导致母公司期初不一致被遗漏。应通过 ancestor_map 或其他方式正确识别。"""
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="投资收益",
+            statement_type=StatementType.INCOME_STATEMENT,
+            sheet_name="利润表",
+            # 合并：期末5000, 期初3000
+            closing_balance=5000, opening_balance=3000,
+            # 母公司：期末5000（与合并相同!）, 期初8000（与合并不同）
+            company_closing_balance=5000, company_opening_balance=8000,
+            is_consolidated=True, row_index=1,
+        )
+        # 合并附注：5000/3000 → 与合并报表一致
+        note_consolidated = _note(
+            "投资收益", title="投资收益",
+            rows=[["权益法投资收益", 3000, 5000], ["合计", 3000, 5000]],
+        )
+        # 母公司附注：5000/6000 → 期末与母公司一致，期初与母公司8000不一致
+        note_parent = _note(
+            "投资收益", title="投资收益",
+            rows=[["对子公司投资收益", 6000, 5000], ["合计", 6000, 5000]],
+        )
+        ts_map = {
+            note_consolidated.id: _ts(note_consolidated.id, is_income=True),
+            note_parent.id: _ts(note_parent.id, is_income=True),
+        }
+
+        # 使用 note_sections 正确标识母公司附注
+        sections = _build_sections_with_parent(
+            note_consolidated_id=note_consolidated.id,
+            note_parent_id=note_parent.id,
+        )
+
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_consolidated.id, note_parent.id],
+            match_confidence=1.0,
+        )])
+
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_consolidated, note_parent], ts_map,
+            note_sections=sections,
+        )
+        # 合并 5000/3000 vs 附注 5000/3000 → 一致
+        # 母公司 5000/8000 vs 附注 5000/6000 → 期末一致，期初不一致（差异 2000）
+        parent_findings = [f for f in findings if "母公司" in f.description]
+        assert len(parent_findings) >= 1, (
+            f"应检出母公司期初不一致，但实际 findings={[f.description for f in findings]}"
+        )
+
+    def test_parent_note_closing_equals_consolidated_no_sections(self):
+        """无 note_sections 时，母公司附注期末值等于合并期末值，
+        启发式无法区分 → 应通过期初金额差异补充推断。"""
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="投资收益",
+            statement_type=StatementType.INCOME_STATEMENT,
+            sheet_name="利润表",
+            closing_balance=5000, opening_balance=3000,
+            company_closing_balance=5000, company_opening_balance=8000,
+            is_consolidated=True, row_index=1,
+        )
+        # 合并附注
+        note_consolidated = _note(
+            "投资收益", title="投资收益",
+            rows=[["权益法投资收益", 3000, 5000], ["合计", 3000, 5000]],
+        )
+        # 母公司附注：期末5000（=合并），期初6000（≠合并3000，≠母公司8000）
+        note_parent = _note(
+            "投资收益", title="投资收益",
+            rows=[["对子公司投资收益", 6000, 5000], ["合计", 6000, 5000]],
+        )
+        ts_map = {
+            note_consolidated.id: _ts(note_consolidated.id, is_income=True),
+            note_parent.id: _ts(note_parent.id, is_income=True),
+        }
+
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_consolidated.id, note_parent.id],
+            match_confidence=1.0,
+        )])
+
+        # 不传 note_sections
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_consolidated, note_parent], ts_map,
+            note_sections=None,
+        )
+        # 母公司期初 8000 vs 附注 6000 → 应检出不一致
+        parent_findings = [f for f in findings if "母公司" in f.description]
+        assert len(parent_findings) >= 1, (
+            f"应检出母公司期初不一致，但实际 findings={[f.description for f in findings]}"
+        )
+
+    def test_parent_note_misplaced_under_consolidated_section(self):
+        """当 note_sections 将母公司附注错误地放在合并报表项目注释下时，
+        ancestor_map 会将其识别为合并口径。如果期末值恰好等于合并期末值，
+        启发式也无法补救 → 母公司期初不一致被遗漏。"""
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="投资收益",
+            statement_type=StatementType.INCOME_STATEMENT,
+            sheet_name="利润表",
+            closing_balance=5000, opening_balance=3000,
+            company_closing_balance=5000, company_opening_balance=8000,
+            is_consolidated=True, row_index=1,
+        )
+        # 合并附注
+        note_consolidated = _note(
+            "投资收益", title="投资收益",
+            rows=[["权益法投资收益", 3000, 5000], ["合计", 3000, 5000]],
+        )
+        # 母公司附注（期末=合并期末=5000，期初6000≠母公司8000）
+        note_parent = _note(
+            "投资收益", title="投资收益",
+            rows=[["对子公司投资收益", 6000, 5000], ["合计", 6000, 5000]],
+        )
+        ts_map = {
+            note_consolidated.id: _ts(note_consolidated.id, is_income=True),
+            note_parent.id: _ts(note_parent.id, is_income=True),
+        }
+
+        # 错误的 note_sections：两个附注都在合并报表项目注释下
+        sections = [NoteSection(
+            id="sec-root", title="五、重要会计政策及会计估计",
+            level=1, children=[
+                NoteSection(
+                    id="sec-consolidated", title="合并财务报表项目注释",
+                    level=2, children=[
+                        NoteSection(
+                            id="sec-c-child", title="投资收益",
+                            level=3, note_table_ids=[note_consolidated.id, note_parent.id],
+                        ),
+                    ],
+                ),
+            ],
+        )]
+
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_consolidated.id, note_parent.id],
+            match_confidence=1.0,
+        )])
+
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_consolidated, note_parent], ts_map,
+            note_sections=sections,
+        )
+        # 合并 5000/3000 vs 附注 5000/3000 → 一致
+        # 母公司 5000/8000 vs 附注 5000/6000 → 期初不一致
+        # 但由于 ancestor_map 将两个附注都归为合并口径，
+        # 且期末值=合并期末值，启发式也不会触发
+        # → 母公司期初不一致可能被遗漏
+        parent_findings = [f for f in findings if "母公司" in f.description]
+        assert len(parent_findings) >= 1, (
+            f"应检出母公司期初不一致，但实际 findings={[f.description for f in findings]}"
+        )
+
+    def test_parent_note_closing_matches_consolidated_not_company(self):
+        """母公司附注期末值等于合并期末值但不等于母公司期末值时，
+        启发式将其归为合并口径 → 母公司期初不一致被遗漏。
+        这是实际生产中最可能出现的场景。"""
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="投资收益",
+            statement_type=StatementType.INCOME_STATEMENT,
+            sheet_name="利润表",
+            closing_balance=50000000, opening_balance=40000000,
+            company_closing_balance=5981811.76, company_opening_balance=171681711.32,
+            is_consolidated=True, row_index=1,
+        )
+        # 合并附注：50000000/40000000 → 与合并报表一致
+        note_consolidated = _note(
+            "投资收益", title="投资收益",
+            rows=[["权益法投资收益", 40000000, 50000000],
+                  ["合计", 40000000, 50000000]],
+        )
+        # 母公司附注：LLM 识别的 closing_balance_cell 指向了错误的值（50000000而非5981811.76）
+        # 但实际表格中合计行的值是 5981811.76/4243663.30
+        # 这种情况下 _get_cell_value 返回的是 LLM 指向的值
+        # 而 _extract_note_totals_by_rules 返回的是规则引擎提取的合计行值
+        note_parent = _note(
+            "投资收益", title="投资收益",
+            rows=[["投资收益", 4243663.30, 5981811.76],
+                  ["合计", 4243663.30, 5981811.76]],
+        )
+        ts_map = {
+            note_consolidated.id: _ts(note_consolidated.id, is_income=True),
+            note_parent.id: _ts(note_parent.id, is_income=True),
+        }
+
+        # 不传 note_sections → ancestor_map 为空，依赖启发式
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note_consolidated.id, note_parent.id],
+            match_confidence=1.0,
+        )])
+
+        findings = engine.check_amount_consistency(
+            mm, [item], [note_consolidated, note_parent], ts_map,
+            note_sections=None,
+        )
+        # 合并 50000000/40000000 vs 附注 50000000/40000000 → 一致
+        # 母公司 5981811.76/171681711.32 vs 附注 5981811.76/4243663.30
+        #   → 期末一致，期初不一致
+        parent_findings = [f for f in findings if "母公司" in f.description]
+        assert len(parent_findings) >= 1, (
+            f"应检出母公司期初不一致，但实际 findings={[f.description for f in findings]}"
+        )
+
+    def test_parent_note_excluded_by_matching_limit(self):
+        """修复：匹配映射上限从3提升到10，确保母公司附注不被截断。"""
+        from app.services.reconciliation_engine import ReconciliationEngine
+        engine2 = ReconciliationEngine()
+
+        item = StatementItem(
+            id=str(uuid.uuid4()), account_name="投资收益",
+            statement_type=StatementType.INCOME_STATEMENT,
+            sheet_name="利润表",
+            closing_balance=50000000, opening_balance=40000000,
+            company_closing_balance=5981811.76, company_opening_balance=171681711.32,
+            is_consolidated=True, row_index=1,
+        )
+        # 4 个附注表格都叫"投资收益"
+        note1 = _note("投资收益", title="投资收益", rows=[["权益法投资收益", 40000000, 50000000], ["合计", 40000000, 50000000]])
+        note2 = _note("投资收益", title="投资收益明细", rows=[["子公司A", 20000000, 25000000]])
+        note3 = _note("投资收益", title="投资收益-按类型", rows=[["股权投资", 30000000, 40000000]])
+        note4 = _note("投资收益", title="投资收益", rows=[["对子公司投资收益", 4243663.30, 5981811.76], ["合计", 4243663.30, 5981811.76]])
+
+        all_notes = [note1, note2, note3, note4]
+        mm = engine2.build_matching_map([item], all_notes)
+
+        # 检查匹配映射中是否包含所有4个附注
+        entry = mm.entries[0]
+        assert len(entry.note_table_ids) >= 4 or note4.id in entry.note_table_ids, (
+            f"母公司附注(note4)被排除在匹配映射之外! "
+            f"matched={entry.note_table_ids}, note4.id={note4.id}"
+        )
