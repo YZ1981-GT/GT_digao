@@ -241,6 +241,9 @@ class ReportReviewEngine:
         formula_match_count = 0  # 公式无误的表格数
         sub_item_check_count = 0  # 其中项校验的表格数
         sub_item_match_count = 0  # 其中项无误的表格数
+        cross_table_check_count = 0  # 跨表交叉核对发现的问题数
+        wide_table_check_count = 0  # 宽表横向公式校验的表格数
+        wide_table_match_count = 0  # 宽表横向公式相符的表格数
         llm_reanalyzed_count = 0  # LLM 二次校验的表格数
         llm_fixed_count = 0  # LLM 修正结构的表格数
 
@@ -249,21 +252,30 @@ class ReportReviewEngine:
             _llm_reanalyzed_ids: set = set()
 
             amount_findings = self.reconciliation.check_amount_consistency(
-                session.matching_map, session.statement_items, session.note_tables, table_structures
+                session.matching_map, session.statement_items, session.note_tables, table_structures,
+                note_sections=session.note_sections,
             )
 
-            # ── LLM 二次校验：金额不一致时，调用 LLM 重新识别表格结构 ──
+            # ── LLM 二次校验：金额不一致或未提取到值时，调用 LLM 重新识别表格结构 ──
             if amount_findings and oai:
-                # 收集不一致 finding 涉及的附注表格 ID
+                # 收集不一致 finding 涉及的附注表格 ID（包括"未找到值"的 finding）
                 mismatch_note_ids: set = set()
+                not_found_tag = self.reconciliation.NOTE_VALUE_NOT_FOUND_TAG
+                not_found_count = sum(1 for f in amount_findings if not_found_tag in (f.description or ""))
+                mismatch_count = len(amount_findings) - not_found_count
                 for f in amount_findings:
                     if f.note_table_ids:
                         mismatch_note_ids.update(f.note_table_ids)
 
                 if mismatch_note_ids:
+                    msg_parts = []
+                    if mismatch_count > 0:
+                        msg_parts.append(f"{mismatch_count} 个金额不一致")
+                    if not_found_count > 0:
+                        msg_parts.append(f"{not_found_count} 个未提取到附注合计值")
                     yield json.dumps({
                         "status": "phase_progress", "phase": "reconciliation",
-                        "message": f"初步校验发现 {len(amount_findings)} 个待确认差异，正在调用 LLM 校验 {len(mismatch_note_ids)} 个表格结构...",
+                        "message": f"初步校验发现 {'、'.join(msg_parts)}，正在调用 LLM 校验 {len(mismatch_note_ids)} 个表格结构...",
                     }, ensure_ascii=False)
                     await asyncio.sleep(0)
 
@@ -306,6 +318,7 @@ class ReportReviewEngine:
                         new_amount_findings = self.reconciliation.check_amount_consistency(
                             session.matching_map, session.statement_items,
                             session.note_tables, table_structures,
+                            note_sections=session.note_sections,
                         )
                         # 替换原始 findings
                         amount_findings = new_amount_findings
@@ -383,6 +396,11 @@ class ReportReviewEngine:
 
                     ratio_f = self.reconciliation.check_ratio_columns(note, ts)
                     note_findings.extend(ratio_f)
+
+                    # 未分配利润专用校验
+                    if self.reconciliation._is_undistributed_profit_table(note):
+                        udp_f = self.reconciliation.check_undistributed_profit(note, ts)
+                        note_findings.extend(udp_f)
 
                     _first_pass_match[note.id] = note_match
                     if note_findings:
@@ -482,6 +500,11 @@ class ReportReviewEngine:
                         ratio_f = self.reconciliation.check_ratio_columns(note, ts)
                         _first_pass_findings.extend(ratio_f)
 
+                        # 未分配利润专用校验
+                        if self.reconciliation._is_undistributed_profit_table(note):
+                            udp_f = self.reconciliation.check_undistributed_profit(note, ts)
+                            _first_pass_findings.extend(udp_f)
+
                     logger.info(
                         "反馈循环完成：LLM 修正 %d 个表格结构，重新校验后剩余 %d 个本地校验问题",
                         len(retry_updated_ids), len(_first_pass_findings),
@@ -493,6 +516,103 @@ class ReportReviewEngine:
                     await asyncio.sleep(0)
 
             all_findings.extend(_first_pass_findings)
+
+            # ── 宽表横向公式校验（LLM 识别列语义 + 本地数值验证）──
+            wide_table_check_count = 0
+            wide_table_match_count = 0
+            wide_table_candidates = [
+                n for n in session.note_tables
+                if self.table_analyzer.is_wide_table_candidate(n, table_structures.get(n.id))
+            ]
+            if wide_table_candidates and oai:
+                yield json.dumps({
+                    "status": "phase_progress", "phase": "reconciliation",
+                    "message": f"正在对 {len(wide_table_candidates)} 个宽表进行横向公式分析...",
+                }, ensure_ascii=False)
+                await asyncio.sleep(0)
+
+                wide_semaphore = asyncio.Semaphore(3)
+
+                async def _analyze_wide(note: NoteTable):
+                    t_hint, _ = _build_hints_for_note(note.id)
+                    async with wide_semaphore:
+                        try:
+                            formula = await self.table_analyzer.analyze_wide_table_formula(
+                                note, oai, template_hint=t_hint,
+                            )
+                            return (note.id, formula, None)
+                        except Exception as e:
+                            logger.warning("宽表公式分析失败 %s: %s", note.id, e)
+                            return (note.id, None, e)
+
+                wide_results = await asyncio.gather(
+                    *[_analyze_wide(n) for n in wide_table_candidates],
+                    return_exceptions=True,
+                )
+
+                wide_table_findings: List[ReportReviewFinding] = []
+                for r in wide_results:
+                    if isinstance(r, Exception):
+                        continue
+                    nid, formula, err = r
+                    if formula is None:
+                        continue
+                    wide_table_check_count += 1
+                    note = note_map_tmp_recheck.get(nid)
+                    if not note:
+                        continue
+                    wf = self.reconciliation.check_wide_table_formula(note, formula)
+                    if not wf:
+                        wide_table_match_count += 1
+                    wide_table_findings.extend(wf)
+
+                all_findings.extend(wide_table_findings)
+
+                if wide_table_check_count > 0:
+                    yield json.dumps({
+                        "status": "phase_progress", "phase": "reconciliation",
+                        "message": f"宽表横向公式校验完成：共分析 {wide_table_check_count} 个表格，"
+                                   f"相符 {wide_table_match_count} 个，发现 {len(wide_table_findings)} 个差异",
+                    }, ensure_ascii=False)
+                    await asyncio.sleep(0)
+
+            # ── 跨表交叉核对（同科目下多表之间的一致性校验）──
+            cross_table_findings = self.reconciliation.check_cross_table_consistency(
+                session.note_tables, table_structures,
+            )
+            cross_table_check_count = len(cross_table_findings)  # 发现的问题数即为校验点数的近似
+            all_findings.extend(cross_table_findings)
+
+            # ── 现金流量表补充资料 vs 利润表/现金流量表 跨报表校验 ──
+            cashflow_supp_findings = self.reconciliation.check_cashflow_supplement_consistency(
+                session.statement_items, session.note_tables, table_structures,
+            )
+            cross_table_check_count += len(cashflow_supp_findings)
+            all_findings.extend(cashflow_supp_findings)
+
+            # ── 应交所得税本期增加 vs 当期所得税费用 ──
+            income_tax_findings = self.reconciliation.check_income_tax_consistency(
+                session.note_tables,
+            )
+            cross_table_check_count += len(income_tax_findings)
+            all_findings.extend(income_tax_findings)
+
+            # ── 权益法投资损益跨科目交叉核对 ──
+            equity_income_findings = self.reconciliation.check_equity_method_income_consistency(
+                session.statement_items, session.note_tables, table_structures,
+            )
+            cross_table_check_count += len(equity_income_findings)
+            all_findings.extend(equity_income_findings)
+
+            # ── 受限资产交叉披露验证（LLM 辅助）──
+            try:
+                restricted_findings = await self.reconciliation.check_restricted_asset_disclosure(
+                    session.note_tables, session.note_sections, oai,
+                )
+                cross_table_check_count += len(restricted_findings)
+                all_findings.extend(restricted_findings)
+            except Exception as e:
+                logger.warning("受限资产交叉披露验证失败: %s", e)
 
         # 变动分析：1级报表科目 + 2级附注明细行
         changes = self.calculate_changes(session.statement_items)
@@ -658,6 +778,15 @@ class ReportReviewEngine:
                 recon_details.append(f"其中项明细校验：共校验 {sub_item_check_count} 个表格，全部相符")
             else:
                 recon_details.append(f"其中项明细校验：共校验 {sub_item_check_count} 个表格，相符 {sub_item_match_count} 个，不符 {sub_item_check_count - sub_item_match_count} 个")
+        if wide_table_check_count > 0:
+            if wide_table_match_count == wide_table_check_count:
+                recon_details.append(f"宽表横向公式校验（LLM辅助）：共校验 {wide_table_check_count} 个表格，全部相符")
+            else:
+                recon_details.append(f"宽表横向公式校验（LLM辅助）：共校验 {wide_table_check_count} 个表格，相符 {wide_table_match_count} 个，不符 {wide_table_check_count - wide_table_match_count} 个")
+        if cross_table_check_count > 0:
+            recon_details.append(f"跨表交叉核对：发现 {cross_table_check_count} 个不一致")
+        elif session.matching_map:
+            recon_details.append("跨表交叉核对：未发现不一致")
         if len(abnormal) > 0:
             # 变动分析详情
             level1_only = len(abnormal) - len(detail_analyzed_accounts)
@@ -872,6 +1001,9 @@ class ReportReviewEngine:
         if sub_item_check_count > 0:
             status = "全部相符" if sub_item_match_count == sub_item_check_count else f"相符 {sub_item_match_count} 个，不符 {sub_item_check_count - sub_item_match_count} 个"
             table_check_lines.append(f"涉及其中项明细校验的表格 {sub_item_check_count} 个，{status}")
+        if wide_table_check_count > 0:
+            status = "全部相符" if wide_table_match_count == wide_table_check_count else f"相符 {wide_table_match_count} 个，不符 {wide_table_check_count - wide_table_match_count} 个"
+            table_check_lines.append(f"涉及宽表横向公式校验（LLM辅助）的表格 {wide_table_check_count} 个，{status}")
         # 统计无校验关系的表格（既无合计行也无余额变动也无其中项）
         no_check_count = sum(
             1 for n in session.note_tables

@@ -332,7 +332,7 @@ class TestErrorHandling:
     def test_unsupported_format(self, parser):
         import asyncio
         with pytest.raises(ValueError, match="不支持的文件格式"):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 parser.parse_report_files(
                     [("test.txt", "test.txt")],
                     template_type="soe",
@@ -342,7 +342,7 @@ class TestErrorHandling:
     def test_file_not_found(self, parser):
         import asyncio
         with pytest.raises(FileNotFoundError):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 parser.parse_report_files(
                     [("/nonexistent/file.xlsx", "file.xlsx")],
                     template_type="soe",

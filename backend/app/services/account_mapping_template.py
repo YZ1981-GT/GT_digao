@@ -348,7 +348,14 @@ _CONSOLIDATED_ACCOUNTS_MAP: Dict[str, List[Dict[str, object]]] = {
 
 
 def _normalize(name: str) -> str:
-    """去除特殊前缀标记和空白。"""
+    """去除特殊前缀标记、括号说明文字和空白。
+
+    报表科目名称常带括号说明，如 "资产处置收益(损失以"-"号填列）"，
+    必须去掉才能正确匹配模板关键词。
+    """
+    import re
+    # 去掉中英文括号及其内容
+    name = re.sub(r'[（(][^）)]*[）)]', '', name)
     return name.replace('△', '').replace('▲', '').replace('*', '').replace('#', '').strip()
 
 
@@ -400,9 +407,12 @@ class AccountMappingTemplate:
             return True
 
         # 如果附注科目名称恰好是模板中另一个科目的精确名称，
-        # 则不允许当前科目匹配（应由那个精确科目来匹配）
+        # 则不允许当前科目匹配（应由那个精确科目来匹配）。
+        # 例外：组合科目（如"营业收入、营业成本"）应允许其组成科目匹配。
         if norm_note in self._map and norm_note != norm_stmt:
-            return False
+            # 检查是否为组合科目：附注科目名包含当前报表科目名
+            if norm_stmt not in norm_note:
+                return False
 
         target = norm_note + ' ' + _normalize(note_section or '')
         for kw in keywords:

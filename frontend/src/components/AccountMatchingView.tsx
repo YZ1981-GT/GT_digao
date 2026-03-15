@@ -632,6 +632,65 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       return isNaN(n) ? undefined : n;
     };
 
+    // ── 辅助：根据表头判断列索引属于期末还是期初 ──
+    // 检查 header_rows 和 headers 中该列及其父列的关键词
+    const CLOSING_KW_DETECT = ['期末', '年末', '本期', '本年'];
+    const OPENING_KW_DETECT = ['期初', '年初', '上期', '上年'];
+    const MOVE_KW_DETECT = ['增加', '减少', '增减', '转入', '转出', '摊销', '折旧', '计提', '处置', '变动', '转换', '发生'];
+    const isMovementHeader = (h: string) => MOVE_KW_DETECT.some(kw => h.includes(kw));
+    const detectColSemantic = (colIdx: number, headerRows: string[][], headers: string[]): 'closing' | 'opening' | null => {
+      // 检查所有表头行中该列的文本
+      for (const row of headerRows) {
+        const h = (row[colIdx] || '').replace(/\s/g, '');
+        if (!h) continue;
+        // 跳过变动列（"本期增加"/"本期减少"等含期末/期初关键词但不是余额列）
+        if (isMovementHeader(h)) continue;
+        // 先检查 opening（"上年年末" 含"年末"但应归为 opening）
+        if (OPENING_KW_DETECT.some(kw => h.includes(kw))) return 'opening';
+        if (CLOSING_KW_DETECT.some(kw => h.includes(kw))) return 'closing';
+      }
+      // 检查 headers（单行表头）
+      const h = (headers[colIdx] || '').replace(/\s/g, '');
+      if (h && !isMovementHeader(h)) {
+        if (OPENING_KW_DETECT.some(kw => h.includes(kw))) return 'opening';
+        if (CLOSING_KW_DETECT.some(kw => h.includes(kw))) return 'closing';
+      }
+      // 检查父列：在 header_rows 第一行中，向左找最近的非空单元格
+      if (headerRows.length > 0) {
+        const firstRow = headerRows[0];
+        for (let ci = colIdx; ci >= 0; ci--) {
+          const ph = (firstRow[ci] || '').replace(/\s/g, '');
+          if (!ph) continue;
+          // 跳过变动列父标题
+          if (isMovementHeader(ph)) continue;
+          if (OPENING_KW_DETECT.some(kw => ph.includes(kw))) return 'opening';
+          if (CLOSING_KW_DETECT.some(kw => ph.includes(kw))) return 'closing';
+          break; // 只检查最近的非变动列非空父列
+        }
+      }
+      return null;
+    };
+
+    // 辅助：对两个列索引，根据表头语义分配 closing/opening
+    // 返回 { closing, opening }，如果表头无法判断则回退到位置假设（first=closing）
+    const assignByHeaderSemantic = (
+      colIdx1: number, val1: number | undefined,
+      colIdx2: number, val2: number | undefined,
+      nt: NoteTable
+    ): { closing?: number; opening?: number } => {
+      const hRows = nt.header_rows && nt.header_rows.length > 0 ? nt.header_rows : [];
+      const hdrs = nt.headers || [];
+      const sem1 = detectColSemantic(colIdx1, hRows, hdrs);
+      const sem2 = detectColSemantic(colIdx2, hRows, hdrs);
+      // 只有当两个列都能明确判断语义，且语义不同时，才使用语义分配
+      if (sem1 && sem2 && sem1 !== sem2) {
+        if (sem1 === 'closing' && sem2 === 'opening') return { closing: val1, opening: val2 };
+        if (sem1 === 'opening' && sem2 === 'closing') return { closing: val2, opening: val1 };
+      }
+      // 其他情况（无法判断、只有一个能判断、两个相同）：回退到位置假设（第一个=closing）
+      return { closing: val1, opening: val2 };
+    };
+
     // 辅助：从单个表格中提取合计行
     // 对于含"减：一年内到期"等扣减行的表格，优先取"小计"行（对应资产负债表金额）
     const extractFromTable = (nt: NoteTable): { totalRow: any[] | null; nt: NoteTable } => {
@@ -817,17 +876,22 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
               return { closing: v };
             }
           }
-          // 否则取所有数值
-          const rowNums: number[] = [];
+          // 否则取所有数值及其列索引
+          const rowNumsWithIdx: { ci: number; val: number }[] = [];
           for (let ci = 1; ci < nt.rows[ri].length; ci++) {
             const v = parse(nt.rows[ri][ci]);
-            if (v != null) rowNums.push(v);
+            if (v != null) rowNumsWithIdx.push({ ci, val: v });
           }
-          if (rowNums.length >= 2) {
-            return { closing: rowNums[0], opening: rowNums[1] };
+          if (rowNumsWithIdx.length >= 2) {
+            // 通过表头语义判断哪个是期末、哪个是期初
+            return assignByHeaderSemantic(
+              rowNumsWithIdx[0].ci, rowNumsWithIdx[0].val,
+              rowNumsWithIdx[1].ci, rowNumsWithIdx[1].val,
+              nt
+            );
           }
-          if (rowNums.length === 1) {
-            return { closing: rowNums[0] };
+          if (rowNumsWithIdx.length === 1) {
+            return { closing: rowNumsWithIdx[0].val };
           }
         }
       }
@@ -930,28 +994,52 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     // ── 简单表格（≤2个数值列）：根据表头语义分配期末/期初 ──
     if (nums.length <= 2) {
       // 尝试通过表头关键词确定每个数值列的语义
-      const hdrs = (nt.header_rows && nt.header_rows.length > 0 ? nt.header_rows[0] : nt.headers)
-        .map(h => (h || '').replace(/\s/g, ''));
+      // 检查所有 header_rows 行 + headers，找到能识别关键词的那一行
       const CLOSING_KW = ['期末', '年末', '本期', '本年'];
       const OPENING_KW = ['期初', '年初', '上期', '上年'];
+      const allHdrRows = [
+        ...(nt.header_rows && nt.header_rows.length > 0 ? nt.header_rows : []),
+        nt.headers || [],
+      ];
       let closingVal: number | undefined;
       let openingVal: number | undefined;
-      for (const n of nums) {
-        const h = hdrs[n.idx] || '';
-        // 先检查 OPENING_KW — "上年年末金额"同时含"年末"和"上年"，应归为期初
-        const isOpening = OPENING_KW.some(kw => h.includes(kw));
-        const isClosing = CLOSING_KW.some(kw => h.includes(kw));
-        if (isOpening) {
-          openingVal = n.val;
-        } else if (isClosing) {
-          closingVal = n.val;
+      // 遍历每一行表头，尝试识别列语义
+      for (const hdrRow of allHdrRows) {
+        const hdrs = hdrRow.map((h: any) => (h || '').replace(/\s/g, ''));
+        let tmpClosing: number | undefined;
+        let tmpOpening: number | undefined;
+        for (const n of nums) {
+          const h = hdrs[n.idx] || '';
+          // 先检查 OPENING_KW — "上年年末金额"同时含"年末"和"上年"，应归为期初
+          const isOpening = OPENING_KW.some(kw => h.includes(kw));
+          const isClosing = CLOSING_KW.some(kw => h.includes(kw));
+          if (isOpening) {
+            tmpOpening = n.val;
+          } else if (isClosing) {
+            tmpClosing = n.val;
+          }
+        }
+        if (tmpClosing != null || tmpOpening != null) {
+          closingVal = tmpClosing;
+          openingVal = tmpOpening;
+          break; // 找到能识别的表头行，停止
         }
       }
       // 如果通过表头成功分配了至少一个值，使用语义分配
       if (closingVal != null || openingVal != null) {
         return { closing: closingVal, opening: openingVal };
       }
-      // 表头无法识别时，回退到位置分配：第一个=期末，第二个=期初
+      // 表头无法识别时，用 detectColSemantic 辅助判断
+      if (nums.length === 2) {
+        return assignByHeaderSemantic(nums[0].idx, nums[0].val, nums[1].idx, nums[1].val, nt);
+      }
+      // 单值时也尝试语义判断
+      if (nums.length === 1) {
+        const hRowsAll = nt.header_rows && nt.header_rows.length > 0 ? nt.header_rows : [];
+        const sem = detectColSemantic(nums[0].idx, hRowsAll, nt.headers || []);
+        if (sem === 'opening') return { opening: nums[0].val };
+        return { closing: nums[0].val };
+      }
       return { closing: nums[0]?.val, opening: nums[1]?.val };
     }
 
@@ -998,11 +1086,12 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         if (h.includes('账面价值')) valueColsInLast.push(ci);
       }
       if (valueColsInLast.length >= 2) {
-        // 第一个"账面价值"=期末，第二个=期初
-        return {
-          closing: parse(totalRow[valueColsInLast[0]]),
-          opening: parse(totalRow[valueColsInLast[1]]),
-        };
+        // 通过父行表头语义判断哪个是期末、哪个是期初
+        return assignByHeaderSemantic(
+          valueColsInLast[0], parse(totalRow[valueColsInLast[0]]),
+          valueColsInLast[1], parse(totalRow[valueColsInLast[1]]),
+          nt!
+        );
       }
       if (valueColsInLast.length === 1) {
         // 只有一个"账面价值"列，判断它属于期末还是期初
@@ -1033,10 +1122,20 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         }
         // 需要成对出现：每组一个余额+一个准备
         if (balanceCols.length >= 2 && provisionCols.length >= 2) {
-          const closingBal = parse(totalRow[balanceCols[0]]);
-          const closingProv = parse(totalRow[provisionCols[0]]) ?? 0;
-          const openingBal = parse(totalRow[balanceCols[1]]);
-          const openingProv = parse(totalRow[provisionCols[1]]) ?? 0;
+          // 通过父行表头语义判断哪组是期末、哪组是期初
+          const hRowsLocal = nt!.header_rows && nt!.header_rows.length > 0 ? nt!.header_rows : [];
+          const hdrsLocal = nt!.headers || [];
+          const sem0 = detectColSemantic(balanceCols[0], hRowsLocal, hdrsLocal);
+          const sem1 = detectColSemantic(balanceCols[1], hRowsLocal, hdrsLocal);
+          // 只有两组都能明确判断且语义不同时才翻转，否则保持位置假设（第一组=closing）
+          let closingGroupIdx = 0, openingGroupIdx = 1;
+          if (sem0 && sem1 && sem0 !== sem1 && sem0 === 'opening') {
+            closingGroupIdx = 1; openingGroupIdx = 0;
+          }
+          const closingBal = parse(totalRow[balanceCols[closingGroupIdx]]);
+          const closingProv = parse(totalRow[provisionCols[closingGroupIdx]]) ?? 0;
+          const openingBal = parse(totalRow[balanceCols[openingGroupIdx]]);
+          const openingProv = parse(totalRow[provisionCols[openingGroupIdx]]) ?? 0;
           return {
             closing: closingBal != null ? closingBal - closingProv : undefined,
             opening: openingBal != null ? openingBal - openingProv : undefined,
@@ -1176,10 +1275,11 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       .map((h, i) => ({ h, i }))
       .filter(x => x.h.includes('账面价值'));
     if (valueColIndices.length >= 2) {
-      return {
-        closing: parse(totalRow[valueColIndices[0].i]),
-        opening: parse(totalRow[valueColIndices[1].i]),
-      };
+      return assignByHeaderSemantic(
+        valueColIndices[0].i, parse(totalRow[valueColIndices[0].i]),
+        valueColIndices[1].i, parse(totalRow[valueColIndices[1].i]),
+        nt!
+      );
     }
 
     // 找"期末"/"期初"关键词（排除变动列如"本期增加"/"本期减少"等）
@@ -1216,7 +1316,14 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       };
     }
 
-    // 最终 fallback：取第一个和最后一个数值
+    // 最终 fallback：通过表头语义分配第一个和最后一个数值
+    if (nums.length >= 2 && nt) {
+      return assignByHeaderSemantic(
+        nums[0].idx, nums[0].val,
+        nums[nums.length - 1].idx, nums[nums.length - 1].val,
+        nt
+      );
+    }
     return { closing: nums[0]?.val, opening: nums[nums.length - 1]?.val };
   }, [noteMap]);
 
@@ -1292,10 +1399,13 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       const stmtClosing = mode === 'parent' ? (entry.si.company_closing_balance ?? entry.si.closing_balance) : entry.si.closing_balance;
       const stmtOpening = mode === 'parent' ? (entry.si.company_opening_balance ?? entry.si.opening_balance) : entry.si.opening_balance;
       const noteTotals = extractNoteTotals(sec, entry.subHint);
+      // 当报表金额为0且附注未提取到值时，视为匹配（都是0/无值）
       const closingMatch = (stmtClosing != null && noteTotals.closing != null)
-        ? Math.abs(stmtClosing - noteTotals.closing) <= TOL : null;
+        ? Math.abs(stmtClosing - noteTotals.closing) <= TOL
+        : (stmtClosing === 0 && noteTotals.closing == null) ? true : null;
       const openingMatch = (stmtOpening != null && noteTotals.opening != null)
-        ? Math.abs(stmtOpening - noteTotals.opening) <= TOL : null;
+        ? Math.abs(stmtOpening - noteTotals.opening) <= TOL
+        : (stmtOpening === 0 && noteTotals.opening == null) ? true : null;
 
       return (
         <div key={idx}>

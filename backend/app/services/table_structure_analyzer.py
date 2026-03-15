@@ -219,6 +219,669 @@ class TableStructureAnalyzer:
             logger.warning("LLM 重新分析失败 %s: %s", note_table.id, e)
             return None
 
+    # ─── 宽表横向公式 LLM 分析 ───
+
+    # 宽表关键词：匹配这些科目名称的表格可能是多列变动表
+    WIDE_TABLE_ACCOUNT_KEYWORDS = [
+        "长期股权投资", "存货跌价准备", "长期待摊费用", "开发支出",
+        "在建工程", "固定资产", "无形资产", "使用权资产",
+        "投资性房地产", "生产性生物资产", "油气资产", "商誉",
+        "合同履约成本减值", "坏账准备", "债权投资减值准备",
+        "递延所得税资产", "递延所得税负债", "长期应收款",
+        "其他权益工具投资", "其他非流动金融资产",
+    ]
+
+    # ── 宽表公式预设（基于上市/国企模板中的标准表格结构）──
+    # 每个预设定义了：匹配关键词、标准列结构、公式描述
+    # LLM 收到预设后只需确认/微调列映射，而非从零推断
+    WIDE_TABLE_FORMULA_PRESETS: List[Dict] = [
+        {
+            "name": "长期股权投资明细",
+            "match_keywords": ["长期股权投资"],
+            "match_title_keywords": ["明细", "对联营", "对合营", "对子公司"],
+            "exclude_title_keywords": ["分类", "减值测试"],
+            "template_columns": [
+                {"role": "label", "name": "被投资单位"},
+                {"role": "opening", "sign": "+", "name": "期初余额(账面价值)"},
+                {"role": "skip", "name": "减值准备期初余额"},
+                {"role": "movement", "sign": "+", "name": "追加/新增投资"},
+                {"role": "movement", "sign": "-", "name": "减少投资"},
+                {"role": "movement", "sign": "+", "name": "权益法下确认的投资损益"},
+                {"role": "movement", "sign": "+", "name": "其他综合收益调整"},
+                {"role": "movement", "sign": "+", "name": "其他权益变动"},
+                {"role": "movement", "sign": "-", "name": "宣告发放现金股利或利润"},
+                {"role": "movement", "sign": "-", "name": "计提减值准备"},
+                {"role": "movement", "sign": "+", "name": "其他"},
+                {"role": "closing", "sign": "=", "name": "期末余额(账面价值)"},
+                {"role": "skip", "name": "减值准备期末余额"},
+            ],
+            "formula": "期初账面价值 + 追加投资 + 投资损益 + 其他综合收益 + 其他权益变动 - 减少投资 - 现金股利 - 计提减值 + 其他 = 期末账面价值",
+        },
+        {
+            "name": "在建工程项目变动",
+            "match_keywords": ["在建工程"],
+            "match_title_keywords": ["重要在建工程", "在建工程项目变动", "在建工程变动"],
+            "exclude_title_keywords": ["减值"],
+            "template_columns": [
+                {"role": "label", "name": "工程名称"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "本期增加"},
+                {"role": "movement", "sign": "-", "name": "转入固定资产"},
+                {"role": "movement", "sign": "-", "name": "其他减少"},
+                {"role": "skip", "name": "利息资本化累计金额"},
+                {"role": "skip", "name": "本期利息资本化金额"},
+                {"role": "skip", "name": "本期利息资本化率%"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 本期增加 - 转入固定资产 - 其他减少 = 期末余额",
+        },
+        {
+            "name": "长期待摊费用",
+            "match_keywords": ["长期待摊费用"],
+            "match_title_keywords": [],
+            "exclude_title_keywords": [],
+            "template_columns": [
+                {"role": "label", "name": "项目"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "本期增加"},
+                {"role": "movement", "sign": "-", "name": "本期摊销"},
+                {"role": "movement", "sign": "-", "name": "其他减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 本期增加 - 本期摊销 - 其他减少 = 期末余额",
+        },
+        {
+            "name": "开发支出",
+            "match_keywords": ["开发支出"],
+            "match_title_keywords": [],
+            "exclude_title_keywords": ["减值准备", "重要的资本化"],
+            "template_columns": [
+                {"role": "label", "name": "项目"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "内部开发支出"},
+                {"role": "movement", "sign": "+", "name": "其他增加"},
+                {"role": "movement", "sign": "-", "name": "确认为无形资产"},
+                {"role": "movement", "sign": "-", "name": "计入当期损益"},
+                {"role": "movement", "sign": "-", "name": "其他减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 内部开发支出 + 其他增加 - 确认为无形资产 - 计入当期损益 - 其他减少 = 期末余额",
+        },
+        {
+            "name": "存货跌价准备变动",
+            "match_keywords": ["存货跌价准备", "合同履约成本减值"],
+            "match_title_keywords": ["跌价准备", "减值准备"],
+            "exclude_title_keywords": ["按组合", "按单项"],
+            "template_columns": [
+                {"role": "label", "name": "项目"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "计提"},
+                {"role": "movement", "sign": "+", "name": "其他增加"},
+                {"role": "movement", "sign": "-", "name": "转回或转销"},
+                {"role": "movement", "sign": "-", "name": "其他减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 计提 + 其他增加 - 转回或转销 - 其他减少 = 期末余额",
+        },
+        {
+            "name": "商誉账面原值/减值准备变动",
+            "match_keywords": ["商誉"],
+            "match_title_keywords": ["账面原值", "减值准备"],
+            "exclude_title_keywords": ["减值测试"],
+            "template_columns": [
+                {"role": "label", "name": "被投资单位/事项"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "企业合并形成/计提"},
+                {"role": "movement", "sign": "+", "name": "其他增加"},
+                {"role": "movement", "sign": "-", "name": "处置"},
+                {"role": "movement", "sign": "-", "name": "其他减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 增加项 - 减少项 = 期末余额",
+        },
+    ]
+
+    @classmethod
+    def _find_preset_for_note(cls, note_table: NoteTable) -> Optional[Dict]:
+        """根据科目名称和标题匹配最佳预设。
+
+        匹配规则：
+        - 必须匹配科目关键词
+        - 如果预设定义了 match_title_keywords，则至少需要匹配一个标题关键词
+        - 排除关键词命中时跳过
+        """
+        combined = (note_table.account_name or "") + (note_table.section_title or "")
+        title = note_table.section_title or ""
+
+        best_preset = None
+        best_score = 0
+
+        for preset in cls.WIDE_TABLE_FORMULA_PRESETS:
+            # 必须匹配科目关键词
+            acct_match = any(kw in combined for kw in preset["match_keywords"])
+            if not acct_match:
+                continue
+
+            # 排除关键词
+            if preset.get("exclude_title_keywords"):
+                if any(kw in title for kw in preset["exclude_title_keywords"]):
+                    continue
+
+            score = 1  # 基础分：科目匹配
+            # 标题关键词加分
+            if preset.get("match_title_keywords"):
+                title_matched = False
+                for kw in preset["match_title_keywords"]:
+                    if kw in title:
+                        score += 2
+                        title_matched = True
+                # 如果预设要求标题关键词但一个都没匹配上，跳过该预设
+                if not title_matched:
+                    continue
+            else:
+                # 无标题关键词要求，给一个小加分
+                score += 0.5
+
+            if score > best_score:
+                best_score = score
+                best_preset = preset
+
+        return best_preset
+
+
+    @classmethod
+    def try_build_formula_from_preset(
+        cls,
+        note_table: NoteTable,
+    ) -> Optional[Dict]:
+        """尝试基于预设模板和表头关键词匹配，直接构建宽表公式（不依赖 LLM）。
+
+        对于长期股权投资明细等标准表格，通过关键词匹配表头列与预设列的对应关系，
+        生成与 LLM 返回格式一致的公式结构。
+
+        同时支持检测 category_sum（上市版分类合计型）布局：
+        当表头列名是具体项目/公司名称而非变动关键词，且最后一列为"合计"时，
+        直接构建 category_sum 公式。
+
+        返回 None 表示无法匹配。
+        """
+        preset = cls._find_preset_for_note(note_table)
+        if not preset:
+            return None
+        if not note_table.headers or len(note_table.headers) < 6:
+            return None
+
+        headers = [str(h or "") for h in note_table.headers]
+
+        # ── 先检测是否为 category_sum（上市版分类合计型）布局 ──
+        # 特征：最后一列为"合计"，中间列是具体项目/公司名称而非变动关键词
+        category_sum_result = cls._try_build_category_sum_from_headers(note_table, headers)
+        if category_sum_result is not None:
+            return category_sum_result
+
+        # ── 以下为 movement（变动公式型）构建逻辑 ──
+        template_cols = preset["template_columns"]
+
+        # 为每个预设列生成匹配关键词
+        def _col_keywords(tc: Dict) -> List[str]:
+            """从预设列名中提取匹配关键词。"""
+            name = tc.get("name", "")
+            keywords = []
+            # 直接使用列名中的关键词
+            for seg in ["追加", "新增投资", "减少投资", "投资损益", "其他综合",
+                         "其他权益", "现金股利", "宣告发放", "计提减值", "减值准备",
+                         "本期增加", "本期减少", "转入固定", "本期摊销",
+                         "内部开发", "确认为无形", "计入当期", "计提", "转回",
+                         "转销", "企业合并", "处置", "账面价值",
+                         "利息资本化", "投资成本"]:
+                if seg in name:
+                    keywords.append(seg)
+            # 如果没有提取到关键词，使用列名本身（去掉括号内容）
+            if not keywords:
+                import re
+                clean = re.sub(r'[（(][^）)]*[）)]', '', name).strip()
+                if clean:
+                    keywords.append(clean)
+            return keywords
+
+        # ── 逐列匹配 ──
+        columns: List[Dict] = []
+        used_col_indices: set = set()
+
+        # 先匹配 label 列（通常是第0列）
+        label_idx = 0
+        columns.append({"col_index": label_idx, "role": "label", "sign": None, "name": headers[label_idx]})
+        used_col_indices.add(label_idx)
+
+        # 匹配 opening 和 closing 列
+        opening_idx = None
+        closing_idx = None
+        for ci, h in enumerate(headers):
+            if ci in used_col_indices:
+                continue
+            h_clean = h.replace(" ", "").replace("\u3000", "")
+            # opening: 含"期初"或"年初"，且含"账面价值"或"余额"（排除"减值准备"和"投资成本"）
+            if opening_idx is None and any(k in h_clean for k in ["期初", "年初"]):
+                if "减值" not in h_clean and "投资成本" not in h_clean:
+                    opening_idx = ci
+            # closing: 含"期末"或"年末"，且含"账面价值"或"余额"（排除"减值准备"）
+            if closing_idx is None and any(k in h_clean for k in ["期末", "年末"]):
+                if "减值" not in h_clean and "投资成本" not in h_clean:
+                    closing_idx = ci
+
+        if opening_idx is None or closing_idx is None:
+            return None
+
+        used_col_indices.add(opening_idx)
+        used_col_indices.add(closing_idx)
+        columns.append({"col_index": opening_idx, "role": "opening", "sign": "+",
+                         "name": headers[opening_idx]})
+
+        # 匹配 movement 和 skip 列
+        # 从预设中提取非 label/opening/closing 的列
+        movement_templates = [tc for tc in template_cols
+                              if tc["role"] in ("movement", "skip")]
+
+        for tc in movement_templates:
+            kws = _col_keywords(tc)
+            best_ci = None
+            best_score = 0
+            for ci, h in enumerate(headers):
+                if ci in used_col_indices:
+                    continue
+                h_clean = h.replace(" ", "").replace("\u3000", "")
+                score = 0
+                for kw in kws:
+                    if kw in h_clean:
+                        score += len(kw)  # 更长的关键词匹配得分更高
+                if score > best_score:
+                    best_score = score
+                    best_ci = ci
+
+            if best_ci is not None:
+                used_col_indices.add(best_ci)
+                columns.append({
+                    "col_index": best_ci,
+                    "role": tc["role"],
+                    "sign": tc.get("sign"),
+                    "name": headers[best_ci],
+                })
+
+        # 添加 closing 列
+        columns.append({"col_index": closing_idx, "role": "closing", "sign": "=",
+                         "name": headers[closing_idx]})
+
+        # 将未匹配的列标记为 skip（如果在 opening 和 closing 之间）
+        for ci in range(len(headers)):
+            if ci not in used_col_indices:
+                columns.append({
+                    "col_index": ci,
+                    "role": "skip",
+                    "sign": None,
+                    "name": headers[ci],
+                })
+
+        # 按 col_index 排序
+        columns.sort(key=lambda c: c["col_index"])
+
+        # 检测 data_row_start：跳过表头行
+        data_row_start = cls._detect_data_row_start(note_table)
+
+        return {
+            "formula_type": "movement",
+            "columns": columns,
+            "formula_description": preset.get("formula", ""),
+            "data_row_start": data_row_start,
+        }
+
+    # ── 变动关键词：出现在表头中说明该列是变动/余额语义，而非分类名称 ──
+    _MOVEMENT_HEADER_KEYWORDS = [
+        "期初", "期末", "年初", "年末", "余额",
+        "增加", "减少", "增减", "变动", "摊销", "折旧",
+        "转入", "转出", "计提", "转回", "转销", "处置",
+        "投资损益", "投资成本", "减值准备", "账面价值",
+        "综合收益", "权益变动", "现金股利",
+    ]
+
+    @classmethod
+    def _try_build_category_sum_from_headers(
+        cls,
+        note_table: NoteTable,
+        headers: List[str],
+    ) -> Optional[Dict]:
+        """检测并构建 category_sum（上市版分类合计型）公式。
+
+        判断逻辑：
+        1. 最后一列（或倒数第二列）为"合计"
+        2. 中间列大部分不含变动关键词（即列名是具体项目/公司名称）
+        """
+        if len(headers) < 3:
+            return None
+
+        # 查找"合计"列（通常是最后一列或倒数第二列）
+        total_col_idx = None
+        for ci in range(len(headers) - 1, max(len(headers) - 3, 0), -1):
+            h_clean = headers[ci].replace(" ", "").replace("\u3000", "")
+            if h_clean in ("合计", "总计"):
+                total_col_idx = ci
+                break
+
+        if total_col_idx is None:
+            return None
+
+        # 中间列（排除第0列标签和合计列）中，检查有多少列含变动关键词
+        data_col_candidates = []
+        movement_col_count = 0
+        for ci in range(1, len(headers)):
+            if ci == total_col_idx:
+                continue
+            h_clean = headers[ci].replace(" ", "").replace("\u3000", "")
+            is_movement = any(kw in h_clean for kw in cls._MOVEMENT_HEADER_KEYWORDS)
+            if is_movement:
+                movement_col_count += 1
+            else:
+                data_col_candidates.append(ci)
+
+        # 如果大部分中间列都含变动关键词，说明不是 category_sum 布局
+        total_middle = len(headers) - 2  # 排除标签列和合计列
+        if total_middle <= 0:
+            return None
+        # 超过一半的中间列含变动关键词 → 不是 category_sum
+        if movement_col_count > total_middle * 0.5:
+            return None
+        # 至少需要 1 个 data 列
+        if not data_col_candidates:
+            return None
+
+        # ── 构建 category_sum 公式 ──
+        columns: List[Dict] = []
+        columns.append({"col_index": 0, "role": "label", "sign": None, "name": headers[0]})
+
+        data_names = []
+        for ci in data_col_candidates:
+            columns.append({"col_index": ci, "role": "data", "sign": "+", "name": headers[ci]})
+            data_names.append(headers[ci])
+
+        columns.append({"col_index": total_col_idx, "role": "total", "sign": "=", "name": headers[total_col_idx]})
+
+        # 合计列之后的列标记为 skip
+        for ci in range(total_col_idx + 1, len(headers)):
+            columns.append({"col_index": ci, "role": "skip", "sign": None, "name": headers[ci]})
+
+        # 变动关键词列也标记为 skip（它们在 category_sum 中不参与横向公式）
+        for ci in range(1, len(headers)):
+            if ci == total_col_idx:
+                continue
+            if ci not in data_col_candidates and ci > total_col_idx:
+                continue  # 已在上面处理
+            h_clean = headers[ci].replace(" ", "").replace("\u3000", "")
+            if any(kw in h_clean for kw in cls._MOVEMENT_HEADER_KEYWORDS):
+                columns.append({"col_index": ci, "role": "skip", "sign": None, "name": headers[ci]})
+
+        # 按 col_index 排序并去重
+        seen = set()
+        unique_columns = []
+        columns.sort(key=lambda c: c["col_index"])
+        for c in columns:
+            if c["col_index"] not in seen:
+                seen.add(c["col_index"])
+                unique_columns.append(c)
+
+        data_row_start = cls._detect_data_row_start(note_table)
+        formula_desc = " + ".join(data_names) + f" = {headers[total_col_idx]}"
+
+        return {
+            "formula_type": "category_sum",
+            "columns": unique_columns,
+            "formula_description": formula_desc,
+            "data_row_start": data_row_start,
+        }
+
+    @classmethod
+    def _detect_data_row_start(cls, note_table: NoteTable) -> int:
+        """检测数据行起始索引，跳过表头行。"""
+        data_row_start = 0
+        if note_table.rows:
+            for ri, row in enumerate(note_table.rows):
+                if not row:
+                    continue
+                label = str(row[0] or "").strip()
+                # 如果第一行看起来像表头（与 headers 相同），跳过
+                if label and note_table.headers and label == str(note_table.headers[0] or "").strip():
+                    data_row_start = ri + 1
+                    continue
+                # 如果第一行有数值，说明是数据行
+                has_num = False
+                for v in row[1:]:
+                    if v is not None:
+                        try:
+                            float(str(v).replace(",", "").replace("，", ""))
+                            has_num = True
+                            break
+                        except (ValueError, TypeError):
+                            pass
+                if has_num:
+                    data_row_start = ri
+                    break
+        return data_row_start
+
+    @staticmethod
+    def is_wide_table_candidate(note_table: NoteTable, table_structure: Optional[TableStructure] = None) -> bool:
+        """判断是否为需要 LLM 公式分析的宽表候选。
+
+        条件：
+        1. 列数 ≥ 6（含标签列）
+        2. 已有 has_balance_formula=True 的结构识别，或科目名称匹配宽表关键词
+        """
+        if not note_table.headers or len(note_table.headers) < 6:
+            return False
+        # 如果已有结构且标记了余额变动公式，说明已被常规 check_balance_formula 覆盖
+        # 但如果列数很多（≥8），常规公式可能遗漏中间列，仍需宽表分析
+        if table_structure and table_structure.has_balance_formula and len(note_table.headers) < 8:
+            return False
+        combined = (note_table.account_name or "") + (note_table.section_title or "")
+        for kw in TableStructureAnalyzer.WIDE_TABLE_ACCOUNT_KEYWORDS:
+            if kw in combined:
+                return True
+        # 通用检测：含"期初"和"期末"且列数 ≥ 8
+        headers_text = " ".join(str(h) for h in note_table.headers)
+        has_opening = any(k in headers_text for k in ["期初", "年初"])
+        has_closing = any(k in headers_text for k in ["期末", "年末"])
+        if has_opening and has_closing and len(note_table.headers) >= 8:
+            return True
+        return False
+
+    async def analyze_wide_table_formula(
+        self,
+        note_table: NoteTable,
+        openai_service: OpenAIService,
+        template_hint: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """分析宽表的横向公式结构。
+
+        优先尝试基于预设模板的规则匹配（不依赖 LLM），匹配失败时回退到 LLM 分析。
+
+        LLM 只负责识别列语义和公式关系，不做数值计算。
+        返回格式：
+        {
+            "columns": [
+                {"col_index": 0, "role": "label"},
+                {"col_index": 1, "role": "opening", "sign": "+"},
+                {"col_index": 2, "role": "movement", "sign": "+", "name": "追加投资"},
+                {"col_index": 3, "role": "movement", "sign": "-", "name": "减少投资"},
+                ...
+                {"col_index": 11, "role": "closing", "sign": "="},
+            ],
+            "formula_description": "期初账面价值 + 追加投资 + 投资损益 + ... - 减少投资 - ... = 期末账面价值",
+            "skip_col_indices": [2, 12],  // 非数值列（如百分比列）不参与公式
+            "data_row_start": 2,  // 数据行起始索引
+            "total_row_keywords": ["合计", "小计"]
+        }
+        """
+        # ── 优先：规则匹配预设模板 ──
+        rule_result = self.try_build_formula_from_preset(note_table)
+        if rule_result is not None:
+            return rule_result
+
+        # ── 回退：LLM 分析 ──
+        prompt = self._build_wide_table_prompt(note_table, template_hint)
+        messages = [
+            {"role": "system", "content": "你是一个专业的审计表格结构分析助手。请分析宽表的横向公式结构，返回 JSON 格式结果。"},
+            {"role": "user", "content": prompt},
+        ]
+
+        response_text = ""
+        async for chunk in openai_service.stream_chat_completion(messages, temperature=0.2):
+            if isinstance(chunk, dict) and "content" in chunk:
+                response_text += chunk["content"]
+            elif isinstance(chunk, str):
+                response_text += chunk
+
+        return self._parse_wide_table_response(response_text)
+
+    def _build_wide_table_prompt(self, note_table: NoteTable, template_hint: Optional[str] = None) -> str:
+        """构建宽表公式分析的 LLM prompt。
+
+        如果匹配到预设模板，将预设作为强参考传给 LLM，LLM 只需确认/微调列映射。
+        """
+        table_text = f"表格标题：{note_table.section_title}\n"
+        table_text += f"科目名称：{note_table.account_name}\n\n"
+
+        if note_table.headers:
+            table_text += f"表头（共{len(note_table.headers)}列）：\n"
+            for i, h in enumerate(note_table.headers):
+                table_text += f"  列{i}: {h}\n"
+
+        # 显示原始多行表头（如果有）
+        if note_table.header_rows and len(note_table.header_rows) > 1:
+            table_text += "\n原始多行表头：\n"
+            for ri, row in enumerate(note_table.header_rows):
+                table_text += f"  表头行{ri}: {' | '.join(str(v) if v else '' for v in row)}\n"
+
+        table_text += "\n数据行（前20行）：\n"
+        for i, row in enumerate(note_table.rows[:20]):
+            table_text += f"  行{i}: {' | '.join(str(v) if v else '' for v in row)}\n"
+
+        context = ""
+        if template_hint:
+            context = f"\n【模板参考】\n{template_hint}\n"
+
+        # ── 预设模板匹配 ──
+        # 仅当表格不是 category_sum 布局时才提供 movement 预设提示
+        preset = self._find_preset_for_note(note_table)
+        preset_block = ""
+        if preset:
+            headers_list = [str(h or "") for h in note_table.headers] if note_table.headers else []
+            is_cat_sum = self._try_build_category_sum_from_headers(note_table, headers_list) is not None
+            if not is_cat_sum:
+                preset_block = f"""
+【预设公式模板】该表格匹配到标准模板"{preset['name']}"，标准列结构如下：
+"""
+                for tc in preset["template_columns"]:
+                    preset_block += f"  - {tc['name']}: role={tc['role']}, sign={tc.get('sign')}\n"
+                preset_block += f"标准公式: {preset['formula']}\n"
+                preset_block += """
+请以此预设为基础，将实际表格的列与预设列进行对应。
+注意：实际表格可能比预设多列或少列，也可能列名略有不同，请根据实际表头灵活调整。
+如果实际表格有预设中没有的列，请根据列名语义判断其 role 和 sign。
+如果实际表格缺少预设中的某些列，直接跳过即可。
+"""
+
+        prompt = f"""请分析以下审计附注宽表的横向公式结构。
+
+{table_text}
+{context}
+{preset_block}
+你的任务是识别每一列的语义角色和在横向公式中的符号（正/负），以便后续程序逐行验证横向公式是否成立。
+
+宽表有两种常见格式，请先判断属于哪种：
+
+【格式A：变动公式型（国企版常见）】
+列为：项目 | 期初余额 | 本期增加 | 本期减少 | 期末余额
+行为各资产类别（如房屋建筑物、机器设备等）
+横向公式：期初 + 各增加项 - 各减少项 = 期末
+
+【格式B：分类合计型（上市版常见）】
+列为：项目 | 房屋及建筑物 | 机器设备 | 运输设备 | ... | 合计
+行为变动项目（如期初余额、本期增加、本期减少、期末余额等）
+横向公式：各分类列之和 = 合计列
+特征：表头列名是资产分类名称（如"房屋及建筑物"、"机器设备"等），最后一列为"合计"
+
+注意：
+1. 你只需要识别结构，不需要做任何数值计算
+2. 有些列不参与公式（如百分比列、标签列、减值准备期初/期末等独立列）
+3. 减值准备列如果独立于账面价值公式，应标记为 skip
+4. "利息资本化率%"等百分比列应标记为 skip
+5. "投资成本"列通常是 skip（不参与变动公式）
+
+请返回以下 JSON 结构（不要包含其他文字）：
+
+如果是格式A（变动公式型）：
+{{
+  "formula_type": "movement",
+  "columns": [
+    {{"col_index": 0, "role": "label", "sign": null, "name": "项目名称"}},
+    {{"col_index": 1, "role": "opening", "sign": "+", "name": "期初余额"}},
+    {{"col_index": 2, "role": "movement", "sign": "+", "name": "本期增加"}},
+    {{"col_index": 3, "role": "movement", "sign": "-", "name": "本期减少"}},
+    {{"col_index": 4, "role": "closing", "sign": "=", "name": "期末余额"}},
+    {{"col_index": 5, "role": "skip", "sign": null, "name": "减值准备期末余额"}}
+  ],
+  "formula_description": "期初余额 + 本期增加 - 本期减少 = 期末余额",
+  "data_row_start": 0
+}}
+
+如果是格式B（分类合计型）：
+{{
+  "formula_type": "category_sum",
+  "columns": [
+    {{"col_index": 0, "role": "label", "sign": null, "name": "项目"}},
+    {{"col_index": 1, "role": "data", "sign": "+", "name": "房屋及建筑物"}},
+    {{"col_index": 2, "role": "data", "sign": "+", "name": "机器设备"}},
+    {{"col_index": 3, "role": "data", "sign": "+", "name": "运输设备"}},
+    {{"col_index": 4, "role": "total", "sign": "=", "name": "合计"}}
+  ],
+  "formula_description": "房屋及建筑物 + 机器设备 + 运输设备 = 合计",
+  "data_row_start": 0
+}}
+
+role 取值说明：
+- "label": 标签/名称列，不参与公式
+- "opening": 期初余额（格式A公式起点，sign 为 "+"）
+- "closing": 期末余额（格式A公式结果，sign 为 "="）
+- "movement": 变动列（格式A，sign 为 "+" 表示增加项，"-" 表示减少项）
+- "data": 分类数据列（格式B，sign 为 "+"，参与求和）
+- "total": 合计列（格式B，sign 为 "="，等于各 data 列之和）
+- "skip": 不参与横向公式的列（百分比、减值准备独立列、投资成本等）
+
+formula_type 取值说明：
+- "movement": 变动公式型（期初+变动=期末）
+- "category_sum": 分类合计型（各分类列之和=合计列）
+
+data_row_start: 第一个数据行的索引（跳过表头行）"""
+
+        return prompt
+
+    def _parse_wide_table_response(self, response_text: str) -> Optional[Dict]:
+        """解析宽表公式 LLM 返回的 JSON。"""
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if not json_match:
+                logger.warning("宽表公式 LLM 返回中未找到 JSON")
+                return None
+            data = json.loads(json_match.group())
+            if "columns" not in data:
+                logger.warning("宽表公式 LLM 返回缺少 columns 字段")
+                return None
+            # 验证至少有 opening 和 closing
+            roles = [c.get("role") for c in data["columns"]]
+            if "opening" not in roles or "closing" not in roles:
+                logger.warning("宽表公式 LLM 返回缺少 opening 或 closing 列")
+                return None
+            return data
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning("解析宽表公式 LLM 返回失败: %s", e)
+            return None
 
     # ─── LLM 分析 ───
 

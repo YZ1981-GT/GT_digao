@@ -157,7 +157,7 @@ class TestResultEndpoints:
         resp = client.get("/api/report-review/result/test-sess")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["total_confirmed"] == 1
+        assert data["confirmation_summary"]["confirmed"] == 1
         assert len(data["findings"]) == 1
         _cleanup()
 

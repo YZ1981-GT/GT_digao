@@ -131,3 +131,39 @@ class TestCacheInvalidation:
         old = svc.get_template_section(ReportTemplateType.SOE, TemplateCategory.REPORT_BODY, first_path)
         assert old is None
         svc.clear_cache()
+
+class TestPreloadTemplates:
+    """验证内置模板已预加载到知识库（原 test_preload_templates.py）。"""
+
+    def test_builtin_templates_loaded(self):
+        from backend.app.services.knowledge_service import KnowledgeService
+        ks = KnowledgeService()
+        docs = ks.get_documents('report_templates')
+        assert len(docs) >= 2, f"预期至少2个内置模板，实际 {len(docs)}"
+
+    def test_template_content_accessible(self):
+        from backend.app.services.knowledge_service import KnowledgeService
+        ks = KnowledgeService()
+        docs = ks.get_documents('report_templates')
+        for d in docs:
+            content = ks.get_document_content('report_templates', d['id'])
+            assert content and len(content) > 0, f"模板 {d['filename']} 内容为空"
+
+
+
+class TestPreloadTemplates:
+    """验证内置模板已预加载到知识库（原 test_preload_templates.py）。"""
+
+    def test_builtin_templates_loaded(self):
+        from backend.app.services.knowledge_service import KnowledgeService
+        ks = KnowledgeService()
+        docs = ks.get_documents('report_templates')
+        assert len(docs) >= 2, f"预期至少2个内置模板，实际 {len(docs)}"
+
+    def test_template_content_accessible(self):
+        from backend.app.services.knowledge_service import KnowledgeService
+        ks = KnowledgeService()
+        docs = ks.get_documents('report_templates')
+        for d in docs:
+            content = ks.get_document_content('report_templates', d['id'])
+            assert content and len(content) > 0, f"模板 {d['filename']} 内容为空"

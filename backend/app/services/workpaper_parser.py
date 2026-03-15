@@ -338,12 +338,14 @@ class WorkpaperParser:
                 tbl = obj
                 table_data: List[List[str]] = []
                 for row in tbl.rows:
-                    # 去重合并单元格
+                    # 合并单元格处理：保留所有列位置，合并的单元格用空字符串填充
+                    # 这样每行列数一致，避免前端按列索引取值时错位
                     seen_cells: set = set()
                     row_data: List[str] = []
                     for cell in row.cells:
                         cell_id = id(cell._tc)
                         if cell_id in seen_cells:
+                            row_data.append('')  # 合并单元格的重复位置填空
                             continue
                         seen_cells.add(cell_id)
                         row_data.append(cell.text.strip())
