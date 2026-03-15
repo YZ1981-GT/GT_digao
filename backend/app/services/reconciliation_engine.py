@@ -531,7 +531,8 @@ class ReconciliationEngine:
         # 合同资产
         "减值准备",
         # 应付职工薪酬：明细子表
-        "短期薪酬列示", "设定提存计划列示", "设定受益计划",
+        "短期薪酬列示", "短期薪酬明细", "设定提存计划列示", "设定提存计划明细",
+        "设定受益计划", "辞退福利明细", "一年内到期",
         # 固定资产/在建工程/无形资产：明细子表
         "暂时闲置", "未办妥产权",
         # 在建工程：国企报表明细子表
@@ -3657,18 +3658,32 @@ class ReconciliationEngine:
             if _first in ("合计", "总计"):
                 _total_count += 1
             if _section_pat.match(_first) and any(
-                kw in _first for kw in ReconciliationEngine._COST_SECTION_KW + ReconciliationEngine._AMORT_SECTION_KW
+                kw in _first for kw in (
+                    ReconciliationEngine._COST_SECTION_KW
+                    + ReconciliationEngine._AMORT_SECTION_KW
+                )
             ):
                 _has_multi_section = True
 
         total_row = None
         if not (_has_multi_section and _total_count > 1):
-            # 非多段变动表，或只有一个合计行 → 正常取最后一个合计行
+            # 非多段变动表，或只有一个合计行 → 正常取最后一个合计/总计行
+            # 当有多个"合计"行时，优先选"总计"行（"总计"通常是全表汇总，
+            # "合计"可能是段落小计）
+            _last_heji_ri = -1  # 最后一个"合计"行
+            _last_zongji_ri = -1  # 最后一个"总计"行
             for ri in range(len(note.rows) - 1, -1, -1):
                 first = str(note.rows[ri][0] if note.rows[ri] else "").replace(" ", "").replace("\u3000", "").strip()
-                if first in ("合计", "总计"):
-                    total_row = note.rows[ri]
+                if first == "总计" and _last_zongji_ri < 0:
+                    _last_zongji_ri = ri
+                if first == "合计" and _last_heji_ri < 0:
+                    _last_heji_ri = ri
+                if _last_heji_ri >= 0 and _last_zongji_ri >= 0:
                     break
+            # 优先"总计"，其次最后一个"合计"
+            pick_ri = _last_zongji_ri if _last_zongji_ri >= 0 else _last_heji_ri
+            if pick_ri >= 0:
+                total_row = note.rows[pick_ri]
 
         if total_row is not None:
             return ReconciliationEngine._extract_from_total_row(
@@ -3702,7 +3717,6 @@ class ReconciliationEngine:
 
         return (None, None)
 
-    @staticmethod
     def _extract_from_balance_label_rows(
         note: NoteTable,
         norm_headers: List[str],
@@ -3713,8 +3727,16 @@ class ReconciliationEngine:
         未分配利润等科目的附注表格是变动表（期初+增减变动=期末），
         没有"合计"行，但有标签行直接包含期末/期初值。
         """
-        closing_label_kw = ["期末余额", "期末未分配", "本期期末余额", "年末余额", "期末数"]
-        opening_label_kw = ["期初余额", "期初未分配", "本期期初余额", "年初余额", "期初数"]
+        closing_label_kw = ["期末余额", "期末未分配", "本期期末余额", "年末余额", "期末数", "期末金额", "期末合计"]
+        opening_label_kw = ["期初余额", "期初未分配", "本期期初余额", "年初余额", "期初数", "期初金额", "期初合计"]
+
+        # 找"合计"/"总计"列索引（优先取该列的值）
+        total_col = -1
+        for ci in range(len(norm_headers) - 1, 0, -1):
+            h = norm_headers[ci]
+            if h in ("合计", "总计"):
+                total_col = ci
+                break
 
         closing_val: Optional[float] = None
         opening_val: Optional[float] = None
@@ -3730,7 +3752,17 @@ class ReconciliationEngine:
             if not is_closing_row and not is_opening_row:
                 continue
 
-            # 从该行提取第一个数值（跳过标签列）
+            # 优先从"合计"列取值
+            if total_col > 0 and total_col < len(row):
+                v = _safe_float(row[total_col])
+                if v is not None:
+                    if is_closing_row and closing_val is None:
+                        closing_val = v
+                    elif is_opening_row and opening_val is None:
+                        opening_val = v
+                    continue
+
+            # 回退：从该行提取第一个数值（跳过标签列）
             for ci in range(1, len(row)):
                 v = _safe_float(row[ci])
                 if v is not None:
@@ -3741,6 +3773,7 @@ class ReconciliationEngine:
                     break
 
         return (closing_val, opening_val)
+
 
     @staticmethod
     def _extract_from_total_row(

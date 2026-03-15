@@ -4372,3 +4372,72 @@ class TestMultiSectionMovementTable:
         closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
         assert closing == 400000.0
         assert opening == 400000.0
+
+
+class TestTotalRowPreference:
+    """测试"总计"行优先于"合计"行的逻辑。"""
+
+    def test_prefer_zongji_over_heji(self):
+        """当表格同时有"合计"和"总计"行时，应取"总计"行的值。"""
+        note = NoteTable(
+            id="pref1", account_name="应付职工薪酬", section_title="应付职工薪酬",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["短期薪酬", 100, 500, 400, 200],
+                ["合计", 100, 500, 400, 200],
+                ["离职后福利", 50, 100, 80, 70],
+                ["合计", 50, 100, 80, 70],
+                ["总计", 150, 600, 480, 270],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 270.0, f"Expected 270, got {closing}"
+        assert opening == 150.0, f"Expected 150, got {opening}"
+
+    def test_single_heji_still_works(self):
+        """只有一个"合计"行时，正常取该行。"""
+        note = NoteTable(
+            id="pref2", account_name="应付职工薪酬", section_title="应付职工薪酬",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["短期薪酬", 100, 500, 400, 200],
+                ["离职后福利", 50, 100, 80, 70],
+                ["合计", 150, 600, 480, 270],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 270.0
+        assert opening == 150.0
+
+    def test_multiple_heji_no_zongji_takes_last(self):
+        """多个"合计"行但无"总计"行时，取最后一个"合计"行。"""
+        note = NoteTable(
+            id="pref3", account_name="应付职工薪酬", section_title="应付职工薪酬",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["短期薪酬", 100, 500, 400, 200],
+                ["合计", 100, 500, 400, 200],
+                ["离职后福利", 50, 100, 80, 70],
+                ["合计", 50, 100, 80, 70],
+            ],
+        )
+        # 无"总计"行，取最后一个"合计"（离职后福利小计）
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 70.0
+        assert opening == 50.0
+
+    def test_payroll_movement_table_extraction(self):
+        """应付职工薪酬变动表：正确排除变动列，提取期末/期初余额。"""
+        note = NoteTable(
+            id="pay1", account_name="应付职工薪酬", section_title="应付职工薪酬",
+            headers=["项目", "期初余额", "本期增加", "本期减少", "期末余额"],
+            rows=[
+                ["短期薪酬", 1000000, 5000000, 4500000, 1500000],
+                ["离职后福利-设定提存计划", 200000, 800000, 750000, 250000],
+                ["辞退福利", 0, 100000, 100000, 0],
+                ["合计", 1200000, 5900000, 5350000, 1750000],
+            ],
+        )
+        closing, opening = ReconciliationEngine._extract_note_totals_by_rules(note)
+        assert closing == 1750000.0, f"Expected 1750000, got {closing}"
+        assert opening == 1200000.0, f"Expected 1200000, got {opening}"
