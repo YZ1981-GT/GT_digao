@@ -877,6 +877,91 @@ class TestAmountConsistency:
         assert len(closing_f) == 1
         assert closing_f[0].difference == 50.0
 
+    def test_soe_deferred_tax_liability_from_combined_table(self):
+        """国企版：递延所得税负债应从合并表的负债段小计提取值。"""
+        note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["资产减值准备", 1080.10, 405.06, 1965.10, 491.30],
+                ["小计", 6645328.04, 1861632.01, 9670760.85, 2419049.17],
+                ["递延所得税负债:", None, None, None, None],
+                ["资产评估增值", 3065778.76, 1266444.69, 8265217.92, 2066304.48],
+                ["小计", 163431416.60, 40120854.15, 8265217.92, 2066304.48],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        item = _item(name="递延所得税负债", closing=40120854.15, opening=2066304.48)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        assert len(findings) == 0
+
+    def test_soe_deferred_tax_asset_from_combined_table(self):
+        """国企版：递延所得税资产应从合并表的资产段小计提取值。"""
+        note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["资产减值准备", 1080.10, 405.06, 1965.10, 491.30],
+                ["小计", 6645328.04, 1861632.01, 9670760.85, 2419049.17],
+                ["递延所得税负债:", None, None, None, None],
+                ["资产评估增值", 3065778.76, 1266444.69, 8265217.92, 2066304.48],
+                ["小计", 163431416.60, 40120854.15, 8265217.92, 2066304.48],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        item = _item(name="递延所得税资产", closing=1861632.01, opening=2419049.17)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        assert len(findings) == 0
+
+    def test_soe_deferred_tax_liability_mismatch(self):
+        """国企版：递延所得税负债与合并表负债段小计不一致时应报差异。"""
+        note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["小计", 6645328.04, 1861632.01, 9670760.85, 2419049.17],
+                ["递延所得税负债:", None, None, None, None],
+                ["小计", 163431416.60, 40120854.15, 8265217.92, 2066304.48],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        # 报表期末=50000000，附注负债段小计=40120854.15 → 差异
+        item = _item(name="递延所得税负债", closing=50000000.00, opening=2066304.48)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        closing_f = [f for f in findings if "期末" in f.location]
+        assert len(closing_f) == 1
+        assert abs(closing_f[0].difference - (50000000.00 - 40120854.15)) < 0.01
+
 
 # ─── 科目匹配评分 ───
 
@@ -1246,6 +1331,62 @@ class TestExtractNoteTotalsByRules:
         assert engine._get_component_section_type("固定资产减值准备") == "impair"
         assert engine._get_component_section_type("固定资产") is None
         assert engine._get_component_section_type("固定资产净值") is None
+
+    def test_extract_combined_subtotal_deferred_tax_liability(self):
+        """从递延所得税合并表中提取递延所得税负债段的小计。"""
+        note = NoteTable(
+            id="dt-combined", account_name="递延所得税资产和递延所得税负债",
+            section_title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税", "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["资产减值准备", 1080.10, 405.06, 1965.10, 491.30],
+                ["小计", 6645328.04, 1861632.01, 9670760.85, 2419049.17],
+                ["递延所得税负债:", None, None, None, None],
+                ["资产评估增值", 3065778.76, 1266444.69, 8265217.92, 2066304.48],
+                ["其他权益工具投资公允价值变动", 155417637.84, 38854409.46, None, None],
+                ["小计", 163431416.60, 40120854.15, 8265217.92, 2066304.48],
+            ],
+        )
+        # 提取递延所得税负债段
+        c, o = engine._extract_combined_subtotal(note, ["递延所得税负债"])
+        assert c == 40120854.15
+        assert o == 2066304.48
+
+    def test_extract_combined_subtotal_deferred_tax_asset(self):
+        """从递延所得税合并表中提取递延所得税资产段的小计。"""
+        note = NoteTable(
+            id="dt-combined-2", account_name="递延所得税资产和递延所得税负债",
+            section_title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税", "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["资产减值准备", 1080.10, 405.06, 1965.10, 491.30],
+                ["小计", 6645328.04, 1861632.01, 9670760.85, 2419049.17],
+                ["递延所得税负债:", None, None, None, None],
+                ["资产评估增值", 3065778.76, 1266444.69, 8265217.92, 2066304.48],
+                ["小计", 163431416.60, 40120854.15, 8265217.92, 2066304.48],
+            ],
+        )
+        c, o = engine._extract_combined_subtotal(note, ["递延所得税资产"])
+        assert c == 1861632.01
+        assert o == 2419049.17
+
+    def test_is_combined_subtotal_table(self):
+        """识别递延所得税合并表。"""
+        note_yes = NoteTable(
+            id="dt-yes", account_name="递延所得税资产和递延所得税负债",
+            section_title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=[], rows=[],
+        )
+        assert engine._is_combined_subtotal_table(note_yes) is True
+
+        note_no = NoteTable(
+            id="dt-no", account_name="递延所得税资产",
+            section_title="递延所得税资产",
+            headers=[], rows=[],
+        )
+        assert engine._is_combined_subtotal_table(note_no) is False
 
 
 # ─── 营业收入/营业成本合并表格提取 ───

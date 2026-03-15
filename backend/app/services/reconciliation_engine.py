@@ -222,6 +222,122 @@ class ReconciliationEngine:
         "使用权资产", "油气资产", "生产性生物资产",
     ]
 
+    # ─── 合并小计表格（同一张表包含两个科目各自的"小计"行） ───
+    # 国企版"未经抵销的递延所得税资产和递延所得税负债"表格中，
+    # 递延所得税资产和递延所得税负债各有一个"小计"行。
+    # key = 报表科目关键词, value = 该科目在合并表中的段落标识关键词列表
+    _COMBINED_SUBTOTAL_MAP: Dict[str, List[str]] = {
+        "递延所得税资产": ["递延所得税资产"],
+        "递延所得税负债": ["递延所得税负债"],
+    }
+    # 合并小计表格的标题特征：同时包含以下所有关键词才视为合并表
+    _COMBINED_SUBTOTAL_TABLE_MARKERS = ["递延所得税资产", "递延所得税负债"]
+
+    @staticmethod
+    def _is_combined_subtotal_table(note: NoteTable) -> bool:
+        """判断附注表格是否为合并小计表格（如递延所得税资产和负债合并表）。"""
+        title = (note.account_name or "") + (note.section_title or "")
+        title = title.replace(" ", "").replace("\u3000", "")
+        return all(kw in title for kw in ReconciliationEngine._COMBINED_SUBTOTAL_TABLE_MARKERS)
+
+    @staticmethod
+    def _extract_combined_subtotal(
+        note: NoteTable,
+        section_keywords: List[str],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """从合并小计表格中提取指定段落的小计行期末/期初值。
+
+        表格结构示例（递延所得税）：
+          项目 | 期末余额-暂时性差异 | 期末余额-递延所得税 | 期初余额-暂时性差异 | 期初余额-递延所得税
+          递延所得税资产:
+            ...明细行...
+            小计 | 6,645,328.04 | 1,861,632.01 | 9,670,760.85 | 2,419,049.17
+          递延所得税负债:
+            ...明细行...
+            小计 | 163,431,416.60 | 40,120,854.15 | 8,265,217.92 | 2,066,304.48
+
+        本方法找到 section_keywords 匹配的段落，然后提取该段落内"小计"行的值。
+        对于有多个同期列的表格（如暂时性差异+递延所得税），取最后一个匹配列
+        （即"递延所得税"列，而非"暂时性差异"列）。
+        """
+        closing_kw = ReconciliationEngine._CLOSING_COL_KW
+        opening_kw = ReconciliationEngine._OPENING_COL_KW
+        is_move = ReconciliationEngine._is_movement_col
+        norm_h = [str(h or "").replace(" ", "").replace("\u3000", "") for h in (note.headers or [])]
+
+        # 找所有期末/期初列索引，取最后一个（递延所得税列在暂时性差异列之后）
+        hdr_closing_idx = -1
+        hdr_opening_idx = -1
+        for ci, h in enumerate(norm_h):
+            if is_move(h):
+                continue
+            has_open = any(kw in h for kw in opening_kw)
+            if any(kw in h for kw in closing_kw) and not has_open:
+                hdr_closing_idx = ci  # 取最后一个期末列
+            if has_open:
+                hdr_opening_idx = ci  # 取最后一个期初列
+
+        if hdr_closing_idx <= 0 and hdr_opening_idx <= 0:
+            # 尝试从 header_rows 中查找
+            for hr in (getattr(note, "header_rows", None) or []):
+                for ci, cell in enumerate(hr):
+                    h = str(cell or "").replace(" ", "").replace("\u3000", "")
+                    has_open = any(kw in h for kw in opening_kw)
+                    if any(kw in h for kw in closing_kw) and not has_open:
+                        hdr_closing_idx = ci
+                    if has_open:
+                        hdr_opening_idx = ci
+
+        in_target = False
+        closing_val: Optional[float] = None
+        opening_val: Optional[float] = None
+
+        for row in note.rows:
+            first = str(row[0] if row else "").replace(" ", "").replace("\u3000", "").strip()
+
+            # 检测段落标题行（包含段落关键词的行，如"递延所得税负债："）
+            is_section_header = False
+            for kw in ReconciliationEngine._COMBINED_SUBTOTAL_TABLE_MARKERS:
+                if kw in first:
+                    is_section_header = True
+                    in_target = any(skw in first for skw in section_keywords)
+                    break
+
+            if is_section_header:
+                continue
+
+            if not in_target:
+                continue
+
+            # 在目标段落内找"小计"行
+            if first in ("小计", "合计"):
+                if hdr_closing_idx > 0 and hdr_closing_idx < len(row):
+                    v = _safe_float(row[hdr_closing_idx])
+                    if v is not None:
+                        closing_val = v
+                if hdr_opening_idx > 0 and hdr_opening_idx < len(row):
+                    v = _safe_float(row[hdr_opening_idx])
+                    if v is not None:
+                        opening_val = v
+
+                # 如果表头列索引没找到，尝试从小计行中取最后几个数值列
+                if closing_val is None and opening_val is None:
+                    numeric_indices = []
+                    for ci in range(1, len(row)):
+                        v = _safe_float(row[ci])
+                        if v is not None:
+                            numeric_indices.append(ci)
+                    if len(numeric_indices) >= 2:
+                        closing_val = _safe_float(row[numeric_indices[-2]])
+                        opening_val = _safe_float(row[numeric_indices[-1]])
+                    elif len(numeric_indices) == 1:
+                        closing_val = _safe_float(row[numeric_indices[0]])
+
+                break  # 找到小计行就停止
+
+        return (closing_val, opening_val)
+
+
     @staticmethod
     def _is_component_subtable(note: NoteTable) -> bool:
         """判断附注表格是否为资产组成部分子表（原价/累计折旧/减值准备）。
@@ -588,6 +704,20 @@ class ReconciliationEngine:
                         note_opening = sec_opening
                         rule_closing = sec_closing
                         rule_opening = sec_opening
+
+                # 合并小计表格（如"递延所得税资产和递延所得税负债"）：
+                # 从合并表中提取对应段落的"小计"行值
+                if self._is_combined_subtotal_table(note):
+                    norm_item = item.account_name.replace(" ", "").replace("\u3000", "")
+                    for item_kw, sec_kws in self._COMBINED_SUBTOTAL_MAP.items():
+                        if item_kw in norm_item:
+                            sub_closing, sub_opening = self._extract_combined_subtotal(note, sec_kws)
+                            if sub_closing is not None or sub_opening is not None:
+                                note_closing = sub_closing
+                                note_opening = sub_opening
+                                rule_closing = sub_closing
+                                rule_opening = sub_opening
+                            break
 
                 # 兜底：LLM 未识别出 cell 时，用规则引擎结果
                 if note_closing is None and rule_closing is not None:
