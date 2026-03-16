@@ -57,8 +57,10 @@ async def health_check():
 # 注意：这些路由必须在API路由之后注册，以避免冲突
 static_dir = "backend/static" if os.path.exists("backend/static") else "static"
 if os.path.exists(static_dir):
-    # 挂载静态资源文件夹
-    app.mount("/static", StaticFiles(directory=f"{static_dir}/static"), name="static")
+    # 挂载静态资源文件夹（兼容两种目录结构）
+    # React build 产出: static/static/js/ 或扁平化后: static/js/
+    static_assets = f"{static_dir}/static" if os.path.exists(f"{static_dir}/static") else static_dir
+    app.mount("/static", StaticFiles(directory=static_assets), name="static")
     
     # 处理React应用的根路径
     @app.get("/", include_in_schema=False)

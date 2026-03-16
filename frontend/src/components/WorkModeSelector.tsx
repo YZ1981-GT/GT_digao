@@ -37,170 +37,56 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
           请选择工作模式
         </p>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-5)' }}>
-          {/* 底稿复核卡片 */}
-          <div
-            onClick={() => onSelectMode('review')}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => { if (e.key === 'Enter') onSelectMode('review'); }}
-            style={{
-              border: '2px solid #e8e8e8',
-              borderRadius: 'var(--gt-radius-md, 8px)',
-              padding: 'var(--gt-space-4)',
-              cursor: 'pointer',
-              transition: 'all 0.2s',
-              backgroundColor: '#fff',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
-          >
-            <div style={{ fontSize: 24, marginBottom: 6 }}>📋</div>
-            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 6px 0' }}>
-              底稿复核
-            </h3>
-            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.5, margin: 0 }}>
-              上传审计底稿，从格式规范性、数据勾稽关系、会计准则合规性等多维度进行智能复核
-            </p>
-            <div style={{ marginTop: 10 }}>
-              <span
-                style={{
-                  display: 'inline-block',
-                  padding: '4px 12px',
-                  borderRadius: 'var(--gt-radius-sm)',
-                  fontSize: 'var(--gt-font-xs)',
-                  fontWeight: 600,
-                  color: '#fff',
-                  backgroundColor: 'var(--gt-primary)',
-                }}
-              >
-                进入复核 →
-              </span>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--gt-space-4)', marginBottom: 'var(--gt-space-5)', alignItems: 'stretch' }}>
+          {[
+            { key: 'review' as const, icon: '📋', title: '底稿复核', desc: '上传审计底稿，从格式规范性、数据勾稽关系、会计准则合规性等多维度进行智能复核', btn: '进入复核 →' },
+            { key: 'generate' as const, icon: '📝', title: '文档生成', desc: '基于模板与知识库，智能生成审计计划、审计小结、尽调报告等标准化审计文档', btn: '进入生成 →' },
+            { key: 'analysis' as const, icon: '🔍', title: '文档分析', desc: '上传文档进行总结分析、整理汇总或生成汇总台账，自动标注引用来源', btn: '进入分析 →' },
+            { key: 'report_review' as const, icon: '📊', title: '审计报告复核', desc: '上传审计报告、报表及附注，自动校验金额勾稽、正文规范性、附注完整性等', btn: '进入复核 →' },
+          ].map((item) => (
+            <div
+              key={item.key}
+              onClick={() => onSelectMode(item.key)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter') onSelectMode(item.key); }}
+              style={{
+                border: '2px solid #e8e8e8',
+                borderRadius: 'var(--gt-radius-md, 8px)',
+                padding: 'var(--gt-space-4)',
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+                backgroundColor: '#fff',
+                display: 'flex',
+                flexDirection: 'column',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
+            >
+              <div style={{ fontSize: 26, marginBottom: 8 }}>{item.icon}</div>
+              <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 8px 0' }}>
+                {item.title}
+              </h3>
+              <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.6, margin: 0, flex: 1 }}>
+                {item.desc}
+              </p>
+              <div style={{ marginTop: 12 }}>
+                <span
+                  style={{
+                    display: 'inline-block',
+                    padding: '4px 12px',
+                    borderRadius: 'var(--gt-radius-sm)',
+                    fontSize: 'var(--gt-font-xs)',
+                    fontWeight: 600,
+                    color: '#fff',
+                    backgroundColor: 'var(--gt-primary)',
+                  }}
+                >
+                  {item.btn}
+                </span>
+              </div>
             </div>
-          </div>
-
-          {/* 文档生成卡片 */}
-          <div
-            onClick={() => onSelectMode('generate')}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => { if (e.key === 'Enter') onSelectMode('generate'); }}
-            style={{
-              border: '2px solid #e8e8e8',
-              borderRadius: 'var(--gt-radius-md, 8px)',
-              padding: 'var(--gt-space-4)',
-              cursor: 'pointer',
-              transition: 'all 0.2s',
-              backgroundColor: '#fff',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
-          >
-            <div style={{ fontSize: 24, marginBottom: 6 }}>📝</div>
-            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 6px 0' }}>
-              文档生成
-            </h3>
-            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.5, margin: 0 }}>
-              基于模板与知识库，智能生成审计计划、审计小结、尽调报告等标准化审计文档
-            </p>
-            <div style={{ marginTop: 10 }}>
-              <span
-                style={{
-                  display: 'inline-block',
-                  padding: '4px 12px',
-                  borderRadius: 'var(--gt-radius-sm)',
-                  fontSize: 'var(--gt-font-xs)',
-                  fontWeight: 600,
-                  color: '#fff',
-                  backgroundColor: 'var(--gt-primary)',
-                }}
-              >
-                进入生成 →
-              </span>
-            </div>
-          </div>
-
-          {/* 文档分析卡片 */}
-          <div
-            onClick={() => onSelectMode('analysis')}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => { if (e.key === 'Enter') onSelectMode('analysis'); }}
-            style={{
-              border: '2px solid #e8e8e8',
-              borderRadius: 'var(--gt-radius-md, 8px)',
-              padding: 'var(--gt-space-5)',
-              cursor: 'pointer',
-              transition: 'all 0.2s',
-              backgroundColor: '#fff',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
-          >
-            <div style={{ fontSize: 28, marginBottom: 8 }}>🔍</div>
-            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 8px 0' }}>
-              文档分析
-            </h3>
-            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.6, margin: 0 }}>
-              上传文档进行总结分析、整理汇总或生成汇总台账，自动标注引用来源
-            </p>
-            <div style={{ marginTop: 12 }}>
-              <span
-                style={{
-                  display: 'inline-block',
-                  padding: '4px 12px',
-                  borderRadius: 'var(--gt-radius-sm)',
-                  fontSize: 'var(--gt-font-xs)',
-                  fontWeight: 600,
-                  color: '#fff',
-                  backgroundColor: 'var(--gt-primary)',
-                }}
-              >
-                进入分析 →
-              </span>
-            </div>
-          </div>
-
-          {/* 审计报告复核卡片 */}
-          <div
-            onClick={() => onSelectMode('report_review')}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => { if (e.key === 'Enter') onSelectMode('report_review'); }}
-            style={{
-              border: '2px solid #e8e8e8',
-              borderRadius: 'var(--gt-radius-md, 8px)',
-              padding: 'var(--gt-space-5)',
-              cursor: 'pointer',
-              transition: 'all 0.2s',
-              backgroundColor: '#fff',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--gt-primary)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(75,45,119,0.12)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e8e8e8'; e.currentTarget.style.boxShadow = 'none'; }}
-          >
-            <div style={{ fontSize: 28, marginBottom: 8 }}>📊</div>
-            <h3 style={{ fontSize: 'var(--gt-font-base)', fontWeight: 600, color: 'var(--gt-primary)', margin: '0 0 8px 0' }}>
-              审计报告复核
-            </h3>
-            <p style={{ fontSize: 'var(--gt-font-xs)', color: 'var(--gt-text-secondary)', lineHeight: 1.6, margin: 0 }}>
-              上传审计报告、报表及附注，自动校验金额勾稽、正文规范性、附注完整性等
-            </p>
-            <div style={{ marginTop: 12 }}>
-              <span
-                style={{
-                  display: 'inline-block',
-                  padding: '4px 12px',
-                  borderRadius: 'var(--gt-radius-sm)',
-                  fontSize: 'var(--gt-font-xs)',
-                  fontWeight: 600,
-                  color: '#fff',
-                  backgroundColor: 'var(--gt-primary)',
-                }}
-              >
-                进入复核 →
-              </span>
-            </div>
-          </div>
+          ))}
         </div>
 
         {/* 快速指引 */}
@@ -208,43 +94,22 @@ const WorkModeSelector: React.FC<WorkModeSelectorProps> = ({ onSelectMode }) => 
           <h3 style={{ fontSize: 'var(--gt-font-sm)', fontWeight: 600, color: 'var(--gt-text-primary)', marginBottom: 'var(--gt-space-3)' }}>
             快速开始
           </h3>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--gt-space-3)' }}>
-            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
-              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>底稿复核流程</div>
-              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
-                1. 上传底稿文件（Excel/Word/PDF）<br />
-                2. 选择提示词与复核维度<br />
-                3. 上传补充材料并确认<br />
-                4. 查看复核报告并导出
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--gt-space-3)', alignItems: 'stretch' }}>
+            {[
+              { title: '底稿复核流程', steps: ['上传底稿文件（Excel/Word/PDF）', '选择提示词与复核维度', '上传补充材料并确认', '查看复核报告并导出'] },
+              { title: '文档生成流程', steps: ['上传模板并关联知识库', '确认章节大纲结构', '逐章节生成与编辑', '导出 Word 文档'] },
+              { title: '文档分析流程', steps: ['上传文档并预览编辑缓存', '选择分析模式与自定义要求', '确认自动生成的章节框架', '逐章节生成内容（标注出处）'] },
+              { title: '审计报告复核流程', steps: ['上传报告/报表/附注文件', '确认科目与附注对照关系', '配置复核参数并启动', '逐项确认问题并导出报告'] },
+            ].map((item) => (
+              <div key={item.title} style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
+                <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>{item.title}</div>
+                <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
+                  {item.steps.map((s, i) => (
+                    <React.Fragment key={i}>{i > 0 && <br />}{i + 1}. {s}</React.Fragment>
+                  ))}
+                </div>
               </div>
-            </div>
-            <div style={{ padding: 'var(--gt-space-2)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
-              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 3 }}>文档生成流程</div>
-              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.5 }}>
-                1. 上传模板并关联知识库<br />
-                2. 确认章节大纲结构<br />
-                3. 逐章节生成与编辑<br />
-                4. 导出 Word 文档
-              </div>
-            </div>
-            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
-              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>文档分析流程</div>
-              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
-                1. 上传文档并预览编辑缓存<br />
-                2. 选择分析模式与自定义要求<br />
-                3. 确认自动生成的章节框架<br />
-                4. 逐章节生成内容（标注出处）
-              </div>
-            </div>
-            <div style={{ padding: 'var(--gt-space-3)', backgroundColor: '#f9f7fc', borderRadius: 'var(--gt-radius-sm)', fontSize: 'var(--gt-font-xs)' }}>
-              <div style={{ fontWeight: 600, color: 'var(--gt-primary)', marginBottom: 4 }}>审计报告复核流程</div>
-              <div style={{ color: 'var(--gt-text-secondary)', lineHeight: 1.6 }}>
-                1. 上传报告/报表/附注文件<br />
-                2. 确认科目与附注对照关系<br />
-                3. 配置复核参数并启动<br />
-                4. 逐项确认问题并导出报告
-              </div>
-            </div>
+            ))}
           </div>
         </div>
 
