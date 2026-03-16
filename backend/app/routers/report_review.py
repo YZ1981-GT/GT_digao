@@ -23,6 +23,7 @@ from ..models.audit_schemas import (
     ReportFileType,
     ReportReviewConfig,
     ReportReviewFinding,
+    ReportReviewFindingCategory,
     ReportReviewResult,
     ReportReviewSession,
     ReportTemplateType,
@@ -77,6 +78,14 @@ class TraceRequest(BaseModel):
 class BatchRequest(BaseModel):
     finding_ids: List[str]
     action: str  # confirm / dismiss
+
+
+class AddAnnotationRequest(BaseModel):
+    session_id: str
+    section_title: str
+    account_name: str = ""
+    description: str
+    risk_level: str = "medium"
 
 class StatusUpdateRequest(BaseModel):
     status: str  # open / resolved
@@ -390,9 +399,16 @@ async def start_review(req: StartReviewRequest):
                 if data.get("status") == "completed" and "result" in data:
                     result = data["result"]
                     if "findings" in result:
-                        _findings[req.session_id] = [
+                        new_findings = [
                             ReportReviewFinding(**f) for f in result["findings"]
                         ]
+                        # 保留已有的手动批注（manual_annotation），与新复核结果合并
+                        existing = _findings.get(req.session_id, [])
+                        annotations = [
+                            f for f in existing
+                            if f.category == ReportReviewFindingCategory.MANUAL_ANNOTATION
+                        ]
+                        _findings[req.session_id] = annotations + new_findings
             except Exception:
                 pass
 
@@ -406,6 +422,24 @@ async def get_findings(session_id: str):
     """获取所有 Finding。"""
     findings = _findings.get(session_id, [])
     return {"findings": [f.model_dump() for f in findings]}
+
+
+@router.post("/finding/annotation")
+async def add_annotation(req: AddAnnotationRequest):
+    """手动插入批注（复核意见）。"""
+    import uuid
+    finding = ReportReviewFinding(
+        id=str(uuid.uuid4())[:8],
+        category=ReportReviewFindingCategory.MANUAL_ANNOTATION,
+        risk_level=RiskLevel(req.risk_level),
+        account_name=req.account_name or req.section_title,
+        location=f"附注-{req.section_title}",
+        description=req.description,
+        suggestion="",
+        confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
+    )
+    _findings.setdefault(req.session_id, []).append(finding)
+    return {"status": "created", "finding": finding.model_dump()}
 
 
 @router.get("/finding/{finding_id}")
@@ -761,6 +795,7 @@ async def export_report(req: ExportRequest):
             "report_body_compliance": "正文规范性",
             "note_content": "附注内容",
             "text_quality": "文本质量",
+            "manual_annotation": "复核批注",
             "expression_compliance": "表达合规性",
             "missing_disclosure": "披露缺失",
             "other": "其他",
@@ -795,32 +830,53 @@ async def export_report(req: ExportRequest):
             # 表格后间距
             _add_body_para(doc, "", before=0.5, after=0.3)
 
-            # ── 按科目分组的问题明细 ──
+            # ── 按分类分组的问题明细 ──
             _add_body_para(doc, "二、问题明细", bold=True, before=0.5, after=0.5)
 
-            grouped: Dict[str, list] = {}
+            # 分类顺序（与前端一致）
+            CATEGORY_ORDER = [
+                "manual_annotation",
+                "amount_inconsistency", "reconciliation_error", "change_abnormal",
+                "note_missing", "note_content",
+                "report_body_compliance", "text_quality",
+            ]
+            cat_grouped: Dict[str, list] = {}
+            cat_order: list = []
+            for cat_key in CATEGORY_ORDER:
+                items = [f for f in output if (f.category.value if hasattr(f.category, "value") else str(f.category)) == cat_key]
+                if not items:
+                    continue
+                label = cat_map.get(cat_key, cat_key)
+                cat_grouped[label] = items
+                cat_order.append(label)
+            # 兜底：未在 CATEGORY_ORDER 中的分类
             for f in output:
-                grouped.setdefault(f.account_name, []).append(f)
+                cat_val = f.category.value if hasattr(f.category, "value") else str(f.category)
+                if cat_val not in CATEGORY_ORDER:
+                    label = cat_map.get(cat_val, cat_val)
+                    if label not in cat_grouped:
+                        cat_grouped[label] = []
+                        cat_order.append(label)
+                    cat_grouped[label].append(f)
 
-            acct_idx = 0
-            for account, flist in grouped.items():
-                acct_idx += 1
-                _add_body_para(doc, f"（{acct_idx}）{account}（{len(flist)}项）",
+            cat_idx = 0
+            for cat_label in cat_order:
+                flist = cat_grouped[cat_label]
+                cat_idx += 1
+                _add_body_para(doc, f"（{cat_idx}）{cat_label}（{len(flist)}项）",
                                bold=True, before=0.5, after=0.3)
 
-                # 问题表格：4列（序号、分类/风险、位置、描述/建议）
+                # 问题表格：5列（序号、科目、风险、位置、描述/建议）
                 col_count = 5
                 tbl = doc.add_table(rows=1, cols=col_count)
                 tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
                 _set_table_borders(tbl)
 
-                # 设置列宽比例（序号:分类:风险:位置:描述）
-                col_widths = [Cm(1.0), Cm(2.2), Cm(1.2), Cm(3.5), Cm(7.0)]
+                col_widths = [Cm(0.8), Cm(2.5), Cm(0.8), Cm(3.2), Cm(7.8)]
                 for ci, w in enumerate(col_widths):
                     tbl.columns[ci].width = w
 
-                # 表头
-                hdr_texts = ["序号", "分类", "风险", "位置", "描述及建议"]
+                hdr_texts = ["序号", "科目", "风险", "位置", "描述及建议"]
                 for ci, ht in enumerate(hdr_texts):
                     _format_table_cell(tbl.rows[0].cells[ci], ht,
                                        bold=True, size=TABLE_SIZE)
@@ -829,7 +885,6 @@ async def export_report(req: ExportRequest):
                 # 数据行
                 for fi, f in enumerate(flist):
                     row = tbl.add_row()
-                    cat_val = f.category.value if hasattr(f.category, "value") else str(f.category)
                     risk_val = f.risk_level.value if hasattr(f.risk_level, "value") else str(f.risk_level)
 
                     desc_parts = []
@@ -841,7 +896,7 @@ async def export_report(req: ExportRequest):
 
                     cell_data = [
                         (str(fi + 1), WD_ALIGN_PARAGRAPH.CENTER),
-                        (cat_map.get(cat_val, cat_val), WD_ALIGN_PARAGRAPH.CENTER),
+                        (f.account_name or "", WD_ALIGN_PARAGRAPH.CENTER),
                         (risk_map.get(risk_val, risk_val), WD_ALIGN_PARAGRAPH.CENTER),
                         (f.location or "", WD_ALIGN_PARAGRAPH.LEFT),
                         (desc_text, WD_ALIGN_PARAGRAPH.LEFT),

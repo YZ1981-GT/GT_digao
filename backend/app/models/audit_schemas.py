@@ -534,6 +534,7 @@ class ReportReviewFindingCategory(str, Enum):
     REPORT_BODY_COMPLIANCE = "report_body_compliance"
     NOTE_CONTENT = "note_content"
     TEXT_QUALITY = "text_quality"
+    MANUAL_ANNOTATION = "manual_annotation"
 
 
 class FindingConfirmationStatus(str, Enum):

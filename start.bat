@@ -107,6 +107,7 @@ echo [4/4] 启动前端 (port 3030)...
     echo chcp 65001 ^>nul 2^>^&1
     echo cd /d "%ROOT%frontend"
     echo set PORT=3030
+    echo set BROWSER=none
     echo call npm start
     echo pause
 )

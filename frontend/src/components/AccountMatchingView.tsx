@@ -133,6 +133,15 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
 
   // 折叠状态
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+
+  // 批注对话框状态
+  const [annotationOpen, setAnnotationOpen] = useState(false);
+  const [annotationSection, setAnnotationSection] = useState<{ id: string; title: string } | null>(null);
+  const [annotationText, setAnnotationText] = useState('');
+  const [annotationRisk, setAnnotationRisk] = useState<'high' | 'medium' | 'low'>('medium');
+  const [annotationSaving, setAnnotationSaving] = useState(false);
+  // 已添加批注的 section id 集合（用于显示标记）
+  const [annotatedSections, setAnnotatedSections] = useState<Set<string>>(new Set());
   const toggleCollapse = useCallback((id: string) => {
     setCollapsedIds(prev => {
       const next = new Set(prev);
@@ -480,6 +489,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     const tc = warn ? GT.danger : lvlColor(level);
     const bg = warn ? '#fdf0ef' : lvlTitleBg(level);
     const bc = lvlBorder(level);
+    const hasAnnotation = annotatedSections.has(id);
     return (
       <div
         onClick={() => hasContent && toggleCollapse(id)}
@@ -494,13 +504,37 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
           {seqNo && !(/^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇㈠㈡㈢㈣㈤㈥㈦㈧㈨㈩]/.test(title.trim()) || /^\d+[.、)）\s]/.test(title.trim()) || /^[\(（]\d+[\)）]/.test(title.trim())) && <span style={{ marginRight: 8, opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{seqNo}</span>}
           {title}
         </span>
-        {hasContent && (
-          <span style={{
-            fontSize: 16, fontWeight: 700, color: tc, width: 22, height: 22,
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            borderRadius: 4, background: `${tc}15`, flexShrink: 0,
-          }}>{isCollapsed ? '+' : '−'}</span>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {hasAnnotation && (
+            <span style={{ fontSize: 11, color: '#e67e22', background: '#fef5e7', padding: '1px 6px', borderRadius: 3 }}>已批注</span>
+          )}
+          <button
+            title="插入批注"
+            onClick={(e) => {
+              e.stopPropagation();
+              setAnnotationSection({ id, title });
+              setAnnotationText('');
+              setAnnotationRisk('medium');
+              setAnnotationOpen(true);
+            }}
+            style={{
+              width: 22, height: 22, border: 'none', borderRadius: 3,
+              background: 'transparent', cursor: 'pointer', display: 'inline-flex',
+              alignItems: 'center', justifyContent: 'center', fontSize: 12,
+              color: GT.primary, flexShrink: 0, opacity: 0.6,
+              transition: 'opacity 0.15s',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+            onMouseLeave={e => (e.currentTarget.style.opacity = '0.6')}
+          >✎</button>
+          {hasContent && (
+            <span style={{
+              fontSize: 16, fontWeight: 700, color: tc, width: 22, height: 22,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              borderRadius: 4, background: `${tc}15`, flexShrink: 0,
+            }}>{isCollapsed ? '+' : '−'}</span>
+          )}
+        </div>
       </div>
     );
   };
@@ -2602,6 +2636,266 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       </div>{/* 单一滚动容器结束 */}
 
       {renderFooter()}
+
+      {/* ─── 批注编辑对话框 ─── */}
+      {annotationOpen && annotationSection && (() => {
+        // 递归查找 section by id
+        const findSec = (secs: NoteSection[], id: string): NoteSection | null => {
+          for (const s of secs) {
+            if (s.id === id) return s;
+            const found = findSec(s.children, id);
+            if (found) return found;
+          }
+          return null;
+        };
+        const sec = findSec(sections, annotationSection.id);
+        // 收集该 section 及其子节点的所有表格
+        const collectTables = (s: NoteSection): NoteTable[] => {
+          const tables: NoteTable[] = [];
+          for (const nid of s.note_table_ids) {
+            const nt = noteMap.get(nid);
+            if (nt) tables.push(nt);
+          }
+          for (const c of s.children) tables.push(...collectTables(c));
+          return tables;
+        };
+        const sectionTables = sec ? collectTables(sec) : [];
+
+        // 构建内容序列：按 content_order 交错显示段落和表格，子节点内容也递归收集
+        type ContentItem = { type: 'para'; text: string } | { type: 'table'; nt: NoteTable } | { type: 'title'; text: string; level: number };
+        const collectContent = (s: NoteSection): ContentItem[] => {
+          const items: ContentItem[] = [];
+          if (s.content_order && s.content_order.length > 0) {
+            for (const entry of s.content_order) {
+              if (entry.type === 'para' && s.content_paragraphs[entry.index]) {
+                items.push({ type: 'para', text: s.content_paragraphs[entry.index] });
+              } else if (entry.type === 'table' && s.note_table_ids[entry.index]) {
+                const nt = noteMap.get(s.note_table_ids[entry.index]);
+                if (nt) items.push({ type: 'table', nt });
+              }
+            }
+          } else {
+            // fallback: paragraphs first, then tables
+            for (const p of s.content_paragraphs) {
+              if (p.trim()) items.push({ type: 'para', text: p });
+            }
+            for (const nid of s.note_table_ids) {
+              const nt = noteMap.get(nid);
+              if (nt) items.push({ type: 'table', nt });
+            }
+          }
+          for (const c of s.children) {
+            items.push({ type: 'title', text: c.title, level: c.level });
+            items.push(...collectContent(c));
+          }
+          return items;
+        };
+        const contentItems = sec ? collectContent(sec) : [];
+
+        return (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }} onClick={() => setAnnotationOpen(false)}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: '#fff', borderRadius: 12, width: '90vw', maxWidth: 1200, minWidth: 600,
+            height: '80vh', maxHeight: 800,
+            boxShadow: '0 8px 40px rgba(0,0,0,0.2)', display: 'flex', flexDirection: 'column',
+          }}>
+            {/* 标题栏 */}
+            <div style={{
+              padding: '14px 24px', borderBottom: `1px solid ${GT.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0,
+            }}>
+              <span style={{ fontSize: 16, fontWeight: 600, color: GT.primary }}>
+                插入批注 — {annotationSection.title}
+              </span>
+              <button onClick={() => setAnnotationOpen(false)} style={{
+                border: 'none', background: 'none', fontSize: 20, cursor: 'pointer', color: GT.textMuted,
+              }}>×</button>
+            </div>
+            {/* 左右分栏内容区 */}
+            <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+              {/* 左侧：内容预览 */}
+              <div style={{
+                flex: 1, borderRight: `1px solid ${GT.border}`, overflowY: 'auto', padding: '16px 20px',
+                background: GT.bgPage,
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: GT.textSecondary, marginBottom: 10 }}>
+                  📋 附注内容预览
+                </div>
+                {contentItems.length === 0 ? (
+                  <div style={{ color: GT.textMuted, fontSize: 13, padding: 20, textAlign: 'center' }}>该章节暂无内容</div>
+                ) : contentItems.map((item, idx) => {
+                  if (item.type === 'title') {
+                    return (
+                      <div key={`t-${idx}`} style={{
+                        fontSize: 12, fontWeight: 600, color: lvlColor(item.level),
+                        margin: '12px 0 4px', padding: '4px 0',
+                        borderBottom: `1px solid ${GT.borderLight}`,
+                      }}>{item.text}</div>
+                    );
+                  }
+                  if (item.type === 'para') {
+                    return (
+                      <div key={`p-${idx}`} style={{
+                        fontSize: 12, color: GT.text, lineHeight: 1.8,
+                        margin: '6px 0', padding: '4px 8px',
+                        background: '#fff', borderRadius: 4, border: `1px solid ${GT.borderLight}`,
+                      }}>{item.text}</div>
+                    );
+                  }
+                  // type === 'table'
+                  const nt = item.nt;
+                  return (
+                    <div key={`tb-${idx}`} style={{ marginBottom: 12 }}>
+                      <div style={{ overflowX: 'auto', borderRadius: 6, border: `1px solid ${GT.border}` }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                          {nt.headers && nt.headers.length > 0 && (
+                            <thead>
+                              <tr style={{ background: GT.primaryBgDeep }}>
+                                {nt.headers.map((h, hi) => (
+                                  <th key={hi} style={{
+                                    padding: '6px 8px', textAlign: hi === 0 ? 'left' : 'right',
+                                    borderBottom: `1px solid ${GT.border}`, color: GT.primary,
+                                    fontWeight: 600, whiteSpace: 'nowrap', fontSize: 11,
+                                  }}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                          )}
+                          <tbody>
+                            {nt.rows.slice(0, 30).map((row, ri) => (
+                              <tr key={ri} style={{ background: ri % 2 === 0 ? '#fff' : '#fafafa' }}>
+                                {row.map((cell: any, ci: number) => (
+                                  <td key={ci} style={{
+                                    padding: '4px 8px', borderBottom: `1px solid ${GT.border}`,
+                                    textAlign: ci === 0 ? 'left' : 'right', fontSize: 11,
+                                    whiteSpace: 'nowrap', color: GT.text,
+                                  }}>{cell != null ? String(cell) : ''}</td>
+                                ))}
+                              </tr>
+                            ))}
+                            {nt.rows.length > 30 && (
+                              <tr><td colSpan={nt.headers?.length || 1} style={{
+                                padding: 6, textAlign: 'center', color: GT.textMuted, fontSize: 11,
+                              }}>... 共 {nt.rows.length} 行，仅显示前 30 行</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* 右侧：输入区 */}
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '16px 20px', overflow: 'hidden' }}>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ fontSize: 13, color: GT.textSecondary, marginBottom: 4, display: 'block' }}>风险等级</label>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {(['high', 'medium', 'low'] as const).map(r => (
+                      <button key={r} onClick={() => setAnnotationRisk(r)} style={{
+                        padding: '4px 16px', borderRadius: 4, cursor: 'pointer', fontSize: 13,
+                        border: annotationRisk === r ? `2px solid ${GT.primary}` : '1px solid #d9d9d9',
+                        background: annotationRisk === r ? `${GT.primary}10` : '#fff',
+                        color: annotationRisk === r ? GT.primary : GT.text,
+                        fontWeight: annotationRisk === r ? 600 : 400,
+                      }}>{r === 'high' ? '高' : r === 'medium' ? '中' : '低'}</button>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                  <label style={{ fontSize: 13, color: GT.textSecondary, marginBottom: 4, display: 'block' }}>复核意见</label>
+                  <textarea
+                    value={annotationText}
+                    onChange={e => setAnnotationText(e.target.value)}
+                    placeholder="请输入复核意见、关注事项或需项目组反馈的问题..."
+                    style={{
+                      flex: 1, width: '100%', padding: 12, fontSize: 14, lineHeight: 1.8,
+                      border: `1px solid ${GT.border}`, borderRadius: 8, resize: 'none',
+                      outline: 'none', fontFamily: GT.font, boxSizing: 'border-box',
+                    }}
+                    autoFocus
+                  />
+                </div>
+              </div>
+            </div>
+            {/* 底部按钮 */}
+            <div style={{
+              padding: '12px 24px', borderTop: `1px solid ${GT.border}`,
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0,
+            }}>
+              <button
+                onClick={async () => {
+                  if (!sessionId || !annotationSection) return;
+                  try {
+                    const resp = await fetch(`${API}/api/report-review/workpaper/link`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        session_id: sessionId,
+                        section_title: annotationSection.title,
+                        account_name: annotationSection.title,
+                      }),
+                    });
+                    if (resp.ok) {
+                      const data = await resp.json();
+                      alert(data.message || '底稿联动请求已发送');
+                    } else {
+                      alert('接口暂未开放，敬请期待');
+                    }
+                  } catch { alert('接口暂未开放，敬请期待'); }
+                }}
+                style={{
+                  padding: '8px 20px', border: `1px solid #e67e22`, borderRadius: 6,
+                  background: '#fff', cursor: 'pointer', fontSize: 13, color: '#e67e22',
+                  display: 'flex', alignItems: 'center', gap: 4,
+                }}
+              >🔗 调用API · 底稿联动</button>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={() => setAnnotationOpen(false)} style={{
+                  padding: '8px 24px', border: `1px solid ${GT.border}`, borderRadius: 6,
+                  background: '#fff', cursor: 'pointer', fontSize: 14, color: GT.text,
+                }}>取消</button>
+                <button
+                  disabled={!annotationText.trim() || annotationSaving}
+                  onClick={async () => {
+                    if (!sessionId || !annotationSection || !annotationText.trim()) return;
+                    setAnnotationSaving(true);
+                    try {
+                      const resp = await fetch(`${API}/api/report-review/finding/annotation`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          session_id: sessionId,
+                          section_title: annotationSection.title,
+                          description: annotationText.trim(),
+                          risk_level: annotationRisk,
+                        }),
+                      });
+                      if (resp.ok) {
+                        setAnnotatedSections(prev => new Set(prev).add(annotationSection.id));
+                        setAnnotationOpen(false);
+                      } else {
+                        alert('保存失败，请重试');
+                      }
+                    } catch { alert('网络错误'); }
+                    setAnnotationSaving(false);
+                  }}
+                  style={{
+                    padding: '8px 32px', border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 600,
+                    cursor: (!annotationText.trim() || annotationSaving) ? 'not-allowed' : 'pointer',
+                    background: (!annotationText.trim() || annotationSaving) ? '#ccc' : `linear-gradient(135deg, ${GT.primary} 0%, ${GT.primaryLight} 100%)`,
+                    color: '#fff', boxShadow: annotationText.trim() ? `0 2px 8px ${GT.primary}30` : 'none',
+                  }}>
+                  {annotationSaving ? '保存中...' : '保存批注'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
     </div>
   );
 };

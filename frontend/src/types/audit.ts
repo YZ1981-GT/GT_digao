@@ -523,7 +523,8 @@ export type ReportReviewFindingCategory =
   | 'note_missing'
   | 'report_body_compliance'
   | 'note_content'
-  | 'text_quality';
+  | 'text_quality'
+  | 'manual_annotation';
 
 /** 发现确认状态（Req 11.1-11.6） */
 export type FindingConfirmationStatus = 'pending_confirmation' | 'confirmed' | 'dismissed';
@@ -780,6 +781,7 @@ export const FINDING_CATEGORY_LABELS: Record<ReportReviewFindingCategory, string
   report_body_compliance: '正文规范性',
   note_content: '附注内容',
   text_quality: '文本质量',
+  manual_annotation: '复核批注',
 };
 
 export const FINDING_CATEGORY_COLORS: Record<ReportReviewFindingCategory, string> = {
@@ -790,6 +792,7 @@ export const FINDING_CATEGORY_COLORS: Record<ReportReviewFindingCategory, string
   report_body_compliance: 'var(--gt-primary)',
   note_content: 'var(--gt-teal)',
   text_quality: '#888888',
+  manual_annotation: '#e67e22',
 };
 
 export const REPORT_TEMPLATE_TYPE_LABELS: Record<ReportTemplateType, string> = {

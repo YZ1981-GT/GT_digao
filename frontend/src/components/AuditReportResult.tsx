@@ -140,15 +140,39 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
   const dismissed = allFindings.filter(f => f.confirmation_status === 'dismissed').length;
   const pending = allFindings.filter(f => f.confirmation_status === 'pending_confirmation').length;
 
-  // Group by account_name, preserve order
+  // ── 分组策略 ──
+  // 按 category 大类分组，同类问题归到一起
+  // 复核批注（manual_annotation）→ 单独一组，置于最前
+  // 科目级问题（金额不一致/勾稽错误/变动异常/附注缺失）→ 按 category 合并
+  // 附注内容/正文规范性/文本质量等 → 按 category 合并
+  const CATEGORY_ORDER: string[] = [
+    'manual_annotation',
+    'amount_inconsistency', 'reconciliation_error', 'change_abnormal',
+    'note_missing', 'note_content',
+    'report_body_compliance', 'text_quality',
+  ];
+
   const groupOrder: string[] = [];
   const grouped: Record<string, ReportReviewFinding[]> = {};
+
+  // 按 category 顺序分组
+  for (const cat of CATEGORY_ORDER) {
+    const items = allFindings.filter(f => f.category === cat);
+    if (items.length === 0) continue;
+    const label = FINDING_CATEGORY_LABELS[cat as ReportReviewFindingCategory] || cat;
+    const icon = cat === 'manual_annotation' ? '📝' : '📋';
+    const key = `${icon} ${label}`;
+    grouped[key] = items;
+    groupOrder.push(key);
+  }
+  // 兜底：未在 CATEGORY_ORDER 中的 category
   for (const f of allFindings) {
-    if (!grouped[f.account_name]) {
-      grouped[f.account_name] = [];
-      groupOrder.push(f.account_name);
-    }
-    grouped[f.account_name].push(f);
+    const cat = f.category;
+    if (CATEGORY_ORDER.includes(cat)) continue;
+    const label = FINDING_CATEGORY_LABELS[cat as ReportReviewFindingCategory] || cat;
+    const key = `📋 ${label}`;
+    if (!grouped[key]) { grouped[key] = []; groupOrder.push(key); }
+    grouped[key].push(f);
   }
 
   /* 状态标签颜色 */
@@ -224,7 +248,7 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
         <div style={{ fontSize: 15, fontWeight: 600, color: '#333' }}>
           问题清单
           <span style={{ fontSize: 12, color: '#999', fontWeight: 400, marginLeft: 8 }}>
-            共 {allFindings.length} 个问题，{groupOrder.length} 个科目
+            共 {allFindings.length} 个问题，{groupOrder.length} 个分类
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -242,12 +266,17 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
         </div>
       </div>
 
-      {/* 按科目分组的卡片 */}
+      {/* 按科目/分类分组的卡片 */}
       {groupOrder.map(account => {
         const findings = grouped[account];
         const isCollapsed = collapsedGroups.has(account);
         const groupRisk = { high: 0, medium: 0, low: 0 };
         findings.forEach(f => { groupRisk[f.risk_level]++; });
+        const isAnnotation = account.startsWith('📝');
+        const headerBg = isAnnotation
+          ? 'linear-gradient(135deg, #fef9f0 0%, #fdf5e7 100%)'
+          : 'linear-gradient(135deg, #f8f6fb 0%, #f5f5f5 100%)';
+        const headerColor = isAnnotation ? '#e67e22' : 'var(--gt-primary, #4b2d77)';
 
         return (
           <div key={account} style={{ marginBottom: 12, borderRadius: 10, border: '1px solid #e8e8e8', overflow: 'hidden', background: '#fff' }}>
@@ -256,7 +285,7 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
               onClick={() => toggleGroup(account)}
               style={{
                 display: 'flex', alignItems: 'center', padding: '12px 16px', cursor: 'pointer',
-                background: 'linear-gradient(135deg, #f8f6fb 0%, #f5f5f5 100%)',
+                background: headerBg,
                 borderBottom: isCollapsed ? 'none' : '1px solid #eee',
                 userSelect: 'none',
               }}
@@ -264,7 +293,7 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
               aria-label={`${account} ${findings.length} 个问题`}
             >
               <span style={{ fontSize: 13, color: '#888', marginRight: 8, transition: 'transform 0.2s', transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)', display: 'inline-block' }}>▼</span>
-              <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--gt-primary, #4b2d77)', flex: 1 }}>{account}</span>
+              <span style={{ fontSize: 14, fontWeight: 600, color: headerColor, flex: 1 }}>{account}</span>
               <span style={{ fontSize: 12, color: '#999', marginRight: 12 }}>{findings.length} 个问题</span>
               {groupRisk.high > 0 && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, background: '#fff1f0', color: '#cf1322', marginRight: 4 }}>高 {groupRisk.high}</span>}
               {groupRisk.medium > 0 && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, background: '#fffbe6', color: '#d48806', marginRight: 4 }}>中 {groupRisk.medium}</span>}
@@ -312,6 +341,11 @@ const AuditReportResult: React.FC<Props> = ({ sessionId, onBack }) => {
                       </div>
                       {/* 内容 */}
                       <div style={{ flex: 1, minWidth: 0 }}>
+                        {f.account_name && (
+                          <div style={{ fontSize: 12, color: 'var(--gt-primary, #4b2d77)', fontWeight: 600, marginBottom: 4 }}>
+                            {f.account_name}
+                          </div>
+                        )}
                         <div style={{ fontSize: 13, color: '#333', lineHeight: 1.6 }}>{f.description}</div>
                         {f.location && <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>📍 {f.location}</div>}
                         {f.suggestion && (

@@ -68,6 +68,7 @@ class TestEnumCompleteness:
         expected = {
             "amount_inconsistency", "reconciliation_error", "change_abnormal",
             "note_missing", "report_body_compliance", "note_content", "text_quality",
+            "manual_annotation",
         }
         assert {m.value for m in ReportReviewFindingCategory} == expected
 
