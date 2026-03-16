@@ -44,6 +44,7 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
     findingsCount: number;
     changeFindingsCount?: number;
     details: string[];
+    breakdown?: Record<string, number>;
   }
 
   const [phaseResults, setPhaseResults] = useState<Record<string, PhaseResult>>({});
@@ -101,6 +102,7 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
                   findingsCount: parsed.findings_count ?? 0,
                   changeFindingsCount: parsed.change_findings_count,
                   details: parsed.details || [],
+                  breakdown: parsed.breakdown,
                 },
               }));
             } else if (parsed.status === 'account_complete') {
@@ -338,6 +340,28 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
                         </ul>
                       ) : (
                         result.message
+                      )}
+                      {result.breakdown && Object.keys(result.breakdown).length > 0 && (
+                        <div style={{
+                          marginTop: 6, padding: '6px 12px', background: '#fdf0ef',
+                          borderRadius: 6, border: '1px solid #f5c6cb', fontSize: 12,
+                        }}>
+                          <span style={{ fontWeight: 600, color: '#c62828' }}>
+                            问题构成（{result.findingsCount} 个）：
+                          </span>
+                          {(() => {
+                            const labels: Record<string, string> = {
+                              amount_inconsistency: '报表与附注金额不符',
+                              reconciliation_error: '勾稽错误',
+                              note_missing: '有余额科目缺失附注',
+                            };
+                            return Object.entries(result.breakdown).map(([k, v]) => (
+                              <span key={k} style={{ marginLeft: 8 }}>
+                                {labels[k] || k} {v} 个
+                              </span>
+                            ));
+                          })()}
+                        </div>
                       )}
                     </div>
                   )}

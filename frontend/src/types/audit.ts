@@ -571,6 +571,7 @@ export interface NoteSection {
   level: number;
   content_paragraphs: string[];
   note_table_ids: string[];
+  content_order?: Array<{ type: 'para' | 'table'; index: number }>;
   children: NoteSection[];
 }
 

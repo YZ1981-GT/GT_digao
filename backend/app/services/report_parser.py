@@ -1034,6 +1034,7 @@ class ReportParser(WorkpaperParser):
                 sec = current_section()
                 if sec:
                     sec.note_table_ids.append(note_tables[table_idx].id)
+                    sec.content_order.append({'type': 'table', 'index': len(sec.note_table_ids) - 1})
 
         for pi, para_info in enumerate(paragraphs):
             text = para_info.get('text', '').strip()
@@ -1068,6 +1069,7 @@ class ReportParser(WorkpaperParser):
                 sec = current_section()
                 if sec:
                     sec.content_paragraphs.append(text)
+                    sec.content_order.append({'type': 'para', 'index': len(sec.content_paragraphs) - 1})
 
             if pi in table_after_para:
                 for ti in table_after_para[pi]:

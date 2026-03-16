@@ -592,6 +592,10 @@ class NoteSection(BaseModel):
     level: int = Field(..., description="层级：1=一级标题, 2=二级, 3=三级, 4=四级")
     content_paragraphs: List[str] = Field(default_factory=list, description="该节点下的正文段落")
     note_table_ids: List[str] = Field(default_factory=list, description="该节点下的附注表格ID")
+    content_order: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="内容原始顺序，每项为 {'type':'para','index':0} 或 {'type':'table','index':0}"
+    )
     children: List['NoteSection'] = Field(default_factory=list, description="子节点")
 
 NoteSection.model_rebuild()

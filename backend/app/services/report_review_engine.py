@@ -349,6 +349,81 @@ class ReportReviewEngine:
             amount_match_count = amount_check_count - amount_mismatch_accounts
             all_findings.extend(amount_findings)
 
+            # ── 附注缺失检查：基于预设1级科目清单 ──
+            # 只检查预设科目清单中的科目，而非遍历所有 unmatched_items
+            from .account_mapping_template import account_mapping_template
+            _preset_consolidated = account_mapping_template.get_consolidated_accounts(config.template_type)
+            _preset_parent = account_mapping_template.get_parent_company_accounts(config.template_type)
+
+            # 收集已匹配科目名（通过 matching_map.entries 中有映射的科目）
+            _matched_acct_names: set = set()
+            if session.matching_map:
+                for entry in session.matching_map.entries:
+                    itm = _item_map.get(entry.statement_item_id)
+                    if itm and entry.note_table_ids:
+                        _matched_acct_names.add(itm.account_name)
+
+            def _normalize_name(s: str) -> str:
+                import re
+                return re.sub(r'[\s（()）一二三四五六七八九十、.\d]', '', s)
+
+            def _check_preset_missing(preset_accounts: List[Dict], label: str):
+                """检查预设科目清单中有余额但未匹配到附注的科目。"""
+                for acct in preset_accounts:
+                    acct_name = acct['name']
+                    acct_kws = acct.get('keywords', [acct_name])
+                    # 检查该预设科目是否已在匹配映射中
+                    found_match = any(
+                        any(kw in _normalize_name(mn) for kw in acct_kws)
+                        for mn in _matched_acct_names
+                    )
+                    if found_match:
+                        continue
+                    # 检查该科目在报表中是否有余额
+                    has_balance = False
+                    best_item = None
+                    for si in session.statement_items:
+                        if si.is_sub_item or si.parent_id:
+                            continue
+                        si_norm = _normalize_name(si.account_name)
+                        if any(kw in si_norm for kw in acct_kws):
+                            cb = si.closing_balance or 0
+                            ob = si.opening_balance or 0
+                            if cb != 0 or ob != 0:
+                                has_balance = True
+                                best_item = si
+                                break
+                    if not has_balance or not best_item:
+                        continue
+                    all_findings.append(ReportReviewFinding(
+                        id=str(uuid.uuid4())[:8],
+                        category=ReportReviewFindingCategory.NOTE_MISSING,
+                        risk_level=RiskLevel.HIGH,
+                        account_name=acct_name,
+                        statement_amount=best_item.closing_balance,
+                        location=f"{label}-{best_item.sheet_name}-{acct_name}",
+                        description=(
+                            f"科目「{acct_name}」期末余额 {best_item.closing_balance:,.2f}"
+                            + (f"、期初余额 {best_item.opening_balance:,.2f}" if best_item.opening_balance else "")
+                            + "，但未找到对应的附注披露。根据会计准则要求，有余额的报表科目应在附注中进行充分披露。"
+                        ),
+                        suggestion=f"请补充「{acct_name}」的附注披露内容，包括明细构成、期初期末变动等信息。",
+                    ))
+
+            _check_preset_missing(_preset_consolidated, "合并报表")
+            _check_preset_missing(_preset_parent, "母公司报表")
+
+            note_missing_count = len([
+                f for f in all_findings
+                if f.category == ReportReviewFindingCategory.NOTE_MISSING
+            ])
+            if note_missing_count > 0:
+                yield json.dumps({
+                    "status": "phase_progress", "phase": "reconciliation",
+                    "message": f"发现 {note_missing_count} 个有余额科目缺失附注披露",
+                }, ensure_ascii=False)
+                await asyncio.sleep(0)
+
             note_map_tmp_recheck = {n.id: n for n in session.note_tables}
 
             # ── 第一轮本地校验 ──
@@ -788,6 +863,14 @@ class ReportReviewEngine:
         change_finding_count = len(change_findings)
         recon_finding_count = len(all_findings) - change_finding_count
 
+        # ── 按子类分解数值校验 finding 数 ──
+        _recon_breakdown: Dict[str, int] = {}
+        for f in all_findings:
+            if f.category == ReportReviewFindingCategory.CHANGE_ABNORMAL:
+                continue  # 变动提示单独统计
+            cat_key = f.category.value
+            _recon_breakdown[cat_key] = _recon_breakdown.get(cat_key, 0) + 1
+
         # 统计报表中有数据的科目数（排除余额为0的科目）
         items_with_data = sum(
             1 for item in session.statement_items
@@ -855,6 +938,7 @@ class ReportReviewEngine:
             "findings_count": recon_finding_count,
             "change_findings_count": change_finding_count,
             "details": recon_details,
+            "breakdown": _recon_breakdown,
         }, ensure_ascii=False)
         await asyncio.sleep(0)
 
@@ -1059,31 +1143,6 @@ class ReportReviewEngine:
             note_details.append("未提取到附注叙述性章节内容")
         unique_accounts = len(set(n.account_name for n in session.note_tables))
         note_details.append(f"附注表格共 {len(session.note_tables)} 个，涉及 {unique_accounts} 个报表科目")
-        # 表内数值校验关系汇总
-        table_check_lines = []
-        if integrity_check_count > 0:
-            status = "全部相符" if integrity_match_count == integrity_check_count else f"相符 {integrity_match_count} 个，不符 {integrity_check_count - integrity_match_count} 个"
-            table_check_lines.append(f"涉及小计/合计纵向加总校验的表格 {integrity_check_count} 个，{status}")
-        if formula_check_count > 0:
-            status = "全部相符" if formula_match_count == formula_check_count else f"相符 {formula_match_count} 个，不符 {formula_check_count - formula_match_count} 个"
-            table_check_lines.append(f"涉及期初±增减变动=期末横向校验的表格 {formula_check_count} 个，{status}")
-        if sub_item_check_count > 0:
-            status = "全部相符" if sub_item_match_count == sub_item_check_count else f"相符 {sub_item_match_count} 个，不符 {sub_item_check_count - sub_item_match_count} 个"
-            table_check_lines.append(f"涉及其中项明细校验的表格 {sub_item_check_count} 个，{status}")
-        if wide_table_check_count > 0:
-            status = "全部相符" if wide_table_match_count == wide_table_check_count else f"相符 {wide_table_match_count} 个，不符 {wide_table_check_count - wide_table_match_count} 个"
-            table_check_lines.append(f"涉及宽表横向公式校验（LLM辅助）的表格 {wide_table_check_count} 个，{status}")
-        # 统计无校验关系的表格（既无合计行也无余额变动也无其中项）
-        no_check_count = sum(
-            1 for n in session.note_tables
-            if n.id in table_structures
-            and not table_structures[n.id].total_row_indices
-            and not table_structures[n.id].has_balance_formula
-            and not any(r.role == "sub_item" for r in table_structures[n.id].rows)
-        )
-        if no_check_count > 0:
-            table_check_lines.append(f"无数值校验关系的表格 {no_check_count} 个（仅含明细数据）")
-        note_details.extend(table_check_lines)
         yield json.dumps({
             "status": "phase_complete", "phase": "note_review",
             "message": f"附注复核完成，发现 {note_finding_count} 个问题",

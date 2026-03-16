@@ -1557,7 +1557,6 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       sec.note_table_ids.map(id => noteMap.get(id)?.section_title?.trim()).filter(Boolean) as string[]
     );
     tableTitles.add(sec.title.trim());
-    const filteredParas = sec.content_paragraphs.filter(p => !tableTitles.has(p.trim()));
     const shownLabels = new Set<string>();
 
     // 只在 showAmountBar=true 时查找报表科目
@@ -1566,8 +1565,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       : null;
     let amountBarInserted = false;
 
-    // 检测是否为"多表多科目"模式：section 有多个表格且映射到不同的报表科目
-    // 典型场景：现金流量表项目注释下的子节点，每个表格对应不同的现金流科目
+    // 检测是否为"多表多科目"模式
     const perTableMode = (() => {
       if (!showAmountBar || sec.note_table_ids.length <= 1) return false;
       const itemIds = new Set<string>();
@@ -1575,10 +1573,65 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         const mapped = noteToStmtMap.get(nid);
         if (mapped) itemIds.add(mapped.id);
       }
-      // 如果映射到多个不同的报表科目，启用逐表模式
       return itemIds.size > 1;
     })();
 
+    // 渲染单个表格元素（含金额条逻辑）
+    const renderTableItem = (id: string, idx: number) => {
+      const nt = noteMap.get(id);
+      if (!nt) return null;
+      const rawLabel = nt.section_title?.trim() || '';
+      let label: string | undefined;
+      if (rawLabel && rawLabel !== sec.title.trim() && !shownLabels.has(rawLabel)) {
+        label = nt.section_title;
+        shownLabels.add(rawLabel);
+      }
+      const tableEl = renderNoteTable(nt, label, sec.level);
+      if (perTableMode) {
+        const tableStmtItem = noteToStmtMap.get(id);
+        if (tableStmtItem) {
+          const virtualSec: NoteSection = { ...sec, note_table_ids: [id], children: [] };
+          return <React.Fragment key={id}>{tableEl}{renderStmtAmountBar(tableStmtItem, mode, virtualSec)}</React.Fragment>;
+        }
+        return tableEl;
+      }
+      if (stmtItem && !amountBarInserted && idx === 0) {
+        amountBarInserted = true;
+        return <React.Fragment key={id}>{tableEl}{renderStmtAmountBar(stmtItem, mode, sec)}</React.Fragment>;
+      }
+      return tableEl;
+    };
+
+    // 渲染单个段落元素
+    const renderParaItem = (text: string, key: number) => {
+      if (tableTitles.has(text.trim())) return null;
+      return <p key={`p-${key}`} style={{ margin: '2px 0', lineHeight: 1.8, fontSize: 14, color: GT.text }}>{text}</p>;
+    };
+
+    // 如果有 content_order，按原始顺序渲染
+    if (sec.content_order && sec.content_order.length > 0) {
+      let tableIdx = 0;
+      return (
+        <div style={{ padding: '2px 0' }}>
+          {sec.content_order.map((item, i) => {
+            if (item.type === 'para') {
+              const text = sec.content_paragraphs[item.index];
+              if (!text) return null;
+              return renderParaItem(text, i);
+            } else {
+              const id = sec.note_table_ids[item.index];
+              if (!id) return null;
+              const el = renderTableItem(id, tableIdx);
+              tableIdx++;
+              return el;
+            }
+          })}
+        </div>
+      );
+    }
+
+    // 兼容旧数据：先段落后表格
+    const filteredParas = sec.content_paragraphs.filter(p => !tableTitles.has(p.trim()));
     return (
       <div style={{ padding: '2px 0' }}>
         {filteredParas.length > 0 && (
@@ -1586,35 +1639,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
             {filteredParas.map((p, i) => <p key={i} style={{ margin: '2px 0' }}>{p}</p>)}
           </div>
         )}
-        {sec.note_table_ids.map((id, idx) => {
-          const nt = noteMap.get(id);
-          if (!nt) return null;
-          const rawLabel = nt.section_title?.trim() || '';
-          let label: string | undefined;
-          if (rawLabel && rawLabel !== sec.title.trim() && !shownLabels.has(rawLabel)) {
-            label = nt.section_title;
-            shownLabels.add(rawLabel);
-          }
-          const tableEl = renderNoteTable(nt, label, sec.level);
-
-          if (perTableMode) {
-            // 逐表模式：每个表格独立查找报表科目并显示金额条
-            const tableStmtItem = noteToStmtMap.get(id);
-            if (tableStmtItem) {
-              // 构造只含当前表格的虚拟 section 用于提取合计值
-              const virtualSec: NoteSection = { ...sec, note_table_ids: [id], children: [] };
-              return <React.Fragment key={id}>{tableEl}{renderStmtAmountBar(tableStmtItem, mode, virtualSec)}</React.Fragment>;
-            }
-            return tableEl;
-          }
-
-          // 单科目模式：只在第一个表格之后插入报表金额条
-          if (stmtItem && !amountBarInserted && idx === 0) {
-            amountBarInserted = true;
-            return <React.Fragment key={id}>{tableEl}{renderStmtAmountBar(stmtItem, mode, sec)}</React.Fragment>;
-          }
-          return tableEl;
-        })}
+        {sec.note_table_ids.map((id, idx) => renderTableItem(id, idx))}
       </div>
     );
   };
