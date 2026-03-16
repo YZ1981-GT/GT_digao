@@ -1408,6 +1408,10 @@ class ReconciliationEngine:
 
     # ─── 余额变动公式校验 ───
 
+    # 长期资产多段表格中，"账面净值"和"账面价值"段的行不适用横向余额变动公式
+    # （这些段只有期初和期末，本期增加/减少为空，是由原值-折旧/摊销计算得出的）
+    _BOOK_VALUE_SECTION_KW = ["账面净值", "账面价值"]
+
     def check_balance_formula(
         self,
         note_table: NoteTable,
@@ -1435,9 +1439,26 @@ class ReconciliationEngine:
         opening_col = opening_cols[0]
         closing_col = closing_cols[0]
 
+        # 预计算多段表格中"账面净值/账面价值"段的行索引集合
+        # 这些段的横向公式不适用（本期增减为空，值由纵向计算得出）
+        book_value_rows: set = set()
+        if any(kw in (note_table.account_name or '') for kw in self._SECTION_EXTRACT_ACCOUNTS):
+            import re as _re_bf
+            _sec_pat = _re_bf.compile(r'^[一二三四五六七八九十]+[、.]')
+            _in_bv_section = False
+            for ri, row in enumerate(note_table.rows):
+                first = str(row[0] if row else '').replace(' ', '').replace('\u3000', '').strip()
+                if _sec_pat.match(first):
+                    _in_bv_section = any(kw in first for kw in self._BOOK_VALUE_SECTION_KW)
+                if _in_bv_section:
+                    book_value_rows.add(ri)
+
         for row_struct in table_structure.rows:
             # 跳过表头行和其中项行（其中项是父项的部分拆分，不一定满足余额变动公式）
             if row_struct.role in ("header", "sub_item"):
+                continue
+            # 跳过"账面净值/账面价值"段的行（横向公式不适用）
+            if row_struct.row_index in book_value_rows:
                 continue
 
             opening = self._get_row_col_value(note_table, row_struct.row_index, opening_col)
@@ -1549,6 +1570,20 @@ class ReconciliationEngine:
 
         total_keywords = ["合计", "总计", "小计", "合 计", "合\u3000计"]
 
+        # 预计算"账面净值/账面价值"段的行索引集合（长期资产多段表格）
+        book_value_rows: set = set()
+        acct_name = note_table.account_name or ''
+        if any(kw in acct_name for kw in self._SECTION_EXTRACT_ACCOUNTS):
+            import re as _re_wt
+            _sec_pat = _re_wt.compile(r'^[一二三四五六七八九十]+[、.]')
+            _in_bv = False
+            for ri, row in enumerate(note_table.rows):
+                first = str(row[0] if row else '').replace(' ', '').replace('\u3000', '').strip()
+                if _sec_pat.match(first):
+                    _in_bv = any(kw in first for kw in self._BOOK_VALUE_SECTION_KW)
+                if _in_bv:
+                    book_value_rows.add(ri)
+
         for row_idx in range(data_row_start, len(note_table.rows)):
             row = note_table.rows[row_idx]
             if not row:
@@ -1559,6 +1594,10 @@ class ReconciliationEngine:
                 continue
 
             if label.startswith("其中") or label.startswith("其中：") or label.startswith("其中:"):
+                continue
+
+            # 跳过"账面净值/账面价值"段的行（横向公式不适用）
+            if row_idx in book_value_rows:
                 continue
 
             opening = self._get_row_col_value(note_table, row_idx, opening_col_idx)
