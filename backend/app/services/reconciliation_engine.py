@@ -685,6 +685,7 @@ class ReconciliationEngine:
         notes: List[NoteTable],
         table_structures: Dict[str, TableStructure],
         note_sections: Optional[List[NoteSection]] = None,
+        template_type: Optional[str] = None,
     ) -> List[ReportReviewFinding]:
         """基于 TableStructure 定位附注合计值，与报表余额比对。
 
@@ -698,6 +699,7 @@ class ReconciliationEngine:
         生成"未找到附注合计值"的警告 finding，提示结构识别可能不完整。
 
         note_sections: 附注层级结构树，用于判断附注表格所属的母公司/合并口径。
+        template_type: 模板类型（'soe'/'listed'），用于限定母公司科目披露范围。
         """
         findings: List[ReportReviewFinding] = []
         item_map = {i.id: i for i in items}
@@ -707,6 +709,15 @@ class ReconciliationEngine:
         ancestor_map: Dict[str, List[str]] = {}
         if note_sections:
             ancestor_map = self._build_note_parent_section_map(note_sections)
+
+        # 构建母公司预设科目关键词集合，用于限定母公司口径核对范围
+        # 上市版/国企版附注中，母公司报表项目注释仅披露少数科目，
+        # 其他科目不应进行母公司口径的金额核对
+        _parent_account_keywords: List[List[str]] = []
+        if template_type:
+            from .account_mapping_template import account_mapping_template
+            parent_accounts = account_mapping_template.get_parent_company_accounts(template_type)
+            _parent_account_keywords = [acct['keywords'] for acct in parent_accounts]
 
         for entry in matching_map.entries:
             item = item_map.get(entry.statement_item_id)
@@ -761,10 +772,25 @@ class ReconciliationEngine:
                 ancestors = ancestor_map.get(note_id)
                 is_parent_note = self._is_parent_company_note(note, ancestors)
 
+                # 母公司科目范围限定：如果该报表科目不在母公司预设披露范围内，
+                # 则不允许将任何附注表格识别为母公司口径（无论是层级树还是启发式）。
+                # 上市版/国企版附注中，母公司报表项目注释仅披露少数科目，
+                # 其他科目即使附注金额恰好接近公司数，也不应按母公司口径核对。
+                _item_in_parent_scope = True
+                if _parent_account_keywords and item.is_consolidated:
+                    _item_in_parent_scope = any(
+                        any(kw in item.account_name for kw in kw_list)
+                        for kw_list in _parent_account_keywords
+                    )
+                    if not _item_in_parent_scope:
+                        is_parent_note = False  # 强制视为合并口径
+
                 # ── 启发式补救：当 ancestor_map 未能识别母公司附注时，
                 # 通过金额接近度推断口径。如果附注合计值与公司余额更接近
                 # 而非合并余额，则视为母公司口径。
+                # 仅对母公司预设披露范围内的科目启用此推断。
                 if (not is_parent_note
+                        and _item_in_parent_scope
                         and item.is_consolidated
                         and item.company_closing_balance is not None):
                     _note_val = self._get_cell_value(note, ts.closing_balance_cell)
@@ -958,7 +984,16 @@ class ReconciliationEngine:
             # 当 is_consolidated=True 且报表有公司余额，但没有任何附注被识别为母公司口径时，
             # ancestor_map 和启发式都未能识别母公司附注。
             # 此时遍历所有有效附注表格，用公司余额逐个比对，确保母公司口径不被遗漏。
+            # 注意：仅对母公司预设披露范围内的科目执行此补充校验，
+            # 范围外的科目（如存货、在建工程等）不应进行母公司口径核对。
+            _fallback_in_parent_scope = True
+            if _parent_account_keywords and item.is_consolidated:
+                _fallback_in_parent_scope = any(
+                    any(kw in item.account_name for kw in kw_list)
+                    for kw_list in _parent_account_keywords
+                )
             if (item.is_consolidated
+                    and _fallback_in_parent_scope
                     and "parent" not in scope_matched_closing
                     and "parent" not in scope_matched_opening
                     and (item.company_closing_balance is not None

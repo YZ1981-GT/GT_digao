@@ -371,6 +371,16 @@ def collect_hidden_imports():
         "docx2python",
         "PIL",
         "PIL.Image",
+        # pywin32 COM（.doc 文件解析必需）
+        "win32com",
+        "win32com.client",
+        "win32com.client.gencache",
+        "win32com.client.dynamic",
+        "win32com.client.makepy",
+        "win32api",
+        "win32con",
+        "pythoncom",
+        "pywintypes",
         # 网络
         "aiohttp",
         "aiofiles",

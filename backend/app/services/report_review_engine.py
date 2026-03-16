@@ -254,6 +254,7 @@ class ReportReviewEngine:
             amount_findings = self.reconciliation.check_amount_consistency(
                 session.matching_map, session.statement_items, session.note_tables, table_structures,
                 note_sections=session.note_sections,
+                template_type=config.template_type.value if config.template_type else None,
             )
 
             # ── LLM 二次校验：金额不一致或未提取到值时，调用 LLM 重新识别表格结构 ──
@@ -319,6 +320,7 @@ class ReportReviewEngine:
                             session.matching_map, session.statement_items,
                             session.note_tables, table_structures,
                             note_sections=session.note_sections,
+                            template_type=config.template_type.value if config.template_type else None,
                         )
                         # 替换原始 findings
                         amount_findings = new_amount_findings
