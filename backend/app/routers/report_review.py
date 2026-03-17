@@ -36,15 +36,23 @@ from ..services.report_template_service import report_template_service
 from ..services.reconciliation_engine import reconciliation_engine
 from ..services.table_structure_analyzer import TableStructureAnalyzer
 from ..services.file_service import FileService
+from ..services import session_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/report-review", tags=["report-review"])
 
-# 内存会话存储
+# 内存会话存储（启动时从磁盘恢复）
 _sessions: Dict[str, ReportReviewSession] = {}
 _findings: Dict[str, List[ReportReviewFinding]] = {}
 _conversations: Dict[str, FindingConversation] = {}
+
+# 恢复持久化数据
+_restored = session_store.restore_all()
+_sessions.update(_restored[0])
+_findings.update(_restored[1])
+_conversations.update(_restored[2])
+del _restored
 
 
 # ─── Request/Response Models ───
@@ -238,6 +246,7 @@ async def upload_files(
                 logger.warning("表格结构预识别失败: %s", e)
 
         _sessions[session_id] = session
+        session_store.save_session(session_id, session)
         return {
             "session_id": session_id,
             "file_count": len(files),
@@ -265,6 +274,7 @@ async def parse_session(session_id: str = Form(...)):
 
     session.status = "parsed"
     _sessions[session_id] = session
+    session_store.save_session(session_id, session)
     return {"status": "parsed", "session_id": session_id}
 
 
@@ -409,6 +419,7 @@ async def start_review(req: StartReviewRequest):
                             if f.category == ReportReviewFindingCategory.MANUAL_ANNOTATION
                         ]
                         _findings[req.session_id] = annotations + new_findings
+                        session_store.save_findings(req.session_id, _findings[req.session_id])
             except Exception:
                 pass
 
@@ -439,6 +450,7 @@ async def add_annotation(req: AddAnnotationRequest):
         confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
     )
     _findings.setdefault(req.session_id, []).append(finding)
+    session_store.save_findings(req.session_id, _findings[req.session_id])
     return {"status": "created", "finding": finding.model_dump()}
 
 
@@ -468,6 +480,7 @@ async def edit_finding(finding_id: str, req: EditFindingRequest):
                     f.suggestion = req.suggestion
                 if req.risk_level is not None:
                     f.risk_level = RiskLevel(req.risk_level)
+                _persist_finding_change(finding_id)
                 return {"status": "updated"}
     raise HTTPException(404, "Finding 不存在")
 
@@ -479,6 +492,7 @@ async def confirm_finding(finding_id: str):
         for f in session_findings:
             if f.id == finding_id:
                 f.confirmation_status = FindingConfirmationStatus.CONFIRMED
+                _persist_finding_change(finding_id)
                 return {"status": "confirmed"}
     raise HTTPException(404, "Finding 不存在")
 
@@ -490,6 +504,7 @@ async def dismiss_finding(finding_id: str):
         for f in session_findings:
             if f.id == finding_id:
                 f.confirmation_status = FindingConfirmationStatus.DISMISSED
+                _persist_finding_change(finding_id)
                 return {"status": "dismissed"}
     raise HTTPException(404, "Finding 不存在")
 
@@ -501,6 +516,7 @@ async def restore_finding(finding_id: str):
         for f in session_findings:
             if f.id == finding_id:
                 f.confirmation_status = FindingConfirmationStatus.PENDING_CONFIRMATION
+                _persist_finding_change(finding_id)
                 return {"status": "restored"}
     raise HTTPException(404, "Finding 不存在")
 
@@ -517,11 +533,15 @@ async def batch_findings(req: BatchRequest):
         raise HTTPException(400, f"不支持的操作: {req.action}")
 
     updated = 0
-    for session_findings in _findings.values():
+    affected_sessions: set = set()
+    for sid, session_findings in _findings.items():
         for f in session_findings:
             if f.id in req.finding_ids:
                 f.confirmation_status = new_status
                 updated += 1
+                affected_sessions.add(sid)
+    for sid in affected_sessions:
+        session_store.save_findings(sid, _findings[sid])
     return {"updated": updated}
 
 
@@ -541,6 +561,10 @@ async def chat_finding(finding_id: str, req: ChatRequest):
             finding, req.message, conv, report_review_engine.openai_service
         ):
             yield f"data: {event}\n\n"
+        # 对话结束后持久化
+        sid = _find_finding_session_id(finding_id)
+        if sid:
+            session_store.save_conversations(sid, {k: v for k, v in _conversations.items() if _find_finding_session_id(k) == sid})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -1098,3 +1122,19 @@ def _find_finding(finding_id: str) -> Optional[ReportReviewFinding]:
             if f.id == finding_id:
                 return f
     return None
+
+
+def _find_finding_session_id(finding_id: str) -> Optional[str]:
+    """找到 finding 所属的 session_id。"""
+    for sid, session_findings in _findings.items():
+        for f in session_findings:
+            if f.id == finding_id:
+                return sid
+    return None
+
+
+def _persist_finding_change(finding_id: str) -> None:
+    """finding 变更后持久化对应 session 的 findings。"""
+    sid = _find_finding_session_id(finding_id)
+    if sid and sid in _findings:
+        session_store.save_findings(sid, _findings[sid])

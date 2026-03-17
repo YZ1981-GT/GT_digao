@@ -1096,3 +1096,76 @@ class TestEquityMethodIncomeConsistency:
         )
         # 母公司附注被跳过，只有利润表一个来源，不足两方比对
         assert len(findings) == 0
+
+
+class TestInventoryProvisionTwoOtherColumns:
+    """存货跌价准备两个"其他"列测试"""
+
+    def test_two_other_columns_sign(self):
+        """存货跌价准备：两个"其他"列，前面是增加(+)后面是减少(-)"""
+        note = _note(
+            name="存货",
+            title="存货跌价准备及合同履约成本减值准备",
+            headers=["项目", "期初余额", "本期增加-计提", "其他",
+                     "本期减少-转回或转销金额", "其他", "期末余额"],
+            rows=[
+                # 期初100 + 计提30 + 其他增加10 - 转回20 - 其他减少5 = 115
+                ["原材料", 100, 30, 10, 20, 5, 115],
+                ["合计", 100, 30, 10, 20, 5, 115],
+            ],
+        )
+        result = analyzer.try_build_formula_from_preset(note)
+        assert result is not None
+        assert result["formula_type"] == "movement"
+
+        # 验证两个"其他"列的符号
+        cols = result["columns"]
+        other_cols = [c for c in cols if c["role"] == "movement" and "其他" in c["name"]]
+        assert len(other_cols) == 2
+        # 第一个"其他"（列3）应为 +（增加侧）
+        first_other = [c for c in other_cols if c["col_index"] == 3][0]
+        assert first_other["sign"] == "+"
+        # 第二个"其他"（列5）应为 -（减少侧）
+        second_other = [c for c in other_cols if c["col_index"] == 5][0]
+        assert second_other["sign"] == "-"
+
+        # 公式校验应通过
+        findings = engine.check_wide_table_formula(note, result)
+        assert len(findings) == 0
+
+    def test_real_data_with_string_amounts(self):
+        """存货跌价准备：实际数据（字符串金额），宽表公式应通过"""
+        note = _note(
+            name="存货跌价准备及合同履约成本减值准备",
+            title="存货跌价准备及合同履约成本减值准备",
+            headers=["项  目", "期初余额", "本期增加-计提", "其他",
+                     "本期减少-转回或转销", "其他", "期末余额"],
+            rows=[
+                ["原材料", "6,801,920.70", "1,885,597.20", "", "3,196,725.14", "", "5,490,792.76"],
+                ["库存商品", "507,026,140.35", "31,359,285.72", "", "91,024,309.72", "15,644,638.70", "431,716,477.65"],
+                ["合  计", "526,212,576.41", "34,271,860.03", "", "96,372,800.13", "15,644,638.70", "448,466,997.61"],
+            ],
+        )
+        result = analyzer.try_build_formula_from_preset(note)
+        assert result is not None
+        findings = engine.check_wide_table_formula(note, result)
+        # 所有行公式应平衡（两个"其他"列正确参与计算）
+        assert len(findings) == 0, f"不应有 finding，但发现: {[f.description for f in findings]}"
+
+    def test_formula_error_detected_with_two_others(self):
+        """存货跌价准备：两个"其他"列，数据不平衡时应检测到错误"""
+        note = _note(
+            name="存货",
+            title="存货跌价准备及合同履约成本减值准备",
+            headers=["项目", "期初余额", "本期增加-计提", "其他",
+                     "本期减少-转回或转销", "其他", "期末余额"],
+            rows=[
+                # 期初100 + 计提30 + 其他增加10 - 转回20 - 其他减少5 = 115, 但期末写了999
+                ["原材料", 100, 30, 10, 20, 5, 999],
+            ],
+        )
+        result = analyzer.try_build_formula_from_preset(note)
+        assert result is not None
+        findings = engine.check_wide_table_formula(note, result)
+        assert len(findings) == 1
+        assert "宽表横向公式不平" in findings[0].description

@@ -366,7 +366,6 @@ class ReportReviewEngine:
                         _matched_acct_names.add(itm.account_name)
 
             def _normalize_name(s: str) -> str:
-                import re
                 return re.sub(r'[\s（()）一二三四五六七八九十、.\d]', '', s)
 
             def _check_preset_missing(preset_accounts: List[Dict], label: str):
@@ -451,14 +450,20 @@ class ReportReviewEngine:
                         note_findings.extend(integrity_f)
 
                     if ts.has_balance_formula:
-                        formula_check_count += 1
-                        formula_f = self.reconciliation.check_balance_formula(note, ts)
-                        if not formula_f:
-                            formula_match_count += 1
-                            note_match["formula"] = True
+                        # 如果该表格有宽表预设匹配，跳过简单余额变动公式校验，
+                        # 后续宽表横向公式校验会用更精确的预设列语义处理
+                        _has_preset = self.table_analyzer.try_build_formula_from_preset(note) is not None
+                        if _has_preset:
+                            pass  # 跳过，由宽表公式校验接管
                         else:
-                            note_match["formula"] = False
-                        note_findings.extend(formula_f)
+                            formula_check_count += 1
+                            formula_f = self.reconciliation.check_balance_formula(note, ts)
+                            if not formula_f:
+                                formula_match_count += 1
+                                note_match["formula"] = True
+                            else:
+                                note_match["formula"] = False
+                            note_findings.extend(formula_f)
 
                     has_sub = any(r.role == "sub_item" for r in ts.rows)
                     if has_sub:
@@ -497,6 +502,17 @@ class ReportReviewEngine:
                 }, ensure_ascii=False)
                 await asyncio.sleep(0)
 
+                # 收集每个表格的本地校验错误描述，传递给 LLM 作为修正参考
+                _note_error_hints: Dict[str, str] = {}
+                for f in _first_pass_findings:
+                    if f.note_table_ids:
+                        for nid in f.note_table_ids:
+                            if nid in retry_note_ids:
+                                existing = _note_error_hints.get(nid, "")
+                                desc = f.description or ""
+                                if desc and desc not in existing:
+                                    _note_error_hints[nid] = (existing + "\n- " + desc).strip()
+
                 retry_semaphore = asyncio.Semaphore(3)
 
                 async def _retry_reanalyze(nid: str):
@@ -504,11 +520,13 @@ class ReportReviewEngine:
                     if not note:
                         return (nid, None)
                     t_hint, s_hint = _build_hints_for_note(nid)
+                    error_hint = _note_error_hints.get(nid)
                     async with retry_semaphore:
                         new_ts = await self.table_analyzer.reanalyze_with_llm(
                             note, oai,
                             template_hint=t_hint,
                             statement_amount_hint=s_hint,
+                            error_hint=error_hint,
                         )
                         return (nid, new_ts)
 
@@ -562,10 +580,12 @@ class ReportReviewEngine:
                             _first_pass_findings.extend(integrity_f)
 
                         if ts.has_balance_formula:
-                            formula_f = self.reconciliation.check_balance_formula(note, ts)
-                            if not formula_f:
-                                formula_match_count += 1
-                            _first_pass_findings.extend(formula_f)
+                            _has_preset = self.table_analyzer.try_build_formula_from_preset(note) is not None
+                            if not _has_preset:
+                                formula_f = self.reconciliation.check_balance_formula(note, ts)
+                                if not formula_f:
+                                    formula_match_count += 1
+                                _first_pass_findings.extend(formula_f)
 
                         has_sub = any(r.role == "sub_item" for r in ts.rows)
                         if has_sub:
@@ -627,6 +647,10 @@ class ReportReviewEngine:
                     return_exceptions=True,
                 )
 
+                # ── 宽表 vs 余额变动公式去重 ──
+                # 宽表分析更精确（含预设列语义），当宽表成功分析某表格时，
+                # 移除该表格之前由 check_balance_formula 产生的 findings，以宽表结果为准。
+                wide_analyzed_note_ids: set = set()
                 wide_table_findings: List[ReportReviewFinding] = []
                 for r in wide_results:
                     if isinstance(r, Exception):
@@ -638,10 +662,27 @@ class ReportReviewEngine:
                     note = note_map_tmp_recheck.get(nid)
                     if not note:
                         continue
+                    wide_analyzed_note_ids.add(nid)
                     wf = self.reconciliation.check_wide_table_formula(note, formula)
                     if not wf:
                         wide_table_match_count += 1
                     wide_table_findings.extend(wf)
+
+                # 移除已被宽表分析覆盖的余额变动 findings
+                if wide_analyzed_note_ids:
+                    before_count = len(all_findings)
+                    all_findings = [
+                        f for f in all_findings
+                        if not (
+                            f.category == ReportReviewFindingCategory.RECONCILIATION_ERROR
+                            and f.note_table_ids
+                            and set(f.note_table_ids) & wide_analyzed_note_ids
+                            and "余额变动公式不平" in (f.description or "")
+                        )
+                    ]
+                    removed = before_count - len(all_findings)
+                    if removed:
+                        logger.info("宽表分析覆盖：移除 %d 个余额变动公式 findings", removed)
 
                 all_findings.extend(wide_table_findings)
 
@@ -737,7 +778,6 @@ class ReportReviewEngine:
         def _is_computed_row(name: str) -> bool:
             """判断是否为计算得出的汇总行，兼容带序号前缀（如'1.持续经营净利润'）。"""
             # 去掉数字序号前缀：1. 2. (1) (2) 等
-            import re
             cleaned = re.sub(r'^[\d]+[.、]\s*', '', name)
             cleaned = re.sub(r'^[（(][\d]+[）)]\s*', '', cleaned)
             return any(cleaned.startswith(cn) for cn in COMPUTED_ROW_NAMES)

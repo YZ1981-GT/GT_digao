@@ -9,6 +9,7 @@
 """
 import json
 import logging
+import re
 import uuid
 from typing import Dict, List, Optional, Tuple
 
@@ -32,9 +33,23 @@ logger = logging.getLogger(__name__)
 # 浮点容差
 TOLERANCE = 0.5
 
+# 预编译常用正则（避免在循环中反复编译）
+_SECTION_PATTERN = re.compile(r'^[一二三四五六七八九十]+[、.]')
+_PARENTHETICAL_PATTERN = re.compile(r'[（(][^）)]*[）)]')
+_TRAILING_PAREN_PATTERN = re.compile(r'[（(].+[）)]$')
+_NOTE_NUMBER_PREFIX = re.compile(r'^[（(]\d+[）)]')
+_NOTE_DOT_PREFIX = re.compile(r'^\d+[.、．]')
+
 
 def _safe_float(val) -> Optional[float]:
-    """安全转换为浮点数，支持千分位逗号格式（如 38,444,572.98）。"""
+    """安全转换为浮点数，支持千分位逗号格式和括号负数格式。
+
+    支持格式：
+    - 普通数字：123.45
+    - 千分位逗号：38,444,572.98
+    - 括号负数（中国财务报表常见）：(1,234.56) → -1234.56
+    - 中文负号：-1,234.56
+    """
     if val is None:
         return None
     try:
@@ -42,11 +57,22 @@ def _safe_float(val) -> Optional[float]:
         return v
     except (ValueError, TypeError):
         pass
-    # 尝试去除千分位逗号后再转换
     try:
-        s = str(val).replace(",", "").strip()
+        s = str(val).strip()
+        if not s:
+            return None
+        # 中文财务报表中，"—"、"－"、"-" 常表示零或无数据
+        if s in ('-', '—', '－', '─', '--', '——'):
+            return None
+        # 括号负数格式：(1,234.56) 或 （1,234.56）
+        neg = False
+        if (s.startswith('(') and s.endswith(')')) or (s.startswith('（') and s.endswith('）')):
+            s = s[1:-1].strip()
+            neg = True
+        s = s.replace(",", "").replace("，", "")
         if s:
-            return float(s)
+            v = float(s)
+            return -v if neg else v
     except (ValueError, TypeError):
         pass
     return None
@@ -158,7 +184,6 @@ class ReconciliationEngine:
 
     def _should_skip_amount_check(self, item: StatementItem) -> bool:
         """判断报表科目是否应跳过金额一致性核对。"""
-        import re
         name = item.account_name
         # 所有者权益变动表：结构行/过程行，不对应具体附注披露表格
         if item.statement_type == StatementType.EQUITY_CHANGE:
@@ -176,7 +201,7 @@ class ReconciliationEngine:
             return True
         # 附注编号格式的科目名（如"(1) 固定资产情况"、"4.递延所得税"等）：
         # 这些是附注章节标题被误解析为报表科目，不是真正的报表行
-        if re.match(r'^[（(]\d+[）)]', name) or re.match(r'^\d+[.、．]', name):
+        if _NOTE_NUMBER_PREFIX.match(name) or _NOTE_DOT_PREFIX.match(name):
             return True
         # 附注章节标题特征词：科目名以"情况"/"说明"/"明细"/"详情"结尾，
         # 如"固定资产情况"、"在建工程情况"等，是附注章节标题被误解析为报表科目
@@ -184,7 +209,7 @@ class ReconciliationEngine:
             return True
         # 括号内含子项说明的科目名（如"应付职工薪酬（短期薪酬）"、"长期借款（1年内到期）"等）：
         # 即使 is_sub_item 未被标记，通过名称模式也能识别为子项
-        if re.search(r'[（(].+[）)]$', name):
+        if _TRAILING_PAREN_PATTERN.search(name):
             return True
         # 现金流量表科目：仅白名单内的科目有附注披露
         is_cash_flow = (
@@ -252,16 +277,6 @@ class ReconciliationEngine:
         title = (note.section_title or "").replace(" ", "").replace("\u3000", "")
         return any(kw in title for kw in ReconciliationEngine._COMPONENT_SUBTABLE_KW)
 
-    # 资产组成部分子表关键词（国企报表中固定资产/无形资产等科目的附注
-    # 常拆分为多张独立表格：原价表、累计折旧表、减值准备表、账面价值表。
-    # 原价/累计折旧/减值准备表的合计值仅代表资产的某一组成部分，
-    # 不应直接与报表余额（账面价值）比对。）
-    _COMPONENT_SUBTABLE_KW = [
-        "原价", "原值", "账面原值",
-        "累计折旧", "累计摊销",
-        "减值准备",
-    ]
-
     # 国企版资产负债表中，固定资产/无形资产等科目拆分为子行项目：
     # "固定资产原价"、"累计折旧"、"固定资产减值准备"、"固定资产净值"等。
     # 这些子行项目需要从合并附注表格的对应段落中提取值。
@@ -276,28 +291,52 @@ class ReconciliationEngine:
         "使用权资产", "油气资产", "生产性生物资产",
     ]
 
-    # ─── 合并小计表格（同一张表包含两个科目各自的"小计"行） ───
-    # 国企版"未经抵销的递延所得税资产和递延所得税负债"表格中，
-    # 递延所得税资产和递延所得税负债各有一个"小计"行。
-    # key = 报表科目关键词, value = 该科目在合并表中的段落标识关键词列表
-    _COMBINED_SUBTOTAL_MAP: Dict[str, List[str]] = {
-        "递延所得税资产": ["递延所得税资产"],
-        "递延所得税负债": ["递延所得税负债"],
-    }
-    # 合并小计表格的标题特征：同时包含以下所有关键词才视为合并表
-    _COMBINED_SUBTOTAL_TABLE_MARKERS = ["递延所得税资产", "递延所得税负债"]
+    # ─── 合并小计表格（同一张表包含多个科目各自的段落小计行） ───
+    # 每个配置项：
+    #   table_markers: 表格标题必须同时包含的关键词（用于识别合并表）
+    #   section_markers: 段落标题关键词列表（用于识别段落边界）
+    #   item_section_map: 报表科目关键词 → 段落标识关键词列表
+    _COMBINED_SUBTOTAL_CONFIGS: List[Dict] = [
+        {
+            # 递延所得税资产和递延所得税负债
+            "table_markers": ["递延所得税资产", "递延所得税负债"],
+            "section_markers": ["递延所得税资产", "递延所得税负债"],
+            "item_section_map": {
+                "递延所得税资产": ["递延所得税资产"],
+                "递延所得税负债": ["递延所得税负债"],
+            },
+        },
+        {
+            # 其他综合收益（不能重分类 / 将重分类）
+            "table_markers": ["其他综合收益"],
+            "section_markers": ["不能重分类进损益的其他综合收益",
+                                "将重分类进损益的其他综合收益"],
+            "item_section_map": {
+                "不能重分类": ["不能重分类进损益的其他综合收益"],
+                "将重分类": ["将重分类进损益的其他综合收益"],
+            },
+        },
+    ]
 
     @staticmethod
-    def _is_combined_subtotal_table(note: NoteTable) -> bool:
-        """判断附注表格是否为合并小计表格（如递延所得税资产和负债合并表）。"""
+    def _find_combined_config(note: NoteTable, item_name: str) -> Optional[Tuple[Dict, List[str]]]:
+        """查找匹配的合并小计表格配置，返回 (config, section_keywords) 或 None。"""
         title = (note.account_name or "") + (note.section_title or "")
         title = title.replace(" ", "").replace("\u3000", "")
-        return all(kw in title for kw in ReconciliationEngine._COMBINED_SUBTOTAL_TABLE_MARKERS)
+        norm_item = item_name.replace(" ", "").replace("\u3000", "")
+        for cfg in ReconciliationEngine._COMBINED_SUBTOTAL_CONFIGS:
+            if not all(kw in title for kw in cfg["table_markers"]):
+                continue
+            for item_kw, sec_kws in cfg["item_section_map"].items():
+                if item_kw in norm_item:
+                    return cfg, sec_kws
+        return None
 
     @staticmethod
     def _extract_combined_subtotal(
         note: NoteTable,
         section_keywords: List[str],
+        section_markers: Optional[List[str]] = None,
     ) -> Tuple[Optional[float], Optional[float]]:
         """从合并小计表格中提取指定段落的小计行期末/期初值。
 
@@ -314,22 +353,55 @@ class ReconciliationEngine:
         对于有多个同期列的表格（如暂时性差异+递延所得税），取最后一个匹配列
         （即"递延所得税"列，而非"暂时性差异"列）。
         """
+        # 如果未传入 section_markers，从配置中查找
+        if section_markers is None:
+            title = (note.account_name or "") + (note.section_title or "")
+            title_n = title.replace(" ", "").replace("\u3000", "")
+            for cfg in ReconciliationEngine._COMBINED_SUBTOTAL_CONFIGS:
+                if all(kw in title_n for kw in cfg["table_markers"]):
+                    section_markers = cfg["section_markers"]
+                    break
+            if section_markers is None:
+                section_markers = []
+
         closing_kw = ReconciliationEngine._CLOSING_COL_KW
         opening_kw = ReconciliationEngine._OPENING_COL_KW
         is_move = ReconciliationEngine._is_movement_col
         norm_h = [str(h or "").replace(" ", "").replace("\u3000", "") for h in (note.headers or [])]
 
-        # 找所有期末/期初列索引，取最后一个（递延所得税列在暂时性差异列之后）
-        hdr_closing_idx = -1
-        hdr_opening_idx = -1
+        # ── 识别期末/期初列索引 ──
+        # 递延所得税合并表的表头有两种风格：
+        #   风格A: "期末余额-暂时性差异" | "期末余额-递延所得税" | "期初余额-暂时性差异" | "期初余额-递延所得税"
+        #          → 每列都带期间关键词，直接取最后一个期末/期初列即可
+        #   风格B: "期末余额-可抵扣暂时性差异" | "递延所得税资产/负债" | "上年年末余额-暂时性差异" | "递延所得税资产/负债"
+        #          → "递延所得税"列不带期间关键词，需要从前一列继承期间属性
+        # 策略：先标记每列的期间属性（closing/opening/none），
+        #       然后对无期间属性的列从左邻列继承，最后取最后一个 closing/opening 列。
+        col_period: List[Optional[str]] = [None] * len(norm_h)  # "closing" | "opening" | None
         for ci, h in enumerate(norm_h):
-            if is_move(h):
+            if ci == 0 or is_move(h):
                 continue
             has_open = any(kw in h for kw in opening_kw)
-            if any(kw in h for kw in closing_kw) and not has_open:
-                hdr_closing_idx = ci  # 取最后一个期末列
-            if has_open:
-                hdr_opening_idx = ci  # 取最后一个期初列
+            has_close = any(kw in h for kw in closing_kw) and not has_open
+            if has_close:
+                col_period[ci] = "closing"
+            elif has_open:
+                col_period[ci] = "opening"
+
+        # 无期间属性的列从左邻列继承（处理风格B）
+        for ci in range(1, len(col_period)):
+            if col_period[ci] is None and not is_move(norm_h[ci]) and norm_h[ci]:
+                if ci > 0 and col_period[ci - 1] is not None:
+                    col_period[ci] = col_period[ci - 1]
+
+        # 取最后一个 closing/opening 列索引（递延所得税列在暂时性差异列之后）
+        hdr_closing_idx = -1
+        hdr_opening_idx = -1
+        for ci in range(len(col_period)):
+            if col_period[ci] == "closing":
+                hdr_closing_idx = ci
+            elif col_period[ci] == "opening":
+                hdr_opening_idx = ci
 
         if hdr_closing_idx <= 0 and hdr_opening_idx <= 0:
             # 尝试从 header_rows 中查找
@@ -362,12 +434,11 @@ class ReconciliationEngine:
             # 段落标题行的特征：去掉序号后，剩余部分应精确等于标记词（可带冒号/标点后缀）
             # 不应匹配：包含标记词但有额外内容的行（如"递延所得税资产净额"、"减：递延所得税资产抵销"）
             is_section_header = False
-            markers = ReconciliationEngine._COMBINED_SUBTOTAL_TABLE_MARKERS
+            markers = section_markers or []
             matched_markers = [kw for kw in markers if kw in first]
             if matched_markers and len(matched_markers) < len(markers):
-                import re as _re_sec
                 # 去掉中文序号前缀（如"一、"）
-                _stripped = _re_sec.sub(r'^[一二三四五六七八九十]+[、.]\s*', '', first)
+                _stripped = _SECTION_PATTERN.sub('', first).strip()
                 # 去掉尾部标点（冒号等）
                 _stripped_clean = _stripped.rstrip('：:')
                 # 精确匹配：去掉序号和尾部标点后，必须等于某个标记词
@@ -441,17 +512,6 @@ class ReconciliationEngine:
 
 
     @staticmethod
-    def _is_component_subtable(note: NoteTable) -> bool:
-        """判断附注表格是否为资产组成部分子表（原价/累计折旧/减值准备）。
-
-        国企报表中，固定资产等科目的附注常拆分为多张独立表格，
-        其中原价表、累计折旧表、减值准备表的合计值仅代表资产的某一组成部分，
-        不应直接与报表余额（账面价值）比对。
-        """
-        title = (note.section_title or "").replace(" ", "").replace("\u3000", "")
-        return any(kw in title for kw in ReconciliationEngine._COMPONENT_SUBTABLE_KW)
-
-    @staticmethod
     def _get_component_section_type(item_name: str) -> Optional[str]:
         """判断报表科目名是否为资产子行项目，返回对应的段落类型。
 
@@ -473,8 +533,7 @@ class ReconciliationEngine:
         国企版固定资产等科目的附注表格包含多个段落（原值、累计折旧、减值准备、账面价值），
         每个段落有自己的合计行。本方法提取指定段落的合计值。
         """
-        import re as _re
-        section_pattern = _re.compile(r"^[一二三四五六七八九十]+[、.]")
+        section_pattern = _SECTION_PATTERN
         kw_map = {
             "cost": ReconciliationEngine._COST_SECTION_KW,
             "amort": ReconciliationEngine._AMORT_SECTION_KW,
@@ -612,6 +671,59 @@ class ReconciliationEngine:
             return False
         title = (note.section_title or "").replace(" ", "").replace("\u3000", "")
         return any(kw in title for kw in self._DETAIL_SUBTABLE_KW)
+
+    # 政策/描述性表格的表头特征关键词
+    # 这些关键词出现在表头中时，说明该表格是会计政策说明表，不含数值数据
+    _POLICY_HEADER_KW = [
+        # 坏账准备计提政策表
+        "确定组合的依据", "组合名称", "账龄状态",
+        # 固定资产/无形资产折旧摊销政策表
+        "折旧方法", "摊销方法", "预计使用寿命", "预计净残值率",
+        "年折旧率", "年摊销率",
+        # 通用政策描述
+        "确认标准", "计量方法", "会计政策",
+        "减值测试方法", "减值迹象",
+    ]
+
+    # 政策/描述性表格的标题特征关键词组
+    # 每个元素是一组关键词，标题必须同时包含组内所有关键词才匹配
+    # 用于表头为公司名称等无法通过 _POLICY_HEADER_KW 识别的非数据表格
+    _POLICY_TITLE_KW_GROUPS: List[List[str]] = [
+        # 商誉 — "商誉所在资产组或资产组合的相关信息"
+        ["资产组", "相关信息"],
+        # 商誉 — 减值测试关键假设/方法描述表
+        ["减值测试", "关键假设"],
+        # 递延所得税 — "未确认递延所得税资产的可抵扣暂时性差异及可抵扣亏损明细"
+        # 未确认部分不等于报表上已确认的递延所得税资产/负债余额
+        ["未确认", "递延所得税"],
+    ]
+
+    @staticmethod
+    def _is_policy_description_table(note: NoteTable) -> bool:
+        """判断附注表格是否为纯政策/描述性表格（不含数值数据列）。
+
+        上市版附注中，应收账款等科目下常有政策说明表格，
+        如坏账准备计提政策（"组合名称"、"确定组合的依据"、"账龄状态"等），
+        这些表格仅描述会计政策，不应参与金额核对。
+
+        检测策略（正向匹配，两条路径任一命中即跳过）：
+        1. 表头中包含政策描述特征关键词 → 政策描述表
+        2. 标题同时包含某组关键词 → 非数据描述表（如商誉资产组相关信息表）
+        """
+        # 路径1：表头关键词匹配
+        if note.headers and len(note.headers) >= 2:
+            headers_text = " ".join(str(h or "") for h in note.headers[1:])
+            if any(kw in headers_text for kw in ReconciliationEngine._POLICY_HEADER_KW):
+                return True
+
+        # 路径2：标题关键词组匹配
+        title = (note.section_title or "").replace(" ", "").replace("\u3000", "")
+        if title:
+            for kw_group in ReconciliationEngine._POLICY_TITLE_KW_GROUPS:
+                if all(kw in title for kw in kw_group):
+                    return True
+
+        return False
 
     @staticmethod
     def _is_revenue_cost_detail_table(note: NoteTable) -> bool:
@@ -762,6 +874,12 @@ class ReconciliationEngine:
                     valid_note_ids.pop()
                     continue
 
+                # 跳过纯政策/描述性表格（如坏账准备计提政策说明表），
+                # 这些表格仅描述会计政策，不含数值数据
+                if self._is_policy_description_table(note):
+                    valid_note_ids.pop()
+                    continue
+
                 # 跳过营业收入/营业成本的明细子表（按行业、按地区、按商品转让时间划分），
                 # 仅汇总表（主营业务/其他业务/合计）与报表余额直接比对
                 if (self._is_revenue_cost_combined_table(note)
@@ -879,19 +997,19 @@ class ReconciliationEngine:
                         rule_closing = sec_closing
                         rule_opening = sec_opening
 
-                # 合并小计表格（如"递延所得税资产和递延所得税负债"）：
+                # 合并小计表格（如"递延所得税资产和递延所得税负债"、"其他综合收益"）：
                 # 从合并表中提取对应段落的"小计"行值
-                if self._is_combined_subtotal_table(note):
-                    norm_item = item.account_name.replace(" ", "").replace("\u3000", "")
-                    for item_kw, sec_kws in self._COMBINED_SUBTOTAL_MAP.items():
-                        if item_kw in norm_item:
-                            sub_closing, sub_opening = self._extract_combined_subtotal(note, sec_kws)
-                            if sub_closing is not None or sub_opening is not None:
-                                note_closing = sub_closing
-                                note_opening = sub_opening
-                                rule_closing = sub_closing
-                                rule_opening = sub_opening
-                            break
+                combined_match = self._find_combined_config(note, item.account_name)
+                if combined_match is not None:
+                    cfg, sec_kws = combined_match
+                    sub_closing, sub_opening = self._extract_combined_subtotal(
+                        note, sec_kws, section_markers=cfg["section_markers"],
+                    )
+                    if sub_closing is not None or sub_opening is not None:
+                        note_closing = sub_closing
+                        note_opening = sub_opening
+                        rule_closing = sub_closing
+                        rule_opening = sub_opening
 
                 # 兜底：LLM 未识别出 cell 时，用规则引擎结果
                 if note_closing is None and rule_closing is not None:
@@ -1174,6 +1292,12 @@ class ReconciliationEngine:
         combined = (note_table.section_title or "") + (note_table.account_name or "")
         if any(kw in combined for kw in self.SKIP_INTEGRITY_KEYWORDS):
             return True
+        # "续："独立表格：解析时丢失了原表标题的续表，
+        # 通常是重要联营/合营企业财务信息的跨页续表，行间无加总关系
+        title_clean = (note_table.section_title or "").replace(" ", "").replace("\u3000", "").strip()
+        title_clean = title_clean.rstrip("：:（()）")
+        if title_clean == "续":
+            return True
         # 未分配利润表有专用校验，跳过通用纵向加总
         if self._is_undistributed_profit_table(note_table):
             return True
@@ -1331,6 +1455,7 @@ class ReconciliationEngine:
                         f"实际期末={closing_val}"
                     ),
                     note_table_ids=[note_table.id],
+                    highlight_cells=[{"row": opening_row_idx, "col": ci}, {"row": closing_row_idx, "col": ci}],
                 ))
 
         # ── 跨期衔接校验 ──
@@ -1381,6 +1506,7 @@ class ReconciliationEngine:
                             f"上期期末={prior_closing}"
                         ),
                         note_table_ids=[note_table.id],
+                        highlight_cells=[{"row": opening_row_idx, "col": closing_col}, {"row": closing_row_idx, "col": opening_col}],
                     ))
 
         return findings
@@ -1437,6 +1563,7 @@ class ReconciliationEngine:
                         risk_level=RiskLevel.MEDIUM,
                         reasoning=f"校验: sum(数据行)={data_sum}, 合计行={total_val}, 差异={diff}",
                         note_table_ids=[note_table.id],
+                        highlight_cells=[{"row": total_idx, "col": col.col_index}],
                     ))
 
         return findings
@@ -1478,12 +1605,10 @@ class ReconciliationEngine:
         # 这些段的横向公式不适用（本期增减为空，值由纵向计算得出）
         book_value_rows: set = set()
         if any(kw in (note_table.account_name or '') for kw in self._SECTION_EXTRACT_ACCOUNTS):
-            import re as _re_bf
-            _sec_pat = _re_bf.compile(r'^[一二三四五六七八九十]+[、.]')
             _in_bv_section = False
             for ri, row in enumerate(note_table.rows):
                 first = str(row[0] if row else '').replace(' ', '').replace('\u3000', '').strip()
-                if _sec_pat.match(first):
+                if _SECTION_PATTERN.match(first):
                     _in_bv_section = any(kw in first for kw in self._BOOK_VALUE_SECTION_KW)
                 if _in_bv_section:
                     book_value_rows.add(ri)
@@ -1519,6 +1644,8 @@ class ReconciliationEngine:
             expected = opening + total_increase - total_decrease
             if not _amounts_equal(expected, closing):
                 diff = round(expected - closing, 2)
+                _hl = [{"row": row_struct.row_index, "col": opening_col},
+                       {"row": row_struct.row_index, "col": closing_col}]
                 findings.append(self._make_finding(
                     category=ReportReviewFindingCategory.RECONCILIATION_ERROR,
                     account_name=note_table.account_name,
@@ -1530,6 +1657,7 @@ class ReconciliationEngine:
                     risk_level=RiskLevel.MEDIUM,
                     reasoning=f"公式: {opening}+{total_increase}-{total_decrease}={expected}, 实际期末={closing}",
                     note_table_ids=[note_table.id],
+                    highlight_cells=_hl,
                 ))
 
         return findings
@@ -1583,6 +1711,7 @@ class ReconciliationEngine:
         findings: List[ReportReviewFinding] = []
         columns = wide_table_formula["columns"]
         data_row_start = wide_table_formula.get("data_row_start", 0)
+        is_multi_section = wide_table_formula.get("multi_section", False)
 
         opening_cols = [c for c in columns if c.get("role") == "opening"]
         closing_cols = [c for c in columns if c.get("role") == "closing"]
@@ -1607,14 +1736,14 @@ class ReconciliationEngine:
 
         # 预计算"账面净值/账面价值"段的行索引集合（长期资产多段表格）
         book_value_rows: set = set()
+        section_header_rows: set = set()  # 段标题行（如"一、账面原值"）
         acct_name = note_table.account_name or ''
-        if any(kw in acct_name for kw in self._SECTION_EXTRACT_ACCOUNTS):
-            import re as _re_wt
-            _sec_pat = _re_wt.compile(r'^[一二三四五六七八九十]+[、.]')
+        if is_multi_section or any(kw in acct_name for kw in self._SECTION_EXTRACT_ACCOUNTS):
             _in_bv = False
             for ri, row in enumerate(note_table.rows):
                 first = str(row[0] if row else '').replace(' ', '').replace('\u3000', '').strip()
-                if _sec_pat.match(first):
+                if _SECTION_PATTERN.match(first):
+                    section_header_rows.add(ri)
                     _in_bv = any(kw in first for kw in self._BOOK_VALUE_SECTION_KW)
                 if _in_bv:
                     book_value_rows.add(ri)
@@ -1629,6 +1758,10 @@ class ReconciliationEngine:
                 continue
 
             if label.startswith("其中") or label.startswith("其中：") or label.startswith("其中:"):
+                continue
+
+            # 跳过段标题行（如"一、账面原值"、"二、累计折旧"）
+            if row_idx in section_header_rows:
                 continue
 
             # 跳过"账面净值/账面价值"段的行（横向公式不适用）
@@ -1675,6 +1808,9 @@ class ReconciliationEngine:
                 risk = RiskLevel.HIGH if is_total else RiskLevel.MEDIUM
 
                 detail_str = f"期初({opening})" + "".join(movement_details) + f"={expected}"
+                _hl = [{"row": row_idx, "col": opening_col_idx}, {"row": row_idx, "col": closing_col_idx}]
+                for mc in movement_cols:
+                    _hl.append({"row": row_idx, "col": mc["col_index"]})
                 findings.append(self._make_finding(
                     category=ReportReviewFindingCategory.RECONCILIATION_ERROR,
                     account_name=note_table.account_name,
@@ -1686,6 +1822,7 @@ class ReconciliationEngine:
                     risk_level=risk,
                     reasoning=f"公式: {formula_desc}",
                     note_table_ids=[note_table.id],
+                    highlight_cells=_hl,
                 ))
 
         return findings
@@ -1760,6 +1897,9 @@ class ReconciliationEngine:
                 risk = RiskLevel.HIGH if is_total_row else RiskLevel.MEDIUM
 
                 detail_str = " + ".join(detail_parts) + f" = {computed_sum}"
+                _hl = [{"row": row_idx, "col": total_col_idx}]
+                for dc in data_cols:
+                    _hl.append({"row": row_idx, "col": dc["col_index"]})
                 findings.append(self._make_finding(
                     category=ReportReviewFindingCategory.RECONCILIATION_ERROR,
                     account_name=note_table.account_name,
@@ -1771,6 +1911,7 @@ class ReconciliationEngine:
                     risk_level=risk,
                     reasoning=f"公式: {formula_desc}",
                     note_table_ids=[note_table.id],
+                    highlight_cells=_hl,
                 ))
 
         return findings
@@ -1850,6 +1991,7 @@ class ReconciliationEngine:
                         risk_level=RiskLevel.LOW,
                         reasoning=f"其中项校验: sum(子项)={child_sum} > 父项={parent_val}",
                         note_table_ids=[note_table.id],
+                        highlight_cells=[{"row": parent_idx, "col": col.col_index}] + [{"row": ci, "col": col.col_index} for ci in child_indices],
                     ))
 
         return findings
@@ -1951,6 +2093,7 @@ class ReconciliationEngine:
                             risk_level=RiskLevel.LOW,
                             reasoning=f"纵向占比校验: {amount_val}/{total_amount}*100={expected_ratio:.2f}%, 实际={ratio_val:.2f}%",
                             note_table_ids=[note_table.id],
+                            highlight_cells=[{"row": row_s.row_index, "col": ratio_col_idx}, {"row": row_s.row_index, "col": numerator_col}],
                         ))
             else:
                 # ── 横向计提率：比例 = 分子列 / 分母列 × 100 ──
@@ -2014,6 +2157,7 @@ class ReconciliationEngine:
                             risk_level=RiskLevel.LOW,
                             reasoning=f"横向计提率校验: {numerator_val}/{denominator_val}*100={expected_ratio:.2f}%, 实际={ratio_val:.2f}%",
                             note_table_ids=[note_table.id],
+                            highlight_cells=[{"row": row_s.row_index, "col": ratio_col_idx}, {"row": row_s.row_index, "col": numerator_col}, {"row": row_s.row_index, "col": denominator_col}],
                         ))
 
         return findings
@@ -3802,8 +3946,7 @@ class ReconciliationEngine:
                     if isinstance(chunk, str):
                         response += chunk
 
-                import re as _re
-                match = _re.search(r'\{[\s\S]*\}', response)
+                match = re.search(r'\{[\s\S]*\}', response)
                 if match:
                     result = json.loads(match.group())
                     if not result.get("has_disclosure", True):
@@ -3915,15 +4058,13 @@ class ReconciliationEngine:
         # 每个段落各有一个。简单取最后一个"合计"行可能取到错误段落的值
         # （如累计折旧合计而非账面价值合计）。此时应跳过策略1，
         # 让策略2（账面价值行）或策略3（段落计算）来处理。
-        import re as _re_local
-        _section_pat = _re_local.compile(r"^[一二三四五六七八九十]+[、.]")
         _has_multi_section = False
         _total_count = 0
         for _row in note.rows:
             _first = str(_row[0] if _row else "").replace(" ", "").replace("\u3000", "").strip()
             if _first in ("合计", "总计"):
                 _total_count += 1
-            if _section_pat.match(_first) and any(
+            if _SECTION_PATTERN.match(_first) and any(
                 kw in _first for kw in (
                     ReconciliationEngine._COST_SECTION_KW
                     + ReconciliationEngine._AMORT_SECTION_KW
@@ -3985,6 +4126,7 @@ class ReconciliationEngine:
 
         return (None, None)
 
+    @staticmethod
     def _extract_from_balance_label_rows(
         note: NoteTable,
         norm_headers: List[str],
@@ -4320,7 +4462,6 @@ class ReconciliationEngine:
         note: NoteTable,
     ) -> Tuple[Optional[float], Optional[float]]:
         """从"期末账面价值"/"期初账面价值"行中提取值。"""
-        import re as _re
         bv_kw = ReconciliationEngine._BOOK_VALUE_KW
         closing_val = None
         opening_val = None
@@ -4367,7 +4508,7 @@ class ReconciliationEngine:
                     closing_val = _pick_row_val(row)
                 if "期初" in first or "年初" in first:
                     opening_val = _pick_row_val(row)
-                if _re.match(r"^[一二三四五六七八九十]+[、.]", first) and not any(kw in first for kw in bv_kw):
+                if _SECTION_PATTERN.match(first) and not any(kw in first for kw in bv_kw):
                     break
 
         if closing_val is not None or opening_val is not None:
@@ -4377,7 +4518,7 @@ class ReconciliationEngine:
         # 国企报表中固定资产/无形资产等科目的附注表格，账面价值行的标签形如
         # "五、固定资产账面价值合计"，值在"期初余额"和"期末余额"列中。
         # 优先匹配"账面价值"，其次"账面净值"/"净值"。
-        section_pattern = _re.compile(r"^[一二三四五六七八九十]+[、.]")
+        section_pattern = _SECTION_PATTERN
         closing_kw = ReconciliationEngine._CLOSING_COL_KW
         opening_kw = ReconciliationEngine._OPENING_COL_KW
         is_move = ReconciliationEngine._is_movement_col
@@ -4420,8 +4561,7 @@ class ReconciliationEngine:
         note: NoteTable,
     ) -> Tuple[Optional[float], Optional[float]]:
         """多段表格（原价-累计摊销-减值准备）→ 计算账面价值。"""
-        import re as _re
-        section_pattern = _re.compile(r"^[一二三四五六七八九十]+[、.]")
+        section_pattern = _SECTION_PATTERN
         cost_kw = ReconciliationEngine._COST_SECTION_KW
         amort_kw = ReconciliationEngine._AMORT_SECTION_KW
         impair_kw = ReconciliationEngine._IMPAIR_SECTION_KW
@@ -4663,8 +4803,7 @@ class ReconciliationEngine:
     @staticmethod
     def _strip_parenthetical(name: str) -> str:
         """去掉科目名称中的括号说明文字，如 '资产处置收益(损失以"-"号填列）' → '资产处置收益'。"""
-        import re
-        return re.sub(r'[（(][^）)]*[）)]', '', name).strip()
+        return _PARENTHETICAL_PATTERN.sub('', name).strip()
 
     @staticmethod
     def _match_score(name1: str, name2: str) -> float:
@@ -4789,6 +4928,7 @@ class ReconciliationEngine:
         difference: Optional[float] = None,
         reasoning: str = "",
         note_table_ids: Optional[List[str]] = None,
+        highlight_cells: Optional[List[Dict[str, int]]] = None,
     ) -> ReportReviewFinding:
         return ReportReviewFinding(
             id=str(uuid.uuid4())[:8],
@@ -4803,6 +4943,7 @@ class ReconciliationEngine:
             suggestion="请核实数据并修正",
             analysis_reasoning=reasoning,
             note_table_ids=note_table_ids or [],
+            highlight_cells=highlight_cells,
             confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
             status=FindingStatus.OPEN,
         )

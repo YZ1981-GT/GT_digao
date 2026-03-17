@@ -703,6 +703,7 @@ class ReportReviewFinding(BaseModel):
     suggestion: str = Field("", description="修改建议")
     analysis_reasoning: Optional[str] = Field(None, description="分析推理过程")
     note_table_ids: List[str] = Field(default_factory=list, description="关联的附注表格ID列表（用于前端预览溯源）")
+    highlight_cells: Optional[List[Dict[str, int]]] = Field(None, description="高亮单元格列表 [{row: 行索引, col: 列索引}]，用于前端表格定位")
     source_page: Optional[int] = Field(None, description="问题所在源文档页码（1-based）")
     source_file: Optional[str] = Field(None, description="问题所在源文件名")
     confirmation_status: FindingConfirmationStatus = Field(

@@ -661,6 +661,7 @@ export interface ReportReviewFinding {
   suggestion: string;
   analysis_reasoning?: string;
   note_table_ids?: string[];
+  highlight_cells?: Array<{ row: number; col: number }>;
   source_page?: number;
   source_file?: string;
   confirmation_status: FindingConfirmationStatus;

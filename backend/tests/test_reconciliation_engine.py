@@ -1075,6 +1075,110 @@ class TestAmountConsistency:
             f"段落标题行应作为小计行: {[f.description for f in findings]}"
         )
 
+    def test_deferred_tax_headers_without_period_keyword(self):
+        """递延所得税合并表：递延所得税列不带期间关键词时，应从相邻暂时性差异列继承期间属性。
+
+        实际表头风格：
+          项目 | 期末余额-可抵扣暂时性差异 | 递延所得税资产/负债 | 上年年末余额-暂时性差异 | 递延所得税资产/负债
+        """
+        note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项 目", "期末余额-可抵扣/应纳税暂时性差异",
+                      "递延所得税资产/负债",
+                      "上年年末余额-可抵扣/应纳税暂时性差异",
+                      "递延所得税资产/负债"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["资产减值准备", 2309001091.65, 544417283.41, 2257960677.44, 536968272.29],
+                ["小计", 3368422886.46, 768392167.88, 3025490426.22, 690726440.50],
+                ["递延所得税负债:", None, None, None, None],
+                ["使用权资产", 192852357.39, 47694481.48, None, None],
+                ["小计", 452092201.26, 90077714.41, 253182646.18, 43340175.96],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        # 递延所得税负债：期末=90077714.41（col2），期初=43340175.96（col4）
+        item = _item(name="递延所得税负债", closing=90077714.41, opening=43340175.96)
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        assert len(findings) == 0, (
+            f"递延所得税列应继承相邻暂时性差异列的期间属性: {[f.description for f in findings]}"
+        )
+
+    def test_oci_non_reclassifiable_from_combined_table(self):
+        """其他综合收益：不能重分类进损益的其他综合收益应从段落小计提取，而非合计行。"""
+        note = _note(
+            name="其他综合收益",
+            title="资产负债表中归属于母公司的其他综合收益",
+            headers=["项 目", "期初余额", "本期发生额",
+                      "减:前期计入其他综合收益当期转入留存收益", "期末余额"],
+            rows=[
+                ["一、不能重分类进损益的其他综合收益", -5814737.27, None, -250804.51, -6065541.78],
+                ["1.权益法下不可转损益的其他综合收益", 129214.67, None, None, 129214.67],
+                ["2.其他权益工具投资公允价值变动", -5943951.94, None, -250804.51, -6194756.45],
+                ["二、将重分类进损益的其他综合收益", 6906905.82, 44263.90, None, 6951169.72],
+                ["1.权益法下可转损益的其他综合收益", 9303981.07, -1919503.04, None, 7384478.03],
+                ["2.外币财务报表折算差额", -2397075.25, 1963766.94, None, -433308.31],
+                ["其他综合收益合计", 1092168.55, None, -206540.61, 885627.94],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        # 报表科目"(一) 不能重分类进损益的其他综合收益"应匹配段落"一、"的值
+        item = _item(
+            name="(一) 不能重分类进损益的其他综合收益",
+            closing=-6065541.78, opening=-5814737.27,
+        )
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        assert len(findings) == 0, (
+            f"应从不能重分类段落提取值: {[f.description for f in findings]}"
+        )
+
+    def test_oci_reclassifiable_from_combined_table(self):
+        """其他综合收益：将重分类进损益的其他综合收益应从段落小计提取。"""
+        note = _note(
+            name="其他综合收益",
+            title="资产负债表中归属于母公司的其他综合收益",
+            headers=["项 目", "期初余额", "本期发生额",
+                      "减:前期计入其他综合收益当期转入留存收益", "期末余额"],
+            rows=[
+                ["一、不能重分类进损益的其他综合收益", -5814737.27, None, -250804.51, -6065541.78],
+                ["1.权益法下不可转损益的其他综合收益", 129214.67, None, None, 129214.67],
+                ["二、将重分类进损益的其他综合收益", 6906905.82, 44263.90, None, 6951169.72],
+                ["1.权益法下可转损益的其他综合收益", 9303981.07, -1919503.04, None, 7384478.03],
+                ["其他综合收益合计", 1092168.55, None, -206540.61, 885627.94],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        item = _item(
+            name="(二) 将重分类进损益的其他综合收益",
+            closing=6951169.72, opening=6906905.82,
+        )
+        mm = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings = engine.check_amount_consistency(
+            mm, [item], [note], {note.id: ts},
+        )
+        assert len(findings) == 0, (
+            f"应从将重分类段落提取值: {[f.description for f in findings]}"
+        )
+
 
 # ─── 科目匹配评分 ───
 
@@ -1485,21 +1589,23 @@ class TestExtractNoteTotalsByRules:
         assert c == 1861632.01
         assert o == 2419049.17
 
-    def test_is_combined_subtotal_table(self):
+    def test_find_combined_config_deferred_tax(self):
         """识别递延所得税合并表。"""
         note_yes = NoteTable(
             id="dt-yes", account_name="递延所得税资产和递延所得税负债",
             section_title="未经抵销的递延所得税资产和递延所得税负债",
             headers=[], rows=[],
         )
-        assert engine._is_combined_subtotal_table(note_yes) is True
+        result = engine._find_combined_config(note_yes, "递延所得税负债")
+        assert result is not None
 
         note_no = NoteTable(
             id="dt-no", account_name="递延所得税资产",
             section_title="递延所得税资产",
             headers=[], rows=[],
         )
-        assert engine._is_combined_subtotal_table(note_no) is False
+        result = engine._find_combined_config(note_no, "递延所得税资产")
+        assert result is None  # 单独的递延所得税资产表不是合并表
 
 
 # ─── 营业收入/营业成本合并表格提取 ───

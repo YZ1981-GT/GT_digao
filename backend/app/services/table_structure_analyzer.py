@@ -170,6 +170,7 @@ class TableStructureAnalyzer:
         self, note_table: NoteTable, openai_service: OpenAIService,
         template_hint: Optional[str] = None,
         statement_amount_hint: Optional[str] = None,
+        error_hint: Optional[str] = None,
     ) -> Optional[TableStructure]:
         """强制使用 LLM 重新分析表格结构（跳过缓存和置信度检查）。
 
@@ -180,14 +181,20 @@ class TableStructureAnalyzer:
         Args:
             template_hint: 模板中该科目的表格格式参考（帮助 LLM 理解表格结构）
             statement_amount_hint: 报表金额提示（帮助 LLM 定位正确的余额单元格）
+            error_hint: 上一轮本地校验发现的错误描述（帮助 LLM 针对性修正结构）
         """
         old_structure = self._cache.get(note_table.id)
+
+        # 如果有错误提示，将其附加到 statement_amount_hint 中传递给 LLM
+        enhanced_hint = statement_amount_hint or ""
+        if error_hint:
+            enhanced_hint += f"\n\n【上一轮校验发现的问题】\n{error_hint}\n请特别注意上述问题，可能是行角色（total/data/sub_item）或列语义（opening_balance/closing_balance/current_increase/current_decrease）识别有误。"
 
         try:
             llm_structure = await self._analyze_with_llm(
                 note_table, openai_service,
                 template_hint=template_hint,
-                statement_amount_hint=statement_amount_hint,
+                statement_amount_hint=enhanced_hint if enhanced_hint.strip() else statement_amount_hint,
             )
             if llm_structure is None:
                 logger.info("LLM 重新分析未返回有效结构，保留原结构: %s", note_table.id)
@@ -339,6 +346,121 @@ class TableStructureAnalyzer:
             ],
             "formula": "期初余额 + 增加项 - 减少项 = 期末余额",
         },
+        # ── 固定资产（国企版：多段变动表，每段独立公式）──
+        {
+            "name": "固定资产变动-国企版",
+            "match_keywords": ["固定资产"],
+            "match_title_keywords": [],
+            "exclude_title_keywords": ["清理", "减值", "暂时闲置", "未办妥", "抵押", "出租"],
+            "template_columns": [
+                {"role": "label", "name": "项目/类别"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "本期增加"},
+                {"role": "movement", "sign": "-", "name": "本期减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 本期增加 - 本期减少 = 期末余额",
+            "multi_section": True,
+        },
+        # ── 固定资产（上市版：分类合计型，列为资产类别，行为变动项目）──
+        # 上市版由 _try_build_category_sum_from_headers 自动检测，此处不需要额外预设
+        # ── 无形资产（国企版：多段变动表）──
+        {
+            "name": "无形资产变动-国企版",
+            "match_keywords": ["无形资产"],
+            "match_title_keywords": [],
+            "exclude_title_keywords": ["减值", "未办妥", "抵押", "出租", "开发支出"],
+            "template_columns": [
+                {"role": "label", "name": "项目/类别"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "本期增加"},
+                {"role": "movement", "sign": "-", "name": "本期减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 本期增加 - 本期减少 = 期末余额",
+            "multi_section": True,
+        },
+        # ── 使用权资产（国企版：多段变动表）──
+        {
+            "name": "使用权资产变动-国企版",
+            "match_keywords": ["使用权资产"],
+            "match_title_keywords": [],
+            "exclude_title_keywords": ["减值"],
+            "template_columns": [
+                {"role": "label", "name": "项目/类别"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "本期增加"},
+                {"role": "movement", "sign": "-", "name": "本期减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 本期增加 - 本期减少 = 期末余额",
+            "multi_section": True,
+        },
+        # ── 投资性房地产（国企版：多段变动表）──
+        {
+            "name": "投资性房地产变动-国企版",
+            "match_keywords": ["投资性房地产"],
+            "match_title_keywords": [],
+            "exclude_title_keywords": ["减值", "公允价值"],
+            "template_columns": [
+                {"role": "label", "name": "项目/类别"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "本期增加"},
+                {"role": "movement", "sign": "-", "name": "本期减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 本期增加 - 本期减少 = 期末余额",
+            "multi_section": True,
+        },
+        # ── 生产性生物资产（国企版：多段变动表）──
+        {
+            "name": "生产性生物资产变动-国企版",
+            "match_keywords": ["生产性生物资产"],
+            "match_title_keywords": [],
+            "exclude_title_keywords": ["减值"],
+            "template_columns": [
+                {"role": "label", "name": "项目/类别"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "本期增加"},
+                {"role": "movement", "sign": "-", "name": "本期减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 本期增加 - 本期减少 = 期末余额",
+            "multi_section": True,
+        },
+        # ── 坏账准备变动（应收账款/其他应收款等）──
+        {
+            "name": "坏账准备变动",
+            "match_keywords": ["坏账准备", "应收账款", "其他应收款", "应收票据", "长期应收款"],
+            "match_title_keywords": ["坏账准备变动", "坏账准备计提"],
+            "exclude_title_keywords": ["按组合", "按单项", "账龄", "分类"],
+            "template_columns": [
+                {"role": "label", "name": "类别"},
+                {"role": "opening", "sign": "+", "name": "期初余额"},
+                {"role": "movement", "sign": "+", "name": "计提"},
+                {"role": "movement", "sign": "+", "name": "其他增加"},
+                {"role": "movement", "sign": "-", "name": "收回或转回"},
+                {"role": "movement", "sign": "-", "name": "核销"},
+                {"role": "movement", "sign": "-", "name": "其他减少"},
+                {"role": "closing", "sign": "=", "name": "期末余额"},
+            ],
+            "formula": "期初余额 + 计提 + 其他增加 - 收回或转回 - 核销 - 其他减少 = 期末余额",
+        },
+        # ── 递延所得税资产/负债变动 ──
+        {
+            "name": "递延所得税变动",
+            "match_keywords": ["递延所得税资产", "递延所得税负债"],
+            "match_title_keywords": [],
+            "exclude_title_keywords": ["抵销", "相抵"],
+            "template_columns": [
+                {"role": "label", "name": "项目"},
+                {"role": "skip", "name": "暂时性差异期末"},
+                {"role": "closing", "sign": "=", "name": "递延所得税期末余额"},
+                {"role": "skip", "name": "暂时性差异期初"},
+                {"role": "opening", "sign": "+", "name": "递延所得税期初余额"},
+            ],
+            "formula": "（含暂时性差异列，仅校验递延所得税列的期初→期末变动）",
+        },
     ]
 
     @classmethod
@@ -432,9 +554,12 @@ class TableStructureAnalyzer:
                          "其他权益", "现金股利", "宣告发放", "计提减值", "减值准备",
                          "本期增加", "本期减少", "转入固定", "本期摊销",
                          "其他减少", "其他增加",
-                         "内部开发", "确认为无形", "计入当期", "计提", "转回",
+                         "内部开发", "确认为无形", "计入当期", "转入当期",
+                         "计提", "转回",
                          "转销", "企业合并", "处置", "账面价值",
-                         "利息资本化", "投资成本"]:
+                         "利息资本化", "投资成本",
+                         "收回或转回", "核销", "暂时性差异",
+                         "递延所得税"]:
                 if seg in name:
                     keywords.append(seg)
             # 如果没有提取到关键词，使用列名本身（去掉括号内容）
@@ -460,7 +585,7 @@ class TableStructureAnalyzer:
         for ci, h in enumerate(headers):
             if ci in used_col_indices:
                 continue
-            h_clean = h.replace(" ", "").replace("\u3000", "")
+            h_clean = h.replace(" ", "").replace("\u3000", "").replace("\n", "").replace("\r", "")
             # opening: 含"期初"或"年初"，且含"账面价值"或"余额"（排除"减值准备"和"投资成本"）
             if opening_idx is None and any(k in h_clean for k in ["期初", "年初"]):
                 if "减值" not in h_clean and "投资成本" not in h_clean:
@@ -483,6 +608,9 @@ class TableStructureAnalyzer:
         movement_templates = [tc for tc in template_cols
                               if tc["role"] in ("movement", "skip")]
 
+        # 第一轮：关键词匹配
+        unmatched_templates: List[Dict] = []
+        matched_movement_count = 0
         for tc in movement_templates:
             kws = _col_keywords(tc)
             best_ci = None
@@ -490,7 +618,7 @@ class TableStructureAnalyzer:
             for ci, h in enumerate(headers):
                 if ci in used_col_indices:
                     continue
-                h_clean = h.replace(" ", "").replace("\u3000", "")
+                h_clean = h.replace(" ", "").replace("\u3000", "").replace("\n", "").replace("\r", "")
                 score = 0
                 for kw in kws:
                     if kw in h_clean:
@@ -507,6 +635,49 @@ class TableStructureAnalyzer:
                     "sign": tc.get("sign"),
                     "name": headers[best_ci],
                 })
+                if tc["role"] == "movement":
+                    matched_movement_count += 1
+            else:
+                unmatched_templates.append(tc)
+
+        # 第二轮：位置顺序兜底
+        remaining_cols = sorted(
+            ci for ci in range(opening_idx + 1, closing_idx)
+            if ci not in used_col_indices
+        )
+        if remaining_cols:
+            _inc_kw = ["增加", "转入", "计提", "追加"]
+            _dec_kw = ["减少", "转出", "摊销", "折旧", "处置", "转回", "转销", "核销"]
+
+            if matched_movement_count > 0:
+                # 预设基本匹配（如存货跌价准备的两个"其他"列）：
+                # 按预设顺序继承符号
+                for tc, ci in zip(unmatched_templates, remaining_cols):
+                    used_col_indices.add(ci)
+                    columns.append({
+                        "col_index": ci,
+                        "role": tc["role"],
+                        "sign": tc.get("sign"),
+                        "name": headers[ci],
+                    })
+            else:
+                # 简化版表格（如开发支出只有增加/减少列）：
+                # 根据表头自身的增加/减少关键词推断符号
+                for ci in remaining_cols:
+                    h_clean = headers[ci].replace(" ", "").replace("\u3000", "").replace("\n", "").replace("\r", "")
+                    if any(kw in h_clean for kw in _inc_kw):
+                        sign = "+"
+                    elif any(kw in h_clean for kw in _dec_kw):
+                        sign = "-"
+                    else:
+                        sign = None  # 无法判断，标记为 skip
+                    used_col_indices.add(ci)
+                    columns.append({
+                        "col_index": ci,
+                        "role": "movement" if sign else "skip",
+                        "sign": sign,
+                        "name": headers[ci],
+                    })
 
         # 添加 closing 列
         columns.append({"col_index": closing_idx, "role": "closing", "sign": "=",
@@ -533,6 +704,7 @@ class TableStructureAnalyzer:
             "columns": columns,
             "formula_description": preset.get("formula", ""),
             "data_row_start": data_row_start,
+            "multi_section": preset.get("multi_section", False),
         }
 
     # ── 变动关键词：出现在表头中说明该列是变动/余额语义，而非分类名称 ──
@@ -769,14 +941,22 @@ class TableStructureAnalyzer:
             {"role": "user", "content": prompt},
         ]
 
-        response_text = ""
-        async for chunk in openai_service.stream_chat_completion(messages, temperature=0.2):
-            if isinstance(chunk, dict) and "content" in chunk:
-                response_text += chunk["content"]
-            elif isinstance(chunk, str):
-                response_text += chunk
+        try:
+            response_text = ""
+            async for chunk in openai_service.stream_chat_completion(messages, temperature=0.2):
+                if isinstance(chunk, dict) and "content" in chunk:
+                    response_text += chunk["content"]
+                elif isinstance(chunk, str):
+                    response_text += chunk
 
-        return self._parse_wide_table_response(response_text)
+            result = self._parse_wide_table_response(response_text)
+            if result is not None:
+                return result
+        except Exception as e:
+            logger.warning("宽表公式 LLM 分析失败: %s", e)
+
+        # ── 最终降级：尝试从表头关键词构建基础 movement 公式 ──
+        return self._try_build_basic_movement_from_headers(note_table)
 
     def _build_wide_table_prompt(self, note_table: NoteTable, template_hint: Optional[str] = None) -> str:
         """构建宽表公式分析的 LLM prompt。
@@ -824,6 +1004,14 @@ class TableStructureAnalyzer:
 注意：实际表格可能比预设多列或少列，也可能列名略有不同，请根据实际表头灵活调整。
 如果实际表格有预设中没有的列，请根据列名语义判断其 role 和 sign。
 如果实际表格缺少预设中的某些列，直接跳过即可。
+"""
+                # 多段表格提示
+                if preset.get("multi_section"):
+                    preset_block += """
+【多段表格注意】该表格可能是多段变动表（如固定资产：一、账面原值 → 二、累计折旧 → 三、减值准备 → 四、账面价值）。
+每个段落都有相同的列结构，横向公式在每个段落内独立成立。
+段标题行（如"一、账面原值"）不参与公式校验。
+"账面净值"/"账面价值"段的行不适用变动公式（其值由纵向计算得出：原值-折旧-减值=账面价值）。
 """
 
         prompt = f"""请分析以下审计附注宽表的横向公式结构。
@@ -921,6 +1109,93 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.warning("解析宽表公式 LLM 返回失败: %s", e)
             return None
+
+    @classmethod
+    def _try_build_basic_movement_from_headers(cls, note_table: NoteTable) -> Optional[Dict]:
+        """LLM 失败时的最终降级：仅通过表头关键词构建基础 movement 公式。
+
+        只匹配 opening/closing 列和明确的增加/减少列，
+        无法确定语义的列标记为 skip。比 LLM 分析粗糙，但能覆盖基本校验。
+        """
+        if not note_table.headers or len(note_table.headers) < 4:
+            return None
+
+        headers = [str(h or "") for h in note_table.headers]
+        columns: List[Dict] = []
+        opening_idx = None
+        closing_idx = None
+
+        # 第0列为 label
+        columns.append({"col_index": 0, "role": "label", "sign": None, "name": headers[0]})
+
+        _increase_kw = ["增加", "转入", "计提", "追加"]
+        _decrease_kw = ["减少", "转出", "摊销", "折旧", "处置", "转回", "转销", "核销"]
+        _skip_kw = ["比例", "%", "比率", "占比", "投资成本", "利息资本化"]
+
+        for ci in range(1, len(headers)):
+            h = headers[ci].replace(" ", "").replace("\u3000", "")
+
+            # 跳过百分比等非数值列
+            if any(kw in h for kw in _skip_kw):
+                columns.append({"col_index": ci, "role": "skip", "sign": None, "name": headers[ci]})
+                continue
+
+            # opening
+            if opening_idx is None and any(k in h for k in ["期初", "年初"]):
+                if "减值" not in h:
+                    opening_idx = ci
+                    columns.append({"col_index": ci, "role": "opening", "sign": "+", "name": headers[ci]})
+                    continue
+
+            # closing
+            if closing_idx is None and any(k in h for k in ["期末", "年末"]):
+                if "减值" not in h:
+                    closing_idx = ci
+                    columns.append({"col_index": ci, "role": "closing", "sign": "=", "name": headers[ci]})
+                    continue
+
+            # movement: increase
+            if any(kw in h for kw in _increase_kw):
+                columns.append({"col_index": ci, "role": "movement", "sign": "+", "name": headers[ci]})
+                continue
+
+            # movement: decrease
+            if any(kw in h for kw in _decrease_kw):
+                columns.append({"col_index": ci, "role": "movement", "sign": "-", "name": headers[ci]})
+                continue
+
+            # 无法确定语义 → skip
+            columns.append({"col_index": ci, "role": "skip", "sign": None, "name": headers[ci]})
+
+        if opening_idx is None or closing_idx is None:
+            return None
+
+        # 至少需要一个 movement 列
+        has_movement = any(c["role"] == "movement" for c in columns)
+        if not has_movement:
+            return None
+
+        columns.sort(key=lambda c: c["col_index"])
+        data_row_start = cls._detect_data_row_start(note_table)
+
+        # 检测是否为多段表格
+        acct = note_table.account_name or ""
+        is_multi = any(kw in acct for kw in [
+            "固定资产", "无形资产", "使用权资产", "投资性房地产",
+            "生产性生物资产", "油气资产",
+        ])
+
+        logger.info("宽表降级构建：%s，%d 列（%d movement），multi_section=%s",
+                     note_table.section_title, len(columns),
+                     sum(1 for c in columns if c["role"] == "movement"), is_multi)
+
+        return {
+            "formula_type": "movement",
+            "columns": columns,
+            "formula_description": "（降级构建：基于表头关键词）",
+            "data_row_start": data_row_start,
+            "multi_section": is_multi,
+        }
 
     # ─── LLM 分析 ───
 

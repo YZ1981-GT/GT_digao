@@ -372,26 +372,36 @@ const FindingDetailPanel: React.FC<Props> = ({ findingId, finding, sessionId, on
                     {(table.rows || []).map((row: any[], ri: number) => {
                       const label = String(row[0] || '').trim();
                       const isTotal = /合计|总计/.test(label);
-                      // 高亮差异行：如果 finding 有 statement_amount，对比合计行数值
-                      let highlight = false;
-                      if (isTotal && finding?.difference != null && finding.difference !== 0) {
-                        highlight = true;
+                      // 高亮差异行：如果 finding 有 highlight_cells，精确定位单元格
+                      const highlightCells = finding?.highlight_cells;
+                      const hasHighlightCells = highlightCells && highlightCells.length > 0;
+                      // 行级高亮：该行有任何高亮单元格
+                      const rowHasHighlight = hasHighlightCells && highlightCells!.some((c: any) => c.row === ri);
+                      // 兜底：无 highlight_cells 时沿用旧逻辑
+                      let legacyHighlight = false;
+                      if (!hasHighlightCells && isTotal && finding?.difference != null && finding.difference !== 0) {
+                        legacyHighlight = true;
                       }
+                      const rowHighlight = rowHasHighlight || legacyHighlight;
                       return (
                         <tr key={ri} style={{
-                          backgroundColor: highlight ? '#fff3f3' : isTotal ? '#f9f6fd' : ri % 2 === 0 ? '#fff' : '#fafafa',
+                          backgroundColor: rowHighlight ? '#fff8e1' : isTotal ? '#f9f6fd' : ri % 2 === 0 ? '#fff' : '#fafafa',
                         }}>
-                          {row.map((cell: any, ci: number) => (
-                            <td key={ci} style={{
-                              padding: '3px 8px', borderBottom: '1px solid #eee',
-                              textAlign: ci === 0 ? 'left' : 'right',
-                              fontWeight: isTotal ? 600 : 400,
-                              color: highlight && ci > 0 ? '#dc3545' : '#333',
-                              whiteSpace: 'nowrap',
-                            }}>
-                              {cell != null ? String(cell) : ''}
-                            </td>
-                          ))}
+                          {row.map((cell: any, ci: number) => {
+                            const isCellHighlighted = hasHighlightCells && highlightCells!.some((c: any) => c.row === ri && c.col === ci);
+                            return (
+                              <td key={ci} style={{
+                                padding: '3px 8px', borderBottom: '1px solid #eee',
+                                textAlign: ci === 0 ? 'left' : 'right',
+                                fontWeight: isTotal ? 600 : 400,
+                                color: isCellHighlighted ? '#c62828' : legacyHighlight && ci > 0 ? '#dc3545' : '#333',
+                                backgroundColor: isCellHighlighted ? '#ffecb3' : undefined,
+                                whiteSpace: 'nowrap',
+                              }}>
+                                {cell != null ? String(cell) : ''}
+                              </td>
+                            );
+                          })}
                         </tr>
                       );
                     })}
