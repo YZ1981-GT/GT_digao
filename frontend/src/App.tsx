@@ -81,10 +81,10 @@ function App() {
 
   useEffect(() => {
     checkBackend();
-    // 后端离线时每 5 秒自动重试
-    const timer = setInterval(checkBackend, 5000);
+    // 后端在线时 30 秒检查一次，离线时 5 秒重试
+    const timer = setInterval(checkBackend, backendOnline ? 30000 : 5000);
     return () => clearInterval(timer);
-  }, [checkBackend]);
+  }, [checkBackend, backendOnline]);
 
   const {
     state,

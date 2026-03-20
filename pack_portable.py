@@ -95,6 +95,9 @@ def copy_backend():
         # 排除 __pycache__
         if "__pycache__" in rel_str:
             continue
+        # 排除 data/sessions（用户测试数据，不应打包）
+        if rel_str.startswith("data" + os.sep + "sessions") or rel_str.startswith("data/sessions"):
+            continue
 
         dst_path = dst / rel
         if item.is_dir():
@@ -105,8 +108,47 @@ def copy_backend():
 
     # 确保 uploads 目录存在
     (dst / "uploads").mkdir(exist_ok=True)
+    # 确保 data/sessions 目录存在（运行时需要）
+    (dst / "data" / "sessions").mkdir(parents=True, exist_ok=True)
 
     print(f"  后端文件已复制到 {dst}")
+
+
+def copy_extra_dirs():
+    """复制额外的资源目录（底稿模板、提示词库等）"""
+    print("\n[1.5/5] 复制资源目录...")
+
+    extra_dirs = [
+        ("GT_底稿", "GT_底稿"),   # 审计底稿模板
+        ("TSJ", "TSJ"),           # 预置提示词库
+    ]
+
+    for src_name, dst_name in extra_dirs:
+        src = Path(src_name)
+        if not src.exists():
+            print(f"  ⚠ 目录不存在，跳过: {src_name}")
+            continue
+
+        dst = DIST_DIR / dst_name
+        file_count = 0
+        for item in src.rglob("*"):
+            rel = item.relative_to(src)
+            rel_str = str(rel)
+
+            # 排除不需要的
+            if "__pycache__" in rel_str or ".git" in Path(rel_str).parts:
+                continue
+
+            dst_path = dst / rel
+            if item.is_dir():
+                dst_path.mkdir(parents=True, exist_ok=True)
+            else:
+                dst_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, dst_path)
+                file_count += 1
+
+        size_mb = sum(f.stat().st_size for f in dst.rglob("*") if f.is_file()) / (1024 * 1024)
+        print(f"  ✓ {src_name} → {dst_name} ({file_count} 文件, {size_mb:.1f} MB)")
 
 
 def check_static():
@@ -415,6 +457,7 @@ def main():
 
     clean_dist()
     copy_backend()
+    copy_extra_dirs()
     check_static()
     compile_protected_files()
     create_launcher()

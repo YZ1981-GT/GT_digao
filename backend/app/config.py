@@ -25,9 +25,13 @@ class Settings(BaseSettings):
     
     @property
     def cors_allow_origin_regex(self) -> str:
-        """根据环境返回不同的CORS正则"""
+        """根据环境返回不同的CORS正则。
+
+        生产环境返回空字符串，在 main.py 中通过 `or None` 转为 None
+        使 CORSMiddleware 仅使用 cors_origins 白名单做精确匹配。
+        """
         if self.environment == "production":
-            # 生产环境：仅允许同源请求（不使用正则通配）
+            # 生产环境：仅允许 cors_origins 白名单，不使用正则通配
             return ""
         # 开发环境：允许本地任意端口，避免端口被占用时 CORS 失败
         return r"https?://(localhost|127\.0\.0\.1)(:\d+)?"

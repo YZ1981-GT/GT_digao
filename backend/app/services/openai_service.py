@@ -30,55 +30,27 @@ def estimate_token_count(text: str) -> int:
 
 
 # 常见模型的上下文窗口大小（token数）
-MODEL_CONTEXT_LIMITS: Dict[str, int] = {
-    # MiniMax
-    'MiniMax-M2.5': 204800, 'MiniMax-M2.5-highspeed': 204800, 'MiniMax-M2.1': 204800,
-    # Kimi / Moonshot
-    'kimi-k2.5': 262000, 'kimi-k2-thinking': 262000, 'kimi-k2-thinking-turbo': 262000,
-    'moonshot-v1-128k': 128000, 'moonshot-v1-32k': 32000,
-    # 通义千问（官方 API 短名）
-    'qwen3-max': 262000, 'qwen-max': 32000, 'qwen-plus': 131000,
-    'qwen-max-latest': 32000, 'qwen3-max-preview': 262000, 'qwen-plus-latest': 131000,
-    'qwen-turbo': 131000, 'qwen3-235b-a22b': 128000, 'qwen-long': 10000000,
-    'qwen3.5-plus': 131000, 'qwen3.5-max': 131000,
-    # DeepSeek 官方 API
-    'deepseek-v3.2': 64000, 'deepseek-r1': 128000,
-    'deepseek-chat': 64000, 'deepseek-reasoner': 128000,
-    # 智谱 GLM
-    'glm-5': 128000, 'glm-4.6': 128000, 'glm-4-plus': 128000,
-    # Ollama 本地（带冒号的模型名区分于云端 API）
-    'deepseek-r1:32b': 128000, 'qwen2.5:32b': 128000, 'llama3.1:70b': 128000,
-    # ─── SiliconFlow 平台模型名（带厂商前缀） ───
-    'deepseek-ai/DeepSeek-V3': 131072,
-    'deepseek-ai/DeepSeek-V3-0324': 131072,
-    'deepseek-ai/DeepSeek-R1': 131072,
-    'deepseek-ai/DeepSeek-R1-0528': 131072,
-    'deepseek-ai/DeepSeek-V2.5': 131072,
-    'deepseek-ai/DeepSeek-V3.1': 131072,
-    'deepseek-ai/DeepSeek-V3.2': 131072,
-    'Pro/deepseek-ai/DeepSeek-V3': 131072,
-    'Pro/deepseek-ai/DeepSeek-R1': 131072,
-    'Qwen/Qwen3-235B-A22B': 131072,
-    'Qwen/Qwen3-32B': 131072,
-    'Qwen/Qwen3-30B-A3B': 131072,
-    'Qwen/Qwen2.5-72B-Instruct': 131072,
-    'Qwen/Qwen2.5-32B-Instruct': 131072,
-    'Qwen/QwQ-32B': 131072,
-    'Pro/Qwen/Qwen3-235B-A22B': 131072,
-    'Pro/Qwen/Qwen3-32B': 131072,
-    'Pro/Qwen/Qwen3-30B-A3B': 131072,
-    'THUDM/GLM-4-32B-0414': 131072,
-    'THUDM/GLM-Z1-32B-0414': 131072,
-    'Pro/THUDM/GLM-4-32B-0414': 131072,
-    'Pro/THUDM/GLM-Z1-32B-0414': 131072,
-    'meta-llama/Llama-3.3-70B-Instruct': 131072,
-    # ─── AiHubMix 免费模型 ───
-    'google/gemma-3-27b-it': 131072,
-    'deepseek-ai/DeepSeek-V3-0324-free': 131072,
-    'deepseek-r1-free': 131072,
-    'Qwen/Qwen3-235B-A22B-free': 131072,
-    'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8-free': 131072,
-}
+# 从外部 JSON 配置加载，新增模型时只需编辑 data/model_context_limits.json
+def _load_model_context_limits() -> Dict[str, int]:
+    """从 JSON 配置文件加载模型上下文限制，失败时返回空字典。"""
+    import os as _os
+    candidates = [
+        _os.path.join(_os.path.dirname(__file__), '..', '..', 'data', 'model_context_limits.json'),
+        _os.path.join(_os.path.dirname(__file__), '..', '..', '..', 'data', 'model_context_limits.json'),
+    ]
+    for path in candidates:
+        path = _os.path.normpath(path)
+        if _os.path.isfile(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                # 过滤掉注释字段
+                return {k: v for k, v in data.items() if not k.startswith('_')}
+            except Exception as e:
+                logger.warning("加载模型上下文限制配置失败 %s: %s", path, e)
+    return {}
+
+MODEL_CONTEXT_LIMITS: Dict[str, int] = _load_model_context_limits()
 DEFAULT_CONTEXT_LIMIT = 32000
 
 

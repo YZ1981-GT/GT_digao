@@ -3,7 +3,7 @@ uvicorn[standard]==0.35.0
 python-multipart==0.0.20
 openai==1.106.1
 python-docx==1.2.0
-PyPDF2==3.0.1
+PyPDF2==3.0.1  # 遗留依赖：file_service/workpaper_parser 中作为 pdfplumber 的降级方案
 pydantic==2.11.7
 pydantic-settings==2.10.1
 python-dotenv==1.1.1

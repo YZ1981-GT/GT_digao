@@ -91,11 +91,15 @@ if os.path.exists(static_dir):
     
     # 处理前端路由（仅限非API路径）
     # 注意：不使用通配符，而是明确列出前端路由
+    # 使用工厂函数避免循环闭包变量捕获问题
+    def _make_frontend_handler(static_root: str):
+        async def handler():
+            return FileResponse(f"{static_root}/index.html")
+        return handler
+
     frontend_routes = ["/document-analysis", "/outline-edit", "/content-edit"]
     for _route in frontend_routes:
-        @app.get(_route, include_in_schema=False)
-        async def serve_frontend_route(_r: str = _route):
-            return FileResponse(f"{static_dir}/index.html")
+        app.get(_route, include_in_schema=False)(_make_frontend_handler(static_dir))
 else:
     # 如果没有静态文件，返回API信息
     @app.get("/")
