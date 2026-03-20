@@ -395,11 +395,65 @@ class WorkpaperParser:
         """解析旧版 .doc 文件。Windows 上使用 pywin32 COM 接口。"""
         return await asyncio.to_thread(self._parse_doc_legacy_sync, file_path)
 
+    # ── .doc 标题模式检测（与 _parse_docx_sync 对齐） ──
+    _DOC_HEADING_PATTERNS: List[Tuple[re.Pattern, int]] = [
+        (re.compile(r'^[一二三四五六七八九十]+、'), 1),
+        (re.compile(r'^[（(][一二三四五六七八九十]+[）)]'), 2),
+        (re.compile(r'^\d+[、.]'), 3),
+        (re.compile(r'^[（(]\d+[）)]'), 4),
+        (re.compile(r'^[①②③④⑤⑥⑦⑧⑨⑩]'), 4),
+    ]
+
+    def _detect_doc_heading_level(self, para_text: str, outline_level: int,
+                                   is_bold: bool) -> Optional[int]:
+        """检测 .doc 段落的标题级别（与 _parse_docx_sync 的检测逻辑对齐）。
+
+        检测顺序：
+        1. COM OutlineLevel 1-9
+        2. 中文编号模式匹配（一、 / （一） / 1. / (1) / ①）
+        3. 加粗短段落 → 子标题
+        4. 财务报表附注模式匹配
+        """
+        if not para_text:
+            return None
+
+        # 1. COM OutlineLevel
+        if 1 <= outline_level <= 9:
+            return outline_level
+
+        # 2. 中文编号模式
+        for pattern, level in self._DOC_HEADING_PATTERNS:
+            if pattern.match(para_text):
+                return level
+
+        is_short = len(para_text) <= 80 and para_text[-1] not in '。；;'
+        not_wrapped = not ((para_text.startswith('（') and para_text.endswith('）')) or
+                           (para_text.startswith('(') and para_text.endswith(')')))
+
+        # 3. 加粗短段落
+        if is_bold and is_short and not_wrapped:
+            return 4  # 默认子标题级别
+
+        # 4. 财务报表附注模式
+        if self._NOTE_TITLE_PATTERNS.search(para_text) and is_short and not_wrapped:
+            return 4
+
+        return None
+
     def _parse_doc_legacy_sync(self, file_path: str) -> WordParseResult:
-        """同步解析 .doc 文件（在线程池中调用）。"""
-        text = ""
+        """同步解析 .doc 文件（在线程池中调用）。
+
+        与 _parse_docx_sync 对齐的增强版本：
+        - 按文档顺序交错遍历段落和表格（通过 Range.Start 排序）
+        - 构建 table_after_para_idx 和 table_contexts
+        - 合并单元格去重处理
+        - 增强标题检测（OutlineLevel + 模式匹配 + 加粗检测）
+        """
+        paragraphs: List[Dict[str, Any]] = []
         tables: List[List[List[str]]] = []
         headings: List[Dict[str, Any]] = []
+        table_after_para_idx: List[int] = []
+
         try:
             import win32com.client
             import pythoncom
@@ -410,32 +464,135 @@ class WorkpaperParser:
                 word_app.DisplayAlerts = False
                 abs_path = os.path.abspath(file_path)
                 doc = word_app.Documents.Open(abs_path, ReadOnly=True)
-                text = doc.Content.Text or ""
-                # 提取标题（通过 OutlineLevel 判断）
+
+                # ── 收集所有段落和表格，按 Range.Start 排序以获得文档顺序 ──
+                body_elements: List[Tuple[str, int, Any]] = []  # (type, start_pos, obj)
+
                 for para in doc.Paragraphs:
                     try:
-                        outline_level = para.OutlineLevel
-                        # OutlineLevel: 1-9 为标题级别，10 (wdOutlineLevelBodyText) 为正文
-                        if 1 <= outline_level <= 9:
-                            para_text = para.Range.Text.strip().rstrip('\r\x07')
-                            if para_text:
-                                headings.append({"text": para_text, "level": outline_level})
+                        start = para.Range.Start
+                        body_elements.append(('para', start, para))
                     except Exception:
                         pass
-                # 提取表格
+
                 for table in doc.Tables:
-                    table_data: List[List[str]] = []
-                    for row_idx in range(1, table.Rows.Count + 1):
-                        row_data: List[str] = []
-                        for col_idx in range(1, table.Columns.Count + 1):
+                    try:
+                        start = table.Range.Start
+                        body_elements.append(('table', start, table))
+                    except Exception:
+                        pass
+
+                body_elements.sort(key=lambda x: x[1])
+
+                # ── 按文档顺序遍历，构建段落列表和表格列表 ──
+                para_idx = -1
+                current_heading_level = 0
+
+                for etype, _start_pos, obj in body_elements:
+                    if etype == 'para':
+                        try:
+                            raw_text = obj.Range.Text or ""
+                            text = raw_text.strip().rstrip('\r\x07')
+
+                            # 跳过纯空段落
+                            if not text:
+                                continue
+
+                            # 获取 OutlineLevel
                             try:
-                                cell_text = table.Cell(row_idx, col_idx).Range.Text
-                                cell_text = cell_text.strip().rstrip('\r\x07')
-                                row_data.append(cell_text)
+                                outline_level = obj.OutlineLevel
                             except Exception:
-                                row_data.append("")
-                        table_data.append(row_data)
-                    tables.append(table_data)
+                                outline_level = 10  # wdOutlineLevelBodyText
+
+                            # 检测加粗：段落的 Range.Bold
+                            is_bold = False
+                            try:
+                                bold_val = obj.Range.Bold
+                                # Bold: -1=True, 0=False, 9999999=mixed
+                                is_bold = (bold_val == -1 or bold_val == True)  # noqa: E712
+                            except Exception:
+                                pass
+
+                            level = self._detect_doc_heading_level(
+                                text, outline_level, is_bold
+                            )
+
+                            # 表格前描述性短段落检测（前瞻）
+                            if level is None and len(text) <= 60:
+                                not_wrapped = not (
+                                    (text.startswith('（') and text.endswith('）')) or
+                                    (text.startswith('(') and text.endswith(')'))
+                                )
+                                if (text[-1] not in '。；;.' and not_wrapped and
+                                        not re.match(r'^续[（(：:]', text) and text != '续'):
+                                    # 检查后续元素是否为表格
+                                    try:
+                                        para_end = obj.Range.End
+                                        for ntype, nstart, _nobj in body_elements:
+                                            if nstart <= para_end:
+                                                continue
+                                            if ntype == 'table':
+                                                level = min(current_heading_level + 1, 6) if current_heading_level else 4
+                                            break  # 只看紧邻的下一个元素
+                                    except Exception:
+                                        pass
+
+                            para_info: Dict[str, Any] = {
+                                "text": text,
+                                "style": "",
+                            }
+                            if level is not None:
+                                para_info["level"] = level
+                                headings.append({"text": text, "level": level})
+                                current_heading_level = level
+
+                            paragraphs.append(para_info)
+                            para_idx = len(paragraphs) - 1
+
+                        except Exception:
+                            pass
+
+                    elif etype == 'table':
+                        try:
+                            table_data: List[List[str]] = []
+                            tbl = obj
+
+                            # ── 合并单元格处理 ──
+                            # 遍历每行的实际单元格，用 (RowIndex, ColumnIndex) 去重
+                            for row_idx in range(1, tbl.Rows.Count + 1):
+                                row_data: List[str] = []
+                                seen_cells: set = set()
+                                try:
+                                    row_obj = tbl.Rows(row_idx)
+                                except Exception:
+                                    # 不规则表格中某些行可能不可访问
+                                    continue
+
+                                for col_idx in range(1, tbl.Columns.Count + 1):
+                                    try:
+                                        cell = tbl.Cell(row_idx, col_idx)
+                                        # 合并单元格的多个位置返回同一个 Cell
+                                        # 用实际的 RowIndex/ColumnIndex 标识唯一单元格
+                                        cell_key = (cell.RowIndex, cell.ColumnIndex)
+                                        if cell_key in seen_cells:
+                                            row_data.append('')  # 合并位置填空
+                                        else:
+                                            seen_cells.add(cell_key)
+                                            cell_text = cell.Range.Text
+                                            cell_text = cell_text.strip().rstrip('\r\x07')
+                                            row_data.append(cell_text)
+                                    except Exception:
+                                        row_data.append("")
+
+                                if row_data:
+                                    table_data.append(row_data)
+
+                            tables.append(table_data)
+                            table_after_para_idx.append(para_idx)
+
+                        except Exception:
+                            pass
+
                 doc.Close(False)
                 word_app.Quit()
             finally:
@@ -445,14 +602,21 @@ class WorkpaperParser:
         except Exception as e:
             raise RuntimeError(f".doc 文件解析失败：{e}")
 
-        # 按换行拆分为段落
-        paragraphs = [{"text": line, "style": ""} for line in text.split('\r') if line.strip()]
+        # ── 构建 table_contexts（与 _parse_docx_sync 一致） ──
+        table_contexts: List[str] = []
+        for tpi in table_after_para_idx:
+            if 0 <= tpi < len(paragraphs):
+                table_contexts.append(paragraphs[tpi].get('text', '').strip())
+            else:
+                table_contexts.append("")
 
         return WordParseResult(
             paragraphs=paragraphs,
             tables=tables,
             headings=headings,
             comments=[],
+            table_contexts=table_contexts,
+            table_after_para_idx=table_after_para_idx,
         )
 
     async def parse_pdf(self, file_path: str) -> PdfParseResult:

@@ -157,7 +157,7 @@ class ReconciliationEngine:
 
     # 报表中的汇总行关键词 — 这些行是多个科目的合计，不对应具体附注披露，跳过金额核对
     STATEMENT_SUBTOTAL_KEYWORDS = [
-        "合计", "总计", "总额", "小计", "净额",
+        "合计", "总计", "总额", "小计", "净额", "净值",
     ]
 
     # 不应做金额核对的特殊科目名称关键词（包含即跳过）
@@ -273,7 +273,13 @@ class ReconciliationEngine:
         国企报表中，固定资产等科目的附注常拆分为多张独立表格，
         其中原价表、累计折旧表、减值准备表的合计值仅代表资产的某一组成部分，
         不应直接与报表余额（账面价值）比对。
+
+        仅对长期资产类科目生效（固定资产、无形资产、投资性房地产等），
+        避免误匹配非资产科目（如"合同资产减值准备"应由 _is_detail_subtable 处理）。
         """
+        acct = (note.account_name or "").replace(" ", "").replace("\u3000", "")
+        if not any(kw in acct for kw in ReconciliationEngine._SECTION_EXTRACT_ACCOUNTS):
+            return False
         title = (note.section_title or "").replace(" ", "").replace("\u3000", "")
         return any(kw in title for kw in ReconciliationEngine._COMPONENT_SUBTABLE_KW)
 
@@ -620,7 +626,7 @@ class ReconciliationEngine:
         "实际核销", "核销情况",
         "收回或转回", "转回或收回",
         "逾期",
-        "款项性质",
+        "款项性质", "按款项性质",
         # 应收票据专用
         "已质押", "已背书", "已贴现",
         "出票人未履约", "转为应收账款",
@@ -629,6 +635,8 @@ class ReconciliationEngine:
         "账龄超过",
         # 存货：跌价准备
         "跌价准备", "合同履约成本减值",
+        # 存货/无形资产：数据资源子表
+        "数据资源",
         # 合同资产
         "减值准备",
         # 应付职工薪酬：明细子表
@@ -657,6 +665,7 @@ class ReconciliationEngine:
         "投资性房地产", "使用权资产",
         "长期股权投资", "货币资金",
         "债权投资", "其他债权投资",
+        "其他应付款",
     ]
 
     def _is_detail_subtable(self, note: NoteTable) -> bool:
@@ -696,6 +705,15 @@ class ReconciliationEngine:
         # 递延所得税 — "未确认递延所得税资产的可抵扣暂时性差异及可抵扣亏损明细"
         # 未确认部分不等于报表上已确认的递延所得税资产/负债余额
         ["未确认", "递延所得税"],
+        # 递延所得税 — "以抵销后净额列示的递延所得税资产或负债"
+        # 抵销后净额是展示性表格，不等于报表上的递延所得税资产/负债余额
+        ["抵销后", "净额"],
+        # 递延所得税 — "可抵扣亏损将于以下年度到期"
+        # 亏损到期年度明细表，不含报表余额
+        ["可抵扣亏损", "到期"],
+        # 应付债券 — "应付债券的增减变动"
+        # 增减变动明细表，不是余额汇总表
+        ["应付债券", "增减变动"],
     ]
 
     @staticmethod
@@ -853,6 +871,15 @@ class ReconciliationEngine:
             # 收集所有有效匹配的附注表格 ID（用于"未找到值"时的 finding）
             valid_note_ids: List[str] = []
 
+            # ── 位置限制：每个科目下，只有第 1 个通过过滤的表格
+            # 参与报表-附注余额核对，后续表格仅参与表间核对。
+            # 按口径（合并/母公司）分别计数。
+            # 依据：国企/上市报表附注中，科目标题下的第一个表格是汇总表
+            # （含期末/期初余额），后续表格均为明细/变动/政策描述表，
+            # 不应与报表余额直接比对。
+            MAX_VERIFY_TABLES = 1
+            scope_verify_count: Dict[str, int] = {}  # scope_key → 已参与核对的表格数
+
             for note_id in entry.note_table_ids:
                 note = note_map.get(note_id)
                 ts = table_structures.get(note_id)
@@ -967,6 +994,15 @@ class ReconciliationEngine:
                 scope_findings_opening.setdefault(scope_key, [])
                 scope_any_closing_found.setdefault(scope_key, False)
                 scope_any_opening_found.setdefault(scope_key, False)
+
+                # ── 位置限制：每个口径下，只有前 MAX_VERIFY_TABLES 个通过过滤的表格
+                # 参与报表-附注余额核对。科目标题下的第一个（最多前两个）表格
+                # 涉及报表和附注余额验证，后续表格仅参与表间核对。
+                _cur_count = scope_verify_count.get(scope_key, 0)
+                if _cur_count >= MAX_VERIFY_TABLES:
+                    valid_note_ids.pop()  # 不参与余额核对
+                    continue
+                scope_verify_count[scope_key] = _cur_count + 1
 
                 # 获取附注合计值（优先用 LLM 识别的 cell，兜底用规则引擎）
                 note_closing = self._get_cell_value(note, ts.closing_balance_cell)
