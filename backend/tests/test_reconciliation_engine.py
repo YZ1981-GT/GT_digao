@@ -1112,6 +1112,94 @@ class TestAmountConsistency:
             f"递延所得税列应继承相邻暂时性差异列的期间属性: {[f.description for f in findings]}"
         )
 
+    def test_deferred_tax_no_subtotal_row(self):
+        """递延所得税合并表无小计行，递延所得税资产/负债行本身即为小计。
+
+        表格结构（无明细行，仅两行数据）：
+          项目 | 期末余额-暂时性差异 | 期末余额-递延所得税 | 期初余额-暂时性差异 | 期初余额-递延所得税
+          递延所得税资产 | 50000 | 7000 | 40000 | 5000
+          递延所得税负债 | 30000 | 3000 | 20000 | 2000
+        """
+        note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产", 50000, 7000, 40000, 5000],
+                ["递延所得税负债", 30000, 3000, 20000, 2000],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+
+        # 测试递延所得税资产
+        item_asset = _item(name="递延所得税资产", closing=7000, opening=5000)
+        mm_asset = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item_asset.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings_asset = engine.check_amount_consistency(
+            mm_asset, [item_asset], [note], {note.id: ts},
+        )
+        assert len(findings_asset) == 0, (
+            f"无小计行时应取递延所得税资产行本身的值: {[f.description for f in findings_asset]}"
+        )
+
+        # 测试递延所得税负债
+        item_liab = _item(name="递延所得税负债", closing=3000, opening=2000)
+        mm_liab = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item_liab.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings_liab = engine.check_amount_consistency(
+            mm_liab, [item_liab], [note], {note.id: ts},
+        )
+        assert len(findings_liab) == 0, (
+            f"无小计行时应取递延所得税负债行本身的值: {[f.description for f in findings_liab]}"
+        )
+
+    def test_deferred_tax_no_subtotal_with_details(self):
+        """递延所得税合并表有明细行但无小计行，段落标题行带有汇总值。
+
+        表格结构：
+          项目 | 期末余额-暂时性差异 | 期末余额-递延所得税 | 期初余额-暂时性差异 | 期初余额-递延所得税
+          递延所得税资产 | 50000 | 7000 | 40000 | 5000
+            资产减值准备 | 30000 | 4000 | 25000 | 3000
+            预计负债 | 20000 | 3000 | 15000 | 2000
+          递延所得税负债 | 30000 | 3000 | 20000 | 2000
+            资产评估增值 | 30000 | 3000 | 20000 | 2000
+        """
+        note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产", 50000, 7000, 40000, 5000],
+                ["资产减值准备", 30000, 4000, 25000, 3000],
+                ["预计负债", 20000, 3000, 15000, 2000],
+                ["递延所得税负债", 30000, 3000, 20000, 2000],
+                ["资产评估增值", 30000, 3000, 20000, 2000],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+
+        # 递延所得税资产：段落标题行带值，应取标题行的值
+        item_asset = _item(name="递延所得税资产", closing=7000, opening=5000)
+        mm_asset = MatchingMap(entries=[MatchingEntry(
+            statement_item_id=item_asset.id,
+            note_table_ids=[note.id],
+            match_confidence=0.8,
+        )])
+        findings_asset = engine.check_amount_consistency(
+            mm_asset, [item_asset], [note], {note.id: ts},
+        )
+        assert len(findings_asset) == 0, (
+            f"有明细行但无小计行时，应取段落标题行的值: {[f.description for f in findings_asset]}"
+        )
+
     def test_oci_non_reclassifiable_from_combined_table(self):
         """其他综合收益：不能重分类进损益的其他综合收益应从段落小计提取，而非合计行。"""
         note = _note(
