@@ -845,14 +845,28 @@ class ReconciliationEngine:
         if note_sections:
             ancestor_map = self._build_note_parent_section_map(note_sections)
 
-        # 构建母公司预设科目关键词集合，用于限定母公司口径核对范围
-        # 上市版/国企版附注中，母公司报表项目注释仅披露少数科目，
-        # 其他科目不应进行母公司口径的金额核对
+        # 构建预设科目关键词集合，用于限定报表vs附注一致性核对范围。
+        # 只有在预设模板中列出的科目才参与一致性核对：
+        # - 合并口径：使用 _CONSOLIDATED_ACCOUNTS_SOE/LISTED
+        # - 母公司口径：使用 _PARENT_ACCOUNTS_SOE/LISTED
+        # 不在预设范围内的科目跳过一致性核对（但仍参与变动异常等其他检查）。
         _parent_account_keywords: List[List[str]] = []
+        _consolidated_account_keywords: List[List[str]] = []
         if template_type:
             from .account_mapping_template import account_mapping_template
             parent_accounts = account_mapping_template.get_parent_company_accounts(template_type)
             _parent_account_keywords = [acct['keywords'] for acct in parent_accounts]
+            consolidated_accounts = account_mapping_template.get_consolidated_accounts(template_type)
+            _consolidated_account_keywords = [acct['keywords'] for acct in consolidated_accounts]
+
+        def _item_in_consolidated_scope(account_name: str) -> bool:
+            """判断报表科目是否在合并附注预设范围内。"""
+            if not _consolidated_account_keywords:
+                return True  # 无模板时不限制
+            return any(
+                any(kw in account_name for kw in kw_list)
+                for kw_list in _consolidated_account_keywords
+            )
 
         for entry in matching_map.entries:
             item = item_map.get(entry.statement_item_id)
@@ -862,6 +876,19 @@ class ReconciliationEngine:
             # 跳过不需要金额核对的科目（汇总行、无附注披露的现金流量表科目等）
             if self._should_skip_amount_check(item):
                 continue
+
+            # 跳过不在预设模板范围内的科目：
+            # 只有预设模板中列出的科目才参与报表vs附注一致性核对。
+            # 合并报表时，科目需在合并预设或母公司预设中至少出现一个；
+            # 非合并报表时，科目需在合并预设中。
+            if _consolidated_account_keywords:
+                _in_cons = _item_in_consolidated_scope(item.account_name)
+                _in_parent = any(
+                    any(kw in item.account_name for kw in kw_list)
+                    for kw_list in _parent_account_keywords
+                ) if _parent_account_keywords else False
+                if not _in_cons and not _in_parent:
+                    continue
 
             # ── 按口径分别追踪校验状态 ──
             # 合并报表（is_consolidated=True）时，合并附注和母公司附注各自独立校验；

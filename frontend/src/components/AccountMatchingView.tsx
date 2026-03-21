@@ -1414,6 +1414,16 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     const TOL = 0.5;
     const warnKeys = new Set<string>();
 
+    // 预设范围检查（与 isInPresetScope 逻辑一致）
+    const inScope = (title: string, mode: 'consolidated' | 'parent') => {
+      const presets = mode === 'parent' ? parentPresetAccounts : consolidatedPresetAccounts;
+      if (presets.length === 0) return true;
+      const norm = title.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
+      return presets.some(acct =>
+        acct.keywords.some(kw => norm.includes(kw) || kw.includes(norm))
+      );
+    };
+
     const checkSec = (sec: NoteSection, mode: 'consolidated' | 'parent') => {
       const isContainer = (c: NoteSection) =>
         c.children.length > 0 && c.note_table_ids.length === 0 &&
@@ -1427,6 +1437,8 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       }
       const allSecs = displayChildren.length > 0 ? displayChildren : [sec];
       for (const child of allSecs) {
+        // 只有预设模板范围内的科目才参与勾稽不一致检测
+        if (!inScope(child.title, mode)) continue;
         const si = findStmtForSection(child);
         if (!si) continue;
         const stmtClosing = mode === 'parent' ? (si.company_closing_balance ?? si.closing_balance) : si.closing_balance;
@@ -1441,7 +1453,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     if (noteGroups.mainSec && checkSec(noteGroups.mainSec, 'consolidated')) warnKeys.add('main');
     if (noteGroups.parentSec && checkSec(noteGroups.parentSec, 'parent')) warnKeys.add('parent');
     return warnKeys;
-  }, [noteGroups, findStmtForSection, extractNoteTotals]);
+  }, [noteGroups, findStmtForSection, extractNoteTotals, parentPresetAccounts, consolidatedPresetAccounts]);
 
   // ─── 渲染报表金额提示条 ───
   const renderStmtAmountBar = (item: StatementItem, mode: 'consolidated' | 'parent', sec: NoteSection) => {
@@ -1678,6 +1690,16 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     );
   };
 
+  // ─── 判断附注科目是否在预设模板范围内（只有预设范围内的科目才显示报表vs附注勾稽校验） ───
+  const isInPresetScope = useCallback((sectionTitle: string, mode: 'consolidated' | 'parent'): boolean => {
+    const presets = mode === 'parent' ? parentPresetAccounts : consolidatedPresetAccounts;
+    if (presets.length === 0) return true; // 无预设时不限制
+    const norm = sectionTitle.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
+    return presets.some(acct =>
+      acct.keywords.some(kw => norm.includes(kw) || kw.includes(norm))
+    );
+  }, [parentPresetAccounts, consolidatedPresetAccounts]);
+
   // ─── 递归渲染 section（可折叠） ───
   const renderSectionTree = (sec: NoteSection, seqNo?: string, mode: 'consolidated' | 'parent' = 'consolidated', isTopLevel = false): React.ReactNode => {
     const isCollapsed = collapsedIds.has(sec.id);
@@ -1686,7 +1708,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
 
     // 如果是顶层科目节点但自身没有表格，把金额条下传给子节点
     const selfHasTables = sec.note_table_ids.length > 0;
-    const needPassDown = isTopLevel && !selfHasTables;
+    const needPassDown = isTopLevel && !selfHasTables && isInPresetScope(sec.title, mode);
 
     // 判断是否有多个子节点各自拥有表格且映射到不同的报表科目
     // （如现金流量表项目注释下的多个子类别，每个对应不同的现金流科目）
@@ -1716,8 +1738,10 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       : -1;
 
     // 顶层科目节点：检测勾稽是否不一致，用于标题变色
+    // 只有在预设模板范围内的科目才检测勾稽
     const headerWarn = (() => {
       if (!isTopLevel) return false;
+      if (!isInPresetScope(sec.title, mode)) return false;
       const TOL = 0.5;
       const si = findStmtForSection(sec);
       if (!si) return false;
@@ -1729,6 +1753,9 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
       return false;
     })();
 
+    // 是否显示报表vs附注金额条：仅对预设模板范围内的顶层科目显示
+    const showAmountBar = isTopLevel && selfHasTables && isInPresetScope(sec.title, mode);
+
     return (
       <div key={sec.id} style={{ marginBottom: 8 }}>
         {renderCollapseHeader(sec.id, sec.title, sec.level, hasContent, seqNo, headerWarn)}
@@ -1737,7 +1764,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
             background: cBg, padding: '4px 14px',
             borderRadius: `0 0 ${GT.radiusSm}px ${GT.radiusSm}px`,
           }}>
-            {renderSectionContent(sec, mode, isTopLevel && selfHasTables)}
+            {renderSectionContent(sec, mode, showAmountBar)}
             {sec.children.map((child, ci) => {
               if (needPassDown && !multiChildMode && ci === firstChildWithTable && parentStmtItem) {
                 // 单子节点模式：传入父级找到的报表科目
@@ -1760,6 +1787,8 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     const isCollapsed = collapsedIds.has(sec.id);
     const hasContent = sec.content_paragraphs.length > 0 || sec.note_table_ids.length > 0 || sec.children.length > 0;
     const cBg = lvlBodyBg(sec.level);
+    // 父级已确认在预设范围内（needPassDown 路径），直接显示金额条
+    const showBar = isInPresetScope(sec.title, mode);
 
     return (
       <div key={sec.id} style={{ marginBottom: 8 }}>
@@ -1769,7 +1798,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
             background: cBg, padding: '4px 14px',
             borderRadius: `0 0 ${GT.radiusSm}px ${GT.radiusSm}px`,
           }}>
-            {renderSectionContent(sec, mode, true, stmtItem)}
+            {renderSectionContent(sec, mode, showBar, stmtItem)}
             {sec.children.map((child, ci) => renderSectionTree(child, seqNo ? `${seqNo}.${ci + 1}` : `${ci + 1}`, mode, false))}
           </div>
         )}
