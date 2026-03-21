@@ -217,8 +217,8 @@ class TestBuildFormulaFromPreset:
                      "其他综合收益调整", "其他权益变动", "宣告发放现金股利或利润",
                      "计提减值准备", "其他", "期末余额(账面价值)", "减值准备期末余额"],
             rows=[
-                ["A公司", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1185, 50],
-                ["合计", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1185, 50],
+                ["A公司", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1175, 50],
+                ["合计", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1175, 50],
             ],
         )
         result = analyzer.try_build_formula_from_preset(note)
@@ -246,7 +246,7 @@ class TestBuildFormulaFromPreset:
         assert any("减值" in c["name"] for c in skips)
 
         # 用 check_wide_table_formula 验证公式正确性
-        # 1000 + 200 - 100 + 80 + 20 + 10 - 30 - 0 + 5 = 1185
+        # 1000 + 200 - 100 + 80 + 20 + 10 - 30 - 0 - 5 = 1175
         findings = engine.check_wide_table_formula(note, result)
         assert len(findings) == 0
 
@@ -407,7 +407,7 @@ class TestBuildFormulaFromPreset:
                      "其他综合收益", "其他权益变动", "现金股利",
                      "计提减值", "其他", "年末余额", "减值年末"],
             rows=[
-                ["A公司", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1185, 50],
+                ["A公司", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1175, 50],
             ],
         )
         result = analyzer.try_build_formula_from_preset(note)
@@ -488,7 +488,7 @@ class TestBuildFormulaFromPreset:
                      "其他综合收益调整", "其他权益变动", "宣告发放现金股利或利润",
                      "计提减值准备", "其他", "期末余额(账面价值)", "减值准备期末余额"],
             rows=[
-                ["A公司", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1185, 50],
+                ["A公司", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1175, 50],
             ],
         )
         result = analyzer.try_build_formula_from_preset(note)
@@ -625,11 +625,11 @@ class TestCheckWideTableFormula:
                      "其他综合收益", "其他权益变动", "现金股利",
                      "计提减值", "其他", "期末(账面价值)", "减值准备期末"],
             rows=[
-                ["A公司", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1185, 50],
-                ["小计", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1185, 50],
+                ["A公司", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1175, 50],
+                ["小计", 1000, 50, 200, 100, 80, 20, 10, 30, 0, 5, 1175, 50],
             ],
         )
-        # 公式: 1000 + 200 - 100 + 80 + 20 + 10 - 30 - 0 + 5 = 1185
+        # 公式: 1000 + 200 - 100 + 80 + 20 + 10 - 30 - 0 - 5 = 1175
         formula = self._make_formula([
             {"col_index": 0, "role": "label", "name": "被投资单位"},
             {"col_index": 1, "role": "opening", "sign": "+", "name": "期初"},
@@ -641,7 +641,7 @@ class TestCheckWideTableFormula:
             {"col_index": 7, "role": "movement", "sign": "+", "name": "其他权益变动"},
             {"col_index": 8, "role": "movement", "sign": "-", "name": "现金股利"},
             {"col_index": 9, "role": "movement", "sign": "-", "name": "计提减值"},
-            {"col_index": 10, "role": "movement", "sign": "+", "name": "其他"},
+            {"col_index": 10, "role": "movement", "sign": "-", "name": "其他"},
             {"col_index": 11, "role": "closing", "sign": "=", "name": "期末"},
             {"col_index": 12, "role": "skip", "name": "减值准备期末"},
         ])

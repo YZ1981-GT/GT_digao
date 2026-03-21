@@ -56,11 +56,11 @@ WIDE_TABLE_FORMULA_PRESETS: List[Dict] = [
             {"role": "movement", "sign": "+", "name": "其他权益变动"},
             {"role": "movement", "sign": "-", "name": "宣告发放现金股利或利润"},
             {"role": "movement", "sign": "-", "name": "计提减值准备"},
-            {"role": "movement", "sign": "+", "name": "其他"},
+            {"role": "movement", "sign": "-", "name": "其他"},
             {"role": "closing", "sign": "=", "name": "期末余额(账面价值)"},
             {"role": "skip", "name": "减值准备期末余额"},
         ],
-        "formula": "期初账面价值 + 追加投资 + 投资损益 + 其他综合收益 + 其他权益变动 - 减少投资 - 现金股利 - 计提减值 + 其他 = 期末账面价值",
+        "formula": "期初账面价值 + 追加投资 + 投资损益 + 其他综合收益 + 其他权益变动 - 减少投资 - 现金股利 - 计提减值 - 其他 = 期末账面价值",
     },
     {
         "name": "长期股权投资分类",
@@ -391,11 +391,12 @@ WIDE_TABLE_FORMULA_PRESETS: List[Dict] = [
     },
 
     # ══════════════════════════════════════════════════════════
-    # 十五、债权投资减值准备
+    # 十五、其他债权投资减值准备（必须排在"债权投资"前面，
+    #       因为"其他债权投资"包含"债权投资"子串）
     # ══════════════════════════════════════════════════════════
     {
-        "name": "债权投资减值准备变动",
-        "match_keywords": ["债权投资"],
+        "name": "其他债权投资减值准备变动",
+        "match_keywords": ["其他债权投资"],
         "match_title_keywords": ["减值准备"],
         "exclude_title_keywords": [],
         "template_columns": [
@@ -409,11 +410,11 @@ WIDE_TABLE_FORMULA_PRESETS: List[Dict] = [
     },
 
     # ══════════════════════════════════════════════════════════
-    # 十六、其他债权投资减值准备
+    # 十六、债权投资减值准备
     # ══════════════════════════════════════════════════════════
     {
-        "name": "其他债权投资减值准备变动",
-        "match_keywords": ["其他债权投资"],
+        "name": "债权投资减值准备变动",
+        "match_keywords": ["债权投资"],
         "match_title_keywords": ["减值准备"],
         "exclude_title_keywords": [],
         "template_columns": [
