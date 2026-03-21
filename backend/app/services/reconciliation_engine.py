@@ -1063,6 +1063,17 @@ class ReconciliationEngine:
                         and _amounts_equal(note_opening, rule_closing)):
                     note_closing, note_opening = rule_closing, rule_opening
 
+                # 交叉验证：LLM 提取的值与报表不一致，但规则引擎的值与报表一致时，
+                # 直接采信规则引擎（LLM 可能指向了错误的单元格）
+                if (rule_closing is not None and stmt_closing is not None
+                        and not _amounts_equal(note_closing, stmt_closing)
+                        and _amounts_equal(rule_closing, stmt_closing)):
+                    note_closing = rule_closing
+                if (rule_opening is not None and stmt_opening is not None
+                        and not _amounts_equal(note_opening, stmt_opening)
+                        and _amounts_equal(rule_opening, stmt_opening)):
+                    note_opening = rule_opening
+
                 if note_closing is not None:
                     scope_any_closing_found[scope_key] = True
                 if note_opening is not None:
