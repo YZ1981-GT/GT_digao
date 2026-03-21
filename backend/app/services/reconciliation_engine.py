@@ -674,11 +674,16 @@ class ReconciliationEngine:
         国企报表中，多个科目下有多张表格，只有1级汇总表应与报表余额
         直接核对，其余明细表（按账龄披露、按组合计提、坏账准备计提、
         跌价准备变动、短期薪酬列示等）仅参与表间核对。
+
+        科目关键词同时检查 account_name 和 section_title，
+        避免 OCR 将标题整体作为 account_name 导致科目关键词匹配失败。
         """
         acct = note.account_name or ""
-        if not any(kw in acct for kw in self._DETAIL_SUBTABLE_ACCOUNTS):
-            return False
         title = (note.section_title or "").replace(" ", "").replace("\u3000", "")
+        # 科目关键词：account_name 或 section_title 任一包含即可
+        if not any(kw in acct or kw in title for kw in self._DETAIL_SUBTABLE_ACCOUNTS):
+            return False
+        # 明细子表关键词：必须在 section_title 中出现
         return any(kw in title for kw in self._DETAIL_SUBTABLE_KW)
 
     # 政策/描述性表格的表头特征关键词
