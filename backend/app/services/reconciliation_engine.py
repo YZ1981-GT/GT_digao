@@ -1004,9 +1004,12 @@ class ReconciliationEngine:
                     continue
                 scope_verify_count[scope_key] = _cur_count + 1
 
-                # 获取附注合计值（优先用 LLM 识别的 cell，兜底用规则引擎）
-                note_closing = self._get_cell_value(note, ts.closing_balance_cell)
-                note_opening = self._get_cell_value(note, ts.opening_balance_cell)
+                # ── 提取附注合计值：规则引擎优先，LLM 兜底 ──
+                # 规则引擎通过表头语义确定性地定位期初/期末列，比 LLM 的 cell 引用更可靠。
+                # LLM 仅在规则引擎无法提取时作为兜底。
+
+                # 规则引擎提取
+                rule_closing, rule_opening = self._extract_note_totals_by_rules(note)
 
                 # 特殊处理：营业收入/营业成本合并表格
                 # 这类表格一张表包含收入和成本两组列，需按科目名称定位正确的列
@@ -1015,12 +1018,9 @@ class ReconciliationEngine:
                         note, item.account_name,
                     )
                     if rc_closing is not None:
-                        note_closing = rc_closing
+                        rule_closing = rc_closing
                     if rc_opening is not None:
-                        note_opening = rc_opening
-
-                # 规则引擎：始终运行，用于兜底和交叉验证
-                rule_closing, rule_opening = self._extract_note_totals_by_rules(note)
+                        rule_opening = rc_opening
 
                 # 国企版资产子行项目（如"固定资产原价"、"累计折旧"）：
                 # 从合并附注表格的对应段落提取值，而非使用账面价值合计
@@ -1028,8 +1028,6 @@ class ReconciliationEngine:
                 if comp_section and any(kw in (note.account_name or "") for kw in self._SECTION_EXTRACT_ACCOUNTS):
                     sec_closing, sec_opening = self._extract_component_section_totals(note, comp_section)
                     if sec_closing is not None or sec_opening is not None:
-                        note_closing = sec_closing
-                        note_opening = sec_opening
                         rule_closing = sec_closing
                         rule_opening = sec_opening
 
@@ -1042,37 +1040,18 @@ class ReconciliationEngine:
                         note, sec_kws, section_markers=cfg["section_markers"],
                     )
                     if sub_closing is not None or sub_opening is not None:
-                        note_closing = sub_closing
-                        note_opening = sub_opening
                         rule_closing = sub_closing
                         rule_opening = sub_opening
 
-                # 兜底：LLM 未识别出 cell 时，用规则引擎结果
-                if note_closing is None and rule_closing is not None:
-                    note_closing = rule_closing
-                if note_opening is None and rule_opening is not None:
-                    note_opening = rule_opening
+                # 以规则引擎为主值
+                note_closing = rule_closing
+                note_opening = rule_opening
 
-                # 交叉验证：检测 LLM 是否把期末/期初搞反
-                # 当 LLM 和规则引擎都提取到了值，且 LLM 的 closing 等于规则的 opening
-                # 且 LLM 的 opening 等于规则的 closing，说明 LLM 搞反了，用规则引擎纠正
-                if (note_closing is not None and note_opening is not None
-                        and rule_closing is not None and rule_opening is not None
-                        and not _amounts_equal(note_closing, rule_closing)
-                        and _amounts_equal(note_closing, rule_opening)
-                        and _amounts_equal(note_opening, rule_closing)):
-                    note_closing, note_opening = rule_closing, rule_opening
-
-                # 交叉验证：LLM 提取的值与报表不一致，但规则引擎的值与报表一致时，
-                # 直接采信规则引擎（LLM 可能指向了错误的单元格）
-                if (rule_closing is not None and stmt_closing is not None
-                        and not _amounts_equal(note_closing, stmt_closing)
-                        and _amounts_equal(rule_closing, stmt_closing)):
-                    note_closing = rule_closing
-                if (rule_opening is not None and stmt_opening is not None
-                        and not _amounts_equal(note_opening, stmt_opening)
-                        and _amounts_equal(rule_opening, stmt_opening)):
-                    note_opening = rule_opening
+                # 兜底：规则引擎未提取到时，用 LLM 识别的 cell
+                if note_closing is None:
+                    note_closing = self._get_cell_value(note, ts.closing_balance_cell)
+                if note_opening is None:
+                    note_opening = self._get_cell_value(note, ts.opening_balance_cell)
 
                 if note_closing is not None:
                     scope_any_closing_found[scope_key] = True
@@ -1085,31 +1064,19 @@ class ReconciliationEngine:
                         scope_matched_closing[scope_key] = True
                     elif is_partial and stmt_closing >= note_closing - TOLERANCE:
                         scope_matched_closing[scope_key] = True
-                    elif (rule_closing is not None
-                          and not _amounts_equal(note_closing, rule_closing)
-                          and _amounts_equal(stmt_closing, rule_closing)):
-                        # LLM 指向了错误行（如原价合计而非账面价值合计），
-                        # 规则引擎的值与报表一致 → 采信规则引擎，视为通过
-                        scope_matched_closing[scope_key] = True
                     else:
-                        # 如果规则引擎值与报表更接近，用规则引擎值报告差异
-                        effective_closing = note_closing
-                        if (rule_closing is not None
-                                and not _amounts_equal(note_closing, rule_closing)
-                                and abs((rule_closing or 0) - stmt_closing) < abs(note_closing - stmt_closing)):
-                            effective_closing = rule_closing
-                        diff = round(stmt_closing - effective_closing, 2)
+                        diff = round(stmt_closing - note_closing, 2)
                         scope_desc = f"（{scope_label}）" if scope_label else ""
                         scope_findings_closing[scope_key].append(self._make_finding(
                             category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
                             account_name=item.account_name,
                             statement_amount=stmt_closing,
-                            note_amount=effective_closing,
+                            note_amount=note_closing,
                             difference=diff,
                             location=f"附注-{item.account_name}-{note.section_title}-期末余额",
-                            description=f"报表期末余额{scope_desc}{stmt_closing}与附注合计{effective_closing}不一致，差异{diff}",
+                            description=f"报表期末余额{scope_desc}{stmt_closing}与附注合计{note_closing}不一致，差异{diff}",
                             risk_level=self._assess_risk(abs(diff), stmt_closing),
-                            reasoning=f"校验公式: 报表期末余额{scope_desc}({stmt_closing}) - 附注合计({effective_closing}) = {diff}",
+                            reasoning=f"校验公式: 报表期末余额{scope_desc}({stmt_closing}) - 附注合计({note_closing}) = {diff}",
                             note_table_ids=[note_id],
                         ))
 
@@ -1119,29 +1086,19 @@ class ReconciliationEngine:
                         scope_matched_opening[scope_key] = True
                     elif is_partial and stmt_opening >= note_opening - TOLERANCE:
                         scope_matched_opening[scope_key] = True
-                    elif (rule_opening is not None
-                          and not _amounts_equal(note_opening, rule_opening)
-                          and _amounts_equal(stmt_opening, rule_opening)):
-                        # LLM 指向了错误行，规则引擎的值与报表一致 → 采信规则引擎
-                        scope_matched_opening[scope_key] = True
                     else:
-                        effective_opening = note_opening
-                        if (rule_opening is not None
-                                and not _amounts_equal(note_opening, rule_opening)
-                                and abs((rule_opening or 0) - stmt_opening) < abs(note_opening - stmt_opening)):
-                            effective_opening = rule_opening
-                        diff = round(stmt_opening - effective_opening, 2)
+                        diff = round(stmt_opening - note_opening, 2)
                         scope_desc = f"（{scope_label}）" if scope_label else ""
                         scope_findings_opening[scope_key].append(self._make_finding(
                             category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
                             account_name=item.account_name,
                             statement_amount=stmt_opening,
-                            note_amount=effective_opening,
+                            note_amount=note_opening,
                             difference=diff,
                             location=f"附注-{item.account_name}-{note.section_title}-期初余额",
-                            description=f"报表期初余额{scope_desc}{stmt_opening}与附注合计{effective_opening}不一致，差异{diff}",
+                            description=f"报表期初余额{scope_desc}{stmt_opening}与附注合计{note_opening}不一致，差异{diff}",
                             risk_level=self._assess_risk(abs(diff), stmt_opening),
-                            reasoning=f"校验公式: 报表期初余额{scope_desc}({stmt_opening}) - 附注合计({effective_opening}) = {diff}",
+                            reasoning=f"校验公式: 报表期初余额{scope_desc}({stmt_opening}) - 附注合计({note_opening}) = {diff}",
                             note_table_ids=[note_id],
                         ))
 
