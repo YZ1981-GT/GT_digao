@@ -244,6 +244,12 @@ class ReportReviewEngine:
         cross_table_check_count = 0  # 跨表交叉核对发现的问题数
         wide_table_check_count = 0  # 宽表横向公式校验的表格数
         wide_table_match_count = 0  # 宽表横向公式相符的表格数
+        aging_check_count = 0  # 账龄衔接校验的表格数
+        aging_match_count = 0  # 账龄衔接无异常的表格数
+        book_value_check_count = 0  # 纵向勾稽校验的表格数
+        book_value_match_count = 0  # 纵向勾稽无异常的表格数
+        completeness_check_count = 0  # 完整性校验的表格数
+        completeness_match_count = 0  # 完整性无异常的表格数
         llm_reanalyzed_count = 0  # LLM 二次校验的表格数
         llm_fixed_count = 0  # LLM 修正结构的表格数
 
@@ -479,10 +485,52 @@ class ReportReviewEngine:
                     ratio_f = self.reconciliation.check_ratio_columns(note, ts)
                     note_findings.extend(ratio_f)
 
+                    # 账龄衔接校验
+                    if self.reconciliation._is_aging_table(note):
+                        aging_check_count += 1
+                        aging_f = self.reconciliation.check_aging_transition(note, ts)
+                        if not aging_f:
+                            aging_match_count += 1
+                        note_findings.extend(aging_f)
+
+                    # 纵向勾稽（账面余额 - 准备 = 账面价值）
+                    bv_f = self.reconciliation.check_book_value_formula(note, ts)
+                    if bv_f:
+                        book_value_check_count += 1
+                    else:
+                        # 只有实际执行了校验才计数（方法内部判断是否适用）
+                        _bv_applicable = len(note.headers or []) >= 3
+                        if _bv_applicable:
+                            book_value_check_count += 1
+                            book_value_match_count += 1
+                    note_findings.extend(bv_f)
+
+                    # 完整性校验（金额非零时文本列不应为空）
+                    comp_f = self.reconciliation.check_data_completeness(note, ts)
+                    if comp_f:
+                        completeness_check_count += 1
+                    note_findings.extend(comp_f)
+
+                    # 三阶段ECL表校验（横向：各阶段之和=合计；纵向：期初+变动=期末）
+                    ecl_f = self.reconciliation.check_ecl_three_stage_table(note, ts)
+                    note_findings.extend(ecl_f)
+
                     # 未分配利润专用校验
                     if self.reconciliation._is_undistributed_profit_table(note):
                         udp_f = self.reconciliation.check_undistributed_profit(note, ts)
                         note_findings.extend(udp_f)
+
+                    # 财务费用明细纵向校验 (F64-3)
+                    fe_f = self.reconciliation.check_financial_expense_detail(note, ts)
+                    note_findings.extend(fe_f)
+
+                    # 设定受益计划变动表校验 (F49-5~10a)
+                    bp_f = self.reconciliation.check_benefit_plan_movement(note, ts)
+                    note_findings.extend(bp_f)
+
+                    # 股本/实收资本小计列校验 (F53-3a)
+                    eq_f = self.reconciliation.check_equity_subtotal_detail(note, ts)
+                    note_findings.extend(eq_f)
 
                     _first_pass_match[note.id] = note_match
                     if note_findings:
@@ -597,10 +645,38 @@ class ReportReviewEngine:
                         ratio_f = self.reconciliation.check_ratio_columns(note, ts)
                         _first_pass_findings.extend(ratio_f)
 
+                        # 账龄衔接校验
+                        aging_f = self.reconciliation.check_aging_transition(note, ts)
+                        _first_pass_findings.extend(aging_f)
+
+                        # 纵向勾稽
+                        bv_f = self.reconciliation.check_book_value_formula(note, ts)
+                        _first_pass_findings.extend(bv_f)
+
+                        # 完整性校验
+                        comp_f = self.reconciliation.check_data_completeness(note, ts)
+                        _first_pass_findings.extend(comp_f)
+
+                        # 三阶段ECL表校验
+                        ecl_f = self.reconciliation.check_ecl_three_stage_table(note, ts)
+                        _first_pass_findings.extend(ecl_f)
+
                         # 未分配利润专用校验
                         if self.reconciliation._is_undistributed_profit_table(note):
                             udp_f = self.reconciliation.check_undistributed_profit(note, ts)
                             _first_pass_findings.extend(udp_f)
+
+                        # 财务费用明细纵向校验 (F64-3)
+                        fe_f = self.reconciliation.check_financial_expense_detail(note, ts)
+                        _first_pass_findings.extend(fe_f)
+
+                        # 设定受益计划变动表校验 (F49-5~10a)
+                        bp_f = self.reconciliation.check_benefit_plan_movement(note, ts)
+                        _first_pass_findings.extend(bp_f)
+
+                        # 股本/实收资本小计列校验 (F53-3a)
+                        eq_f = self.reconciliation.check_equity_subtotal_detail(note, ts)
+                        _first_pass_findings.extend(eq_f)
 
                     logger.info(
                         "反馈循环完成：LLM 修正 %d 个表格结构，重新校验后剩余 %d 个本地校验问题",
@@ -722,6 +798,56 @@ class ReportReviewEngine:
             cross_table_check_count += len(equity_income_findings)
             all_findings.extend(equity_income_findings)
 
+            # ── 信用减值损失/资产减值损失 vs 各科目计提合计 (X-2, X-3) ──
+            impairment_loss_findings = self.reconciliation.check_impairment_loss_consistency(
+                session.statement_items, session.note_tables, table_structures,
+            )
+            cross_table_check_count += len(impairment_loss_findings)
+            all_findings.extend(impairment_loss_findings)
+
+            # ── 在建工程转固 / 开发支出转无形资产 (X-4, X-5) ──
+            transfer_findings = self.reconciliation.check_transfer_consistency(
+                session.note_tables, table_structures,
+            )
+            cross_table_check_count += len(transfer_findings)
+            all_findings.extend(transfer_findings)
+
+            # ── 二级明细校验 (D-series) ──
+            sub_detail_findings = self.reconciliation.check_sub_item_detail(
+                session.matching_map, session.statement_items,
+                session.note_tables, table_structures,
+            )
+            cross_table_check_count += len(sub_detail_findings)
+            all_findings.extend(sub_detail_findings)
+
+            # ── 盈余公积提取 vs 未分配利润 (X-7) ──
+            surplus_findings = self.reconciliation.check_surplus_reserve_consistency(
+                session.note_tables,
+            )
+            cross_table_check_count += len(surplus_findings)
+            all_findings.extend(surplus_findings)
+
+            # ── 货币资金vs现金等价物 / 一年内到期vs各长期科目 (X-10, X-11, X-12) ──
+            maturity_findings = self.reconciliation.check_maturity_reclassification(
+                session.statement_items, session.note_tables, table_structures,
+            )
+            cross_table_check_count += len(maturity_findings)
+            all_findings.extend(maturity_findings)
+
+            # ── 其他综合收益 vs 利润表 (X-14, 上市版特有) ──
+            oci_findings = self.reconciliation.check_oci_vs_income_statement(
+                session.statement_items, session.note_tables,
+            )
+            cross_table_check_count += len(oci_findings)
+            all_findings.extend(oci_findings)
+
+            # ── 所有者权益变动表 vs 附注 (E-series) ──
+            equity_change_findings = self.reconciliation.check_equity_change_vs_notes(
+                session.sheet_data, session.note_tables, table_structures,
+            )
+            cross_table_check_count += len(equity_change_findings)
+            all_findings.extend(equity_change_findings)
+
             # ── 受限资产交叉披露验证（LLM 辅助）──
             try:
                 restricted_findings = await self.reconciliation.check_restricted_asset_disclosure(
@@ -731,6 +857,37 @@ class ReportReviewEngine:
                 all_findings.extend(restricted_findings)
             except Exception as e:
                 logger.warning("受限资产交叉披露验证失败: %s", e)
+
+            # ── 所得税费用调整过程表校验 (F74-4~F74-6) ──
+            income_tax_adj_findings = self.reconciliation.check_income_tax_adjustment_process(
+                session.statement_items, session.note_tables,
+            )
+            cross_table_check_count += len(income_tax_adj_findings)
+            all_findings.extend(income_tax_adj_findings)
+
+            # ── 其他综合收益明细表结构校验 (F75-3~F75-7) ──
+            oci_detail_findings = self.reconciliation.check_oci_detail_structure(
+                session.note_tables,
+            )
+            cross_table_check_count += len(oci_detail_findings)
+            all_findings.extend(oci_detail_findings)
+
+            # ── 补充资料折旧/摊销精确交叉校验 (F83-3~F83-5a) ──
+            supp_depr_findings = self.reconciliation.check_supplement_depreciation_cross(
+                session.statement_items, session.note_tables, table_structures,
+            )
+            cross_table_check_count += len(supp_depr_findings)
+            all_findings.extend(supp_depr_findings)
+
+            # ── LLM 文本合理性审核 (40+ formulas) ──
+            try:
+                text_reason_findings = await self.reconciliation.check_text_reasonableness(
+                    session.note_tables, oai,
+                )
+                cross_table_check_count += len(text_reason_findings)
+                all_findings.extend(text_reason_findings)
+            except Exception as e:
+                logger.warning("LLM文本合理性审核失败: %s", e)
 
         # 变动分析：1级报表科目 + 2级附注明细行
         logger.info(
@@ -950,6 +1107,18 @@ class ReportReviewEngine:
                 recon_details.append(f"宽表横向公式校验（LLM辅助）：共校验 {wide_table_check_count} 个表格，全部相符")
             else:
                 recon_details.append(f"宽表横向公式校验（LLM辅助）：共校验 {wide_table_check_count} 个表格，相符 {wide_table_match_count} 个，不符 {wide_table_check_count - wide_table_match_count} 个")
+        if aging_check_count > 0:
+            if aging_match_count == aging_check_count:
+                recon_details.append(f"账龄衔接校验：共校验 {aging_check_count} 个表格，全部合理")
+            else:
+                recon_details.append(f"账龄衔接校验：共校验 {aging_check_count} 个表格，合理 {aging_match_count} 个，异常 {aging_check_count - aging_match_count} 个")
+        if book_value_check_count > 0:
+            if book_value_match_count == book_value_check_count:
+                recon_details.append(f"纵向勾稽校验（余额-准备=价值）：共校验 {book_value_check_count} 个表格，全部相符")
+            else:
+                recon_details.append(f"纵向勾稽校验（余额-准备=价值）：共校验 {book_value_check_count} 个表格，相符 {book_value_match_count} 个，不符 {book_value_check_count - book_value_match_count} 个")
+        if completeness_check_count > 0:
+            recon_details.append(f"完整性校验：发现 {completeness_check_count} 个表格存在金额非零但文本列为空的问题")
         if cross_table_check_count > 0:
             recon_details.append(f"跨表交叉核对：发现 {cross_table_check_count} 个不一致")
         elif session.matching_map:
