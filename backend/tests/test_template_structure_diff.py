@@ -231,6 +231,88 @@ class TestComparePresetColumns:
         assert diff is None
 
 
+# ─── 多层容错逻辑测试 ───
+
+class TestMultiLayerFallback:
+    """测试结构对比的多层容错：
+    表头有差异 → try_build_formula_from_preset 成功 → 不报错
+    表头有差异 → 本地构建失败 → 已有 LLM 结构有公式 → 不报错
+    表头有差异 → 全部失败 → 报错
+    """
+
+    def test_diff_but_local_formula_build_succeeds(self):
+        """表头有差异（extra列），但 try_build_formula_from_preset 仍能构建公式 → 不报错。
+
+        长期待摊费用加了一个"备注"列，但期初/增加/摊销/减少/期末都在，本地构建应成功。
+        """
+        note = _note(
+            id="f1", name="长期待摊费用", title="长期待摊费用",
+            headers=["项目", "期初余额", "本期增加", "本期摊销", "其他减少", "期末余额", "备注"],
+            rows=[["装修费", 100, 20, 10, 0, 110, ""]],
+        )
+        # _compare_preset_columns 会报 extra_cols
+        preset = TableStructureAnalyzer._find_preset_for_note(note)
+        assert preset is not None
+        diff = ReportReviewEngine._compare_preset_columns(note, preset)
+        assert diff is not None  # 有差异（备注列）
+        assert "备注" in diff["extra_cols"]
+
+        # 但 try_build_formula_from_preset 应该能成功构建
+        formula = TableStructureAnalyzer.try_build_formula_from_preset(note)
+        assert formula is not None  # 本地构建成功 → 在 review_stream 中会跳过报错
+
+    def test_diff_with_reordered_cols_local_build_succeeds(self):
+        """列顺序与预设不同，但关键列都在，本地构建成功 → 不报错。"""
+        note = _note(
+            id="f2", name="存货", title="存货跌价准备变动",
+            # 把"其他增加"和"计提"顺序对调
+            headers=["项目", "期初余额", "其他增加", "计提", "转回或转销", "其他减少", "期末余额"],
+            rows=[["原材料", 100, 5, 20, 10, 0, 115]],
+        )
+        preset = TableStructureAnalyzer._find_preset_for_note(note)
+        assert preset is not None
+        # 表头差异检查：列都在，不应有差异
+        diff = ReportReviewEngine._compare_preset_columns(note, preset)
+        assert diff is None  # 所有公式列都匹配
+
+    def test_diff_missing_cols_local_build_fails_no_llm(self):
+        """缺少关键列，本地构建也失败 → 应报错。
+
+        开发支出只有期初和期末，缺少所有变动列，本地构建需要 opening+closing 但
+        headers < 5 会导致 try_build_formula_from_preset 返回 None。
+        """
+        note = _note(
+            id="f3", name="开发支出", title="开发支出",
+            headers=["项目", "期初余额", "期末余额"],
+            rows=[["项目A", 100, 120]],
+        )
+        preset = TableStructureAnalyzer._find_preset_for_note(note)
+        assert preset is not None
+        diff = ReportReviewEngine._compare_preset_columns(note, preset)
+        assert diff is not None
+        assert len(diff["missing_cols"]) >= 2
+
+        # 本地构建也应失败（headers < 5）
+        formula = TableStructureAnalyzer.try_build_formula_from_preset(note)
+        assert formula is None  # 本地构建失败 → 在 review_stream 中会继续检查 LLM
+
+    def test_minor_diff_with_enough_cols_local_build_succeeds(self):
+        """在建工程缺少"其他减少"列，但有5+列且有期初/期末，本地构建可能成功。"""
+        note = _note(
+            id="f4", name="在建工程", title="重要在建工程项目变动",
+            headers=["工程名称", "预算数", "期初余额", "本期增加", "转入固定资产", "期末余额"],
+            rows=[["工程A", 500, 100, 50, 30, 120]],
+        )
+        preset = TableStructureAnalyzer._find_preset_for_note(note)
+        assert preset is not None
+        diff = ReportReviewEngine._compare_preset_columns(note, preset)
+        assert diff is not None  # 缺少"其他减少"
+
+        # 本地构建：有6列 >= 5，有期初/期末 → 应该能构建
+        formula = TableStructureAnalyzer.try_build_formula_from_preset(note)
+        assert formula is not None  # 本地构建成功 → 不报错
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v", "--tb=short"])

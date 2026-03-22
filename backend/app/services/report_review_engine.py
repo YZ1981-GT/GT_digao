@@ -353,7 +353,10 @@ class ReportReviewEngine:
         has_formula_count = sum(1 for ts in table_structures.values() if ts.has_balance_formula)
 
         # ── 预设公式表格结构对比：将识别到的表格与预设公式期望的列结构进行比较 ──
+        # 逻辑：表头有差异时，依次尝试本地公式构建 → 已有LLM结构 → LLM重新识别，
+        #       只要任一方式能确认公式仍可适用，就不报错。
         structure_diffs: List[Dict] = []
+        _llm_structure_check_notes: List[tuple] = []  # (note, preset, diff) 需要 LLM 确认的
         if session.note_tables:
             for note in session.note_tables:
                 if not note.headers or len(note.headers) < 3:
@@ -364,8 +367,68 @@ class ReportReviewEngine:
                     continue
                 # 对比实际表头与预设公式列
                 diff = self._compare_preset_columns(note, preset)
-                if diff:
-                    structure_diffs.append(diff)
+                if not diff:
+                    continue  # 表头完全匹配，无需进一步检查
+
+                # ── 第二层：尝试本地公式构建（try_build_formula_from_preset）──
+                # 如果能成功构建公式，说明差异不影响公式执行
+                local_formula = TableStructureAnalyzer.try_build_formula_from_preset(note)
+                if local_formula is not None:
+                    continue  # 本地构建成功，差异可忽略
+
+                # ── 第三层：检查已有的 LLM 识别结构 ──
+                existing_ts = table_structures.get(note.id)
+                if existing_ts and existing_ts.has_balance_formula:
+                    continue  # LLM 已识别出余额变动结构，差异可忽略
+
+                # 需要 LLM 进一步确认
+                _llm_structure_check_notes.append((note, preset, diff))
+
+        # ── 第四层：对剩余有差异的表格调用 LLM 重新识别 ──
+        if _llm_structure_check_notes and oai:
+            async def _llm_check_one(note: NoteTable, preset: Dict, diff: Dict) -> Optional[Dict]:
+                try:
+                    t_hint, s_hint = _build_hints_for_note(note.id)
+                    ts = await self.table_analyzer.reanalyze_with_llm(
+                        note, oai,
+                        template_hint=t_hint,
+                        statement_amount_hint=s_hint,
+                        error_hint=f"表格结构与预设'{preset.get('name', '')}'存在差异: {diff['description']}",
+                    )
+                    # reanalyze_with_llm 返回新结构或 None（结构未变）
+                    # 检查新结构或原结构是否有余额变动公式
+                    if ts and ts.has_balance_formula:
+                        # LLM 重新识别后确认有公式结构，更新缓存
+                        table_structures[note.id] = ts
+                        return None  # 不报错
+                    # 再检查原结构（reanalyze 可能返回 None 表示结构未变）
+                    existing = table_structures.get(note.id)
+                    if existing and existing.has_balance_formula:
+                        return None
+                    return diff  # LLM 也无法确认，报错
+                except Exception as e:
+                    logger.warning("LLM 结构确认失败 %s: %s", note.id, e)
+                    return diff  # LLM 调用失败，保守报错
+
+            semaphore_struct = asyncio.Semaphore(3)
+
+            async def _llm_check_with_limit(note, preset, diff):
+                async with semaphore_struct:
+                    return await _llm_check_one(note, preset, diff)
+
+            llm_results = await asyncio.gather(
+                *[_llm_check_with_limit(n, p, d) for n, p, d in _llm_structure_check_notes],
+                return_exceptions=True,
+            )
+            for r in llm_results:
+                if isinstance(r, Exception):
+                    continue
+                if r is not None:
+                    structure_diffs.append(r)
+        elif _llm_structure_check_notes:
+            # 没有 LLM 服务，直接报错
+            for _, _, diff in _llm_structure_check_notes:
+                structure_diffs.append(diff)
 
         struct_details = [
             f"共识别 {len(table_structures)} 个附注表格",
