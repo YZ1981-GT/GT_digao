@@ -181,6 +181,20 @@ async def upload_files(
                         items = report_parser.extract_statement_items(sheet)
                         session.statement_items.extend(items)
 
+                    # 提取编制单位名称（从原始单元格中查找"编制单位：xxx"）
+                    if not session.entity_name and excel_result.sheets:
+                        import re as _re_entity
+                        for sd in excel_result.sheets:
+                            if session.entity_name:
+                                break
+                            for cell in sd.cells:
+                                cell_str = str(cell.value or "").strip()
+                                if "编制单位" in cell_str:
+                                    m = _re_entity.search(r'编制单位[：:]\s*(.+)', cell_str)
+                                    if m:
+                                        session.entity_name = m.group(1).strip()
+                                        break
+
                 elif ext in ('.docx', '.doc'):
                     word_result = await report_parser.parse_word(tmp_path)
                     # 用解析后的文本重新分类（上面分类时 content_text 为空）
@@ -780,6 +794,12 @@ async def export_report(req: ExportRequest):
                   else [f for f in findings
                         if f.confirmation_status != FindingConfirmationStatus.DISMISSED])
 
+        # ── 从会话数据中获取编制单位名称 ──
+        entity_name = ""
+        session = _sessions.get(session_id)
+        if session:
+            entity_name = session.entity_name or ""
+
         doc = Document()
 
         # ── 页面设置：页边距 ──
@@ -803,6 +823,11 @@ async def export_report(req: ExportRequest):
         _set_para_spacing(title_p, before=1.0, after=0.5)
         title_run = title_p.add_run("审计报告复核结果")
         _set_run_font(title_run, size=Pt(18), bold=True)
+
+        # ── 编制单位 ──
+        if entity_name:
+            _add_body_para(doc, f"编制单位：{entity_name}",
+                           before=0.3, after=0.3)
 
         # ── 基本信息 ──
         _add_body_para(doc, f"生成时间：{datetime.now().strftime('%Y年%m月%d日 %H:%M')}",

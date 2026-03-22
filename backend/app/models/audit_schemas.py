@@ -683,6 +683,7 @@ class ReportReviewSession(BaseModel):
     finding_conversations: Dict[str, 'FindingConversation'] = Field(default_factory=dict, description="问题确认对话")
     page_image_dir: Optional[str] = Field(None, description="页面截图存储目录路径")
     source_file_names: Dict[str, str] = Field(default_factory=dict, description="file_id → 原始文件名映射")
+    entity_name: str = Field("", description="编制单位名称（从报表表头自动提取）")
     status: str = Field("created", description="会话状态：created/parsed/matched/analyzing_structure/reviewing/completed")
     created_at: str = Field(..., description="创建时间ISO格式")
 
