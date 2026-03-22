@@ -410,7 +410,7 @@ class ReportReviewEngine:
                     logger.warning("LLM 结构确认失败 %s: %s", note.id, e)
                     return diff  # LLM 调用失败，保守报错
 
-            semaphore_struct = asyncio.Semaphore(3)
+            semaphore_struct = asyncio.Semaphore(5)
 
             async def _llm_check_with_limit(note, preset, diff):
                 async with semaphore_struct:
@@ -483,10 +483,9 @@ class ReportReviewEngine:
                 template_type=config.template_type.value if config.template_type else None,
             )
 
-            # ── LLM 二次校验：金额不一致或未提取到值时，调用 LLM 重新识别表格结构 ──
-            if amount_findings and oai:
-                # 收集不一致 finding 涉及的附注表格 ID（包括"未找到值"的 finding）
-                mismatch_note_ids: set = set()
+            # 收集金额不一致涉及的附注表格 ID（稍后与本地校验错误合并，统一做一次 LLM reanalyze）
+            mismatch_note_ids: set = set()
+            if amount_findings:
                 not_found_tag = self.reconciliation.NOTE_VALUE_NOT_FOUND_TAG
                 not_found_count = sum(1 for f in amount_findings if not_found_tag in (f.description or ""))
                 mismatch_count = len(amount_findings) - not_found_count
@@ -502,73 +501,9 @@ class ReportReviewEngine:
                         msg_parts.append(f"{not_found_count} 个未提取到附注合计值")
                     yield json.dumps({
                         "status": "phase_progress", "phase": "reconciliation",
-                        "message": f"初步校验发现 {'、'.join(msg_parts)}，正在调用 LLM 校验 {len(mismatch_note_ids)} 个表格结构...",
+                        "message": f"初步校验发现 {'、'.join(msg_parts)}",
                     }, ensure_ascii=False)
                     await asyncio.sleep(0)
-
-                    note_map_for_recheck = {n.id: n for n in session.note_tables}
-                    updated_note_ids: set = set()
-                    recheck_semaphore = asyncio.Semaphore(3)
-
-                    async def _reanalyze_one(nid: str):
-                        note = note_map_for_recheck.get(nid)
-                        if not note:
-                            return (nid, None)
-                        t_hint, s_hint = _build_hints_for_note(nid)
-                        async with recheck_semaphore:
-                            new_ts = await self.table_analyzer.reanalyze_with_llm(
-                                note, oai,
-                                template_hint=t_hint,
-                                statement_amount_hint=s_hint,
-                            )
-                            return (nid, new_ts)
-
-                    recheck_results = await asyncio.gather(
-                        *[_reanalyze_one(nid) for nid in mismatch_note_ids],
-                        return_exceptions=True,
-                    )
-
-                    for r in recheck_results:
-                        if isinstance(r, Exception):
-                            continue
-                        nid, new_ts = r
-                        llm_reanalyzed_count += 1
-                        _llm_reanalyzed_ids.add(nid)
-                        if new_ts is not None:
-                            # LLM 返回了不同的结构，更新并标记
-                            table_structures[nid] = new_ts
-                            updated_note_ids.add(nid)
-                            llm_fixed_count += 1
-
-                    if updated_note_ids:
-                        # 用更新后的结构重新核对金额
-                        new_amount_findings = self.reconciliation.check_amount_consistency(
-                            session.matching_map, session.statement_items,
-                            session.note_tables, table_structures,
-                            note_sections=session.note_sections,
-                            template_type=config.template_type.value if config.template_type else None,
-                        )
-                        # 替换原始 findings
-                        amount_findings = new_amount_findings
-                        logger.info(
-                            "LLM 二次校验完成：重新分析 %d 个表格，修正 %d 个，"
-                            "金额不一致从 %d 个变为 %d 个",
-                            llm_reanalyzed_count, llm_fixed_count,
-                            len(amount_findings) + llm_fixed_count,  # 原始数量近似
-                            len(new_amount_findings),
-                        )
-
-                        yield json.dumps({
-                            "status": "phase_progress", "phase": "reconciliation",
-                            "message": f"LLM 校验完成：修正 {llm_fixed_count} 个表格结构，重新核对后剩余 {len(new_amount_findings)} 个不一致",
-                        }, ensure_ascii=False)
-                        await asyncio.sleep(0)
-                    else:
-                        yield json.dumps({
-                            "status": "phase_progress", "phase": "reconciliation",
-                            "message": f"LLM 校验完成：{llm_reanalyzed_count} 个表格结构确认无误",
-                        }, ensure_ascii=False)
-                        await asyncio.sleep(0)
 
             # 统计报表vs附注比对
             amount_check_count = len(session.matching_map.entries)
@@ -757,39 +692,47 @@ class ReportReviewEngine:
                         local_error_note_ids.add(note.id)
                     _first_pass_findings.extend(note_findings)
 
-            # ── LLM 反馈循环：对本地校验失败且未被 LLM 重新分析过的表格，触发 LLM 重新识别 ──
-            retry_note_ids = local_error_note_ids - _llm_reanalyzed_ids
-            if retry_note_ids and oai:
+            # ── 统一 LLM 反馈循环：合并金额不一致 + 本地校验失败的表格，一次性 LLM reanalyze ──
+            all_problem_note_ids = mismatch_note_ids | local_error_note_ids
+            if all_problem_note_ids and oai:
                 logger.info(
-                    "本地校验发现 %d 个表格有问题，其中 %d 个未经 LLM 重新分析，触发反馈循环",
-                    len(local_error_note_ids), len(retry_note_ids),
+                    "合并 LLM 反馈循环：金额不一致 %d 个 + 本地校验失败 %d 个 = 共 %d 个表格需 LLM 复核",
+                    len(mismatch_note_ids), len(local_error_note_ids), len(all_problem_note_ids),
                 )
                 yield json.dumps({
                     "status": "phase_progress", "phase": "reconciliation",
-                    "message": f"本地校验发现 {len(local_error_note_ids)} 个表格有差异，正在对 {len(retry_note_ids)} 个表格进行 LLM 结构复核...",
+                    "message": f"正在对 {len(all_problem_note_ids)} 个有差异的表格进行 LLM 结构复核...",
                 }, ensure_ascii=False)
                 await asyncio.sleep(0)
 
                 # 收集每个表格的本地校验错误描述，传递给 LLM 作为修正参考
                 _note_error_hints: Dict[str, str] = {}
+                for f in amount_findings:
+                    if f.note_table_ids:
+                        for nid in f.note_table_ids:
+                            if nid in all_problem_note_ids:
+                                existing = _note_error_hints.get(nid, "")
+                                desc = f.description or ""
+                                if desc and desc not in existing:
+                                    _note_error_hints[nid] = (existing + "\n- " + desc).strip()
                 for f in _first_pass_findings:
                     if f.note_table_ids:
                         for nid in f.note_table_ids:
-                            if nid in retry_note_ids:
+                            if nid in all_problem_note_ids:
                                 existing = _note_error_hints.get(nid, "")
                                 desc = f.description or ""
                                 if desc and desc not in existing:
                                     _note_error_hints[nid] = (existing + "\n- " + desc).strip()
 
-                retry_semaphore = asyncio.Semaphore(3)
+                combined_semaphore = asyncio.Semaphore(5)
 
-                async def _retry_reanalyze(nid: str):
+                async def _combined_reanalyze(nid: str):
                     note = note_map_tmp_recheck.get(nid)
                     if not note:
                         return (nid, None)
                     t_hint, s_hint = _build_hints_for_note(nid)
                     error_hint = _note_error_hints.get(nid)
-                    async with retry_semaphore:
+                    async with combined_semaphore:
                         new_ts = await self.table_analyzer.reanalyze_with_llm(
                             note, oai,
                             template_hint=t_hint,
@@ -798,13 +741,13 @@ class ReportReviewEngine:
                         )
                         return (nid, new_ts)
 
-                retry_results = await asyncio.gather(
-                    *[_retry_reanalyze(nid) for nid in retry_note_ids],
+                combined_results = await asyncio.gather(
+                    *[_combined_reanalyze(nid) for nid in all_problem_note_ids],
                     return_exceptions=True,
                 )
 
-                retry_updated_ids: set = set()
-                for r in retry_results:
+                updated_note_ids: set = set()
+                for r in combined_results:
                     if isinstance(r, Exception):
                         continue
                     nid, new_ts = r
@@ -812,20 +755,28 @@ class ReportReviewEngine:
                     _llm_reanalyzed_ids.add(nid)
                     if new_ts is not None:
                         table_structures[nid] = new_ts
-                        retry_updated_ids.add(nid)
+                        updated_note_ids.add(nid)
                         llm_fixed_count += 1
 
-                if retry_updated_ids:
-                    # 结构已更新，重新运行本地校验（仅对更新的表格）
-                    # 先移除第一轮中这些表格产生的 findings
+                if updated_note_ids:
+                    # 用更新后的结构重新核对金额
+                    new_amount_findings = self.reconciliation.check_amount_consistency(
+                        session.matching_map, session.statement_items,
+                        session.note_tables, table_structures,
+                        note_sections=session.note_sections,
+                        template_type=config.template_type.value if config.template_type else None,
+                    )
+                    amount_findings = new_amount_findings
+
+                    # 重新运行本地校验（仅对更新的表格）
                     new_first_pass = []
                     for f in _first_pass_findings:
-                        if f.note_table_ids and set(f.note_table_ids) & retry_updated_ids:
+                        if f.note_table_ids and set(f.note_table_ids) & updated_note_ids:
                             continue  # 移除旧 finding
                         new_first_pass.append(f)
                     _first_pass_findings = new_first_pass
 
-                    for nid in retry_updated_ids:
+                    for nid in updated_note_ids:
                         note = note_map_tmp_recheck.get(nid)
                         ts = table_structures.get(nid)
                         if not note or not ts:
@@ -865,48 +816,41 @@ class ReportReviewEngine:
                         ratio_f = self.reconciliation.check_ratio_columns(note, ts)
                         _first_pass_findings.extend(ratio_f)
 
-                        # 账龄衔接校验
                         aging_f = self.reconciliation.check_aging_transition(note, ts)
                         _first_pass_findings.extend(aging_f)
 
-                        # 纵向勾稽
                         bv_f = self.reconciliation.check_book_value_formula(note, ts)
                         _first_pass_findings.extend(bv_f)
 
-                        # 完整性校验
                         comp_f = self.reconciliation.check_data_completeness(note, ts)
                         _first_pass_findings.extend(comp_f)
 
-                        # 三阶段ECL表校验
                         ecl_f = self.reconciliation.check_ecl_three_stage_table(note, ts)
                         _first_pass_findings.extend(ecl_f)
 
-                        # 未分配利润专用校验
                         if self.reconciliation._is_undistributed_profit_table(note):
                             udp_f = self.reconciliation.check_undistributed_profit(note, ts)
                             _first_pass_findings.extend(udp_f)
 
-                        # 财务费用明细纵向校验 (F64-3)
                         fe_f = self.reconciliation.check_financial_expense_detail(note, ts)
                         _first_pass_findings.extend(fe_f)
 
-                        # 设定受益计划变动表校验 (F49-5~10a)
                         bp_f = self.reconciliation.check_benefit_plan_movement(note, ts)
                         _first_pass_findings.extend(bp_f)
 
-                        # 股本/实收资本小计列校验 (F53-3a)
                         eq_f = self.reconciliation.check_equity_subtotal_detail(note, ts)
                         _first_pass_findings.extend(eq_f)
 
                     logger.info(
-                        "反馈循环完成：LLM 修正 %d 个表格结构，重新校验后剩余 %d 个本地校验问题",
-                        len(retry_updated_ids), len(_first_pass_findings),
+                        "合并 LLM 反馈循环完成：修正 %d 个表格结构，重新校验后剩余 %d 个差异",
+                        len(updated_note_ids), len(_first_pass_findings),
                     )
-                    yield json.dumps({
-                        "status": "phase_progress", "phase": "reconciliation",
-                        "message": f"LLM 结构复核完成：修正 {len(retry_updated_ids)} 个表格，重新校验后剩余 {len(_first_pass_findings)} 个差异",
-                    }, ensure_ascii=False)
-                    await asyncio.sleep(0)
+
+                yield json.dumps({
+                    "status": "phase_progress", "phase": "reconciliation",
+                    "message": f"LLM 结构复核完成：分析 {llm_reanalyzed_count} 个表格，修正 {llm_fixed_count} 个",
+                }, ensure_ascii=False)
+                await asyncio.sleep(0)
 
             all_findings.extend(_first_pass_findings)
 
@@ -924,7 +868,7 @@ class ReportReviewEngine:
                 }, ensure_ascii=False)
                 await asyncio.sleep(0)
 
-                wide_semaphore = asyncio.Semaphore(3)
+                wide_semaphore = asyncio.Semaphore(5)
 
                 async def _analyze_wide(note: NoteTable):
                     t_hint, _ = _build_hints_for_note(note.id)
@@ -1498,8 +1442,14 @@ class ReportReviewEngine:
                 return results
 
             if sections:
+                note_review_semaphore = asyncio.Semaphore(5)
+
+                async def _review_section_with_limit(section):
+                    async with note_review_semaphore:
+                        return await _review_section(section)
+
                 section_results = await asyncio.gather(
-                    *[_review_section(s) for s in sections],
+                    *[_review_section_with_limit(s) for s in sections],
                     return_exceptions=True,
                 )
                 # 收集数值校验阶段已覆盖的科目名（去重：避免附注复核重复报告同一科目的问题）
