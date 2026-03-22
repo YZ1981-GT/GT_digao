@@ -20091,6 +20091,11 @@ class ReconciliationEngine:
 
     _AGING_TABLE_KEYWORDS = ["账龄", "按账龄"]
 
+    def _is_aging_table(self, note_table) -> bool:
+        """判断是否为账龄表（标题或科目名含账龄关键词）。"""
+        combined = (note_table.section_title or '') + (note_table.account_name or '')
+        return any(kw in combined for kw in self._AGING_TABLE_KEYWORDS)
+
 
 
 
