@@ -57,143 +57,140 @@ class ReportReviewEngine:
     def openai_service(self) -> OpenAIService:
         return OpenAIService()
 
-    # ─── 模板结构对比辅助方法 ───
+    # ─── 预设公式表格结构对比辅助方法 ───
 
     @staticmethod
-    def _extract_template_tables(template_content: str) -> List[List[str]]:
-        """从模板 markdown 内容中提取所有表格的 header 行。
-
-        返回: List of header lists, 每个元素是一个表格的表头列名列表。
-        """
-        tables = []
-        lines = template_content.split("\n")
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            # 检测 markdown 表格起始行（以 | 开头且包含多个 |）
-            if line.startswith("|") and line.count("|") >= 3:
-                # 收集连续的表格行
-                header_line = line
-                # 下一行应该是分隔行 |---|---|
-                if i + 1 < len(lines) and re.match(r'\|[\s\-:]+\|', lines[i + 1].strip()):
-                    cells = [c.strip() for c in header_line.split("|")]
-                    cells = [c for c in cells if c]  # 去掉空字符串
-                    # 清理 HTML 标签和空白
-                    cleaned = []
-                    for c in cells:
-                        c = re.sub(r'<[^>]+>', '', c)  # 去掉 <br/> 等
-                        c = c.replace("\u3000", " ").strip()
-                        if c:
-                            cleaned.append(c)
-                    if cleaned and len(cleaned) >= 2:
-                        tables.append(cleaned)
-                    # 跳过整个表格
-                    i += 2
-                    while i < len(lines) and lines[i].strip().startswith("|"):
-                        i += 1
-                    continue
-            i += 1
-        return tables
-
-    @staticmethod
-    def _compare_table_headers(
-        account_name: str,
+    def _compare_preset_columns(
         note: "NoteTable",
-        template_tables: List[List[str]],
+        preset: Dict,
     ) -> Optional[Dict]:
-        """将实际附注表格 headers 与模板标准 headers 对比。
+        """将实际附注表格 headers 与预设公式的 template_columns 对比。
 
-        返回差异描述 dict，无差异返回 None。
+        仅检查公式关键列（opening/movement/closing），skip 和 label 列不报差异。
+        如果实际表头能覆盖所有公式关键列，则认为结构匹配，返回 None。
+        否则返回差异描述 dict。
         """
-        actual_headers = [
-            str(h or "").replace("\u3000", " ").strip()
-            for h in note.headers if str(h or "").strip()
-        ]
-        if len(actual_headers) < 2:
+        if not note.headers or len(note.headers) < 3:
             return None
 
-        # 找到最匹配的模板表格（通过列名重叠度）
-        best_match = None
-        best_score = 0
-        for tmpl_headers in template_tables:
-            if not tmpl_headers:
-                continue
-            # 计算重叠度：实际 headers 中有多少能在模板中找到（模糊匹配）
-            overlap = 0
-            for ah in actual_headers:
-                ah_clean = re.sub(r'[\s（()）]', '', ah)
-                for th in tmpl_headers:
-                    th_clean = re.sub(r'[\s（()）]', '', th)
-                    if ah_clean == th_clean or ah_clean in th_clean or th_clean in ah_clean:
-                        overlap += 1
-                        break
-            score = overlap / max(len(tmpl_headers), len(actual_headers), 1)
-            if score > best_score:
-                best_score = score
-                best_match = tmpl_headers
+        actual_headers = [
+            str(h or "").replace("\u3000", " ").replace("\n", "").replace("\r", "").strip()
+            for h in note.headers if str(h or "").strip()
+        ]
+        if len(actual_headers) < 3:
+            return None
 
-        if best_match is None or best_score < 0.2:
-            return None  # 没有匹配的模板表格
+        template_cols = preset.get("template_columns", [])
+        if not template_cols:
+            return None
 
-        # 找出具体差异列（即使重叠度高，列数不同也需要报告）
-        tmpl_set_clean = set()
-        for th in best_match:
-            tmpl_set_clean.add(re.sub(r'[\s（()）]', '', th))
+        # 只关注公式关键列（opening / movement / closing）
+        formula_cols = [
+            tc for tc in template_cols if tc["role"] in ("opening", "movement", "closing")
+        ]
+        if not formula_cols:
+            return None
 
-        actual_set_clean = set()
-        for ah in actual_headers:
-            actual_set_clean.add(re.sub(r'[\s（()）]', '', ah))
+        def _clean(s: str) -> str:
+            return re.sub(r'[\s（()）\u3000]', '', s)
 
-        # 模板有但实际没有的列
+        def _col_matches_header(col_name: str, header: str) -> bool:
+            """判断预设列名是否与实际表头匹配（模糊匹配）。"""
+            cn = _clean(col_name)
+            hd = _clean(header)
+            if not cn or not hd:
+                return False
+            # 精确匹配
+            if cn == hd:
+                return True
+            # 处理"/"分隔的备选名称（如"追加/新增投资"）：任一备选匹配即可
+            if "/" in col_name:
+                alternatives = [_clean(alt) for alt in col_name.split("/") if alt.strip()]
+                if any(alt and (alt in hd or hd in alt) for alt in alternatives):
+                    return True
+            # 包含匹配：提取关键词片段
+            _kw_segs = [
+                "期初", "期末", "年初", "年末", "余额", "账面价值",
+                "追加", "新增", "减少", "增加", "摊销", "折旧",
+                "转入", "转出", "计提", "转回", "转销", "处置",
+                "投资损益", "综合收益", "权益变动", "现金股利",
+                "宣告发放", "减值准备", "企业合并", "核销",
+                "收回", "内部开发", "确认为无形", "计入当期",
+                "公允价值", "购置", "自用",
+            ]
+            # 时间方向关键词：期初/年初 vs 期末/年末 不能互相匹配
+            _time_direction = {"期初": "opening", "年初": "opening", "期末": "closing", "年末": "closing"}
+            cn_segs = [seg for seg in _kw_segs if seg in cn]
+            if cn_segs:
+                # 检查时间方向冲突：如果预设列含"期初"，实际表头含"期末"，则不匹配
+                cn_dir = None
+                hd_dir = None
+                for td_kw, td_val in _time_direction.items():
+                    if td_kw in cn:
+                        cn_dir = td_val
+                    if td_kw in hd:
+                        hd_dir = td_val
+                if cn_dir and hd_dir and cn_dir != hd_dir:
+                    return False
+                # 至少匹配一个关键词即可
+                return any(seg in hd for seg in cn_segs)
+            # 兜底：子串包含
+            return cn in hd or hd in cn
+
+        # 检查每个公式关键列是否能在实际表头中找到匹配
         missing_cols = []
-        for th in best_match:
-            th_clean = re.sub(r'[\s（()）]', '', th)
-            found = any(
-                th_clean == ac or th_clean in ac or ac in th_clean
-                for ac in actual_set_clean
-            )
-            if not found and th_clean not in ("", "---"):
-                missing_cols.append(th)
+        for tc in formula_cols:
+            col_name = tc["name"]
+            found = any(_col_matches_header(col_name, ah) for ah in actual_headers)
+            if not found:
+                missing_cols.append(f"{col_name}({tc['role']})")
 
-        # 实际有但模板没有的列
+        # 检查实际表头中是否有预设未定义的非 label 列（可能是新增列）
+        all_preset_names = [tc["name"] for tc in template_cols]
         extra_cols = []
         for ah in actual_headers:
-            ah_clean = re.sub(r'[\s（()）]', '', ah)
-            found = any(
-                ah_clean == tc or ah_clean in tc or tc in ah_clean
-                for tc in tmpl_set_clean
-            )
-            if not found and ah_clean not in ("", "---"):
+            ah_clean = _clean(ah)
+            if not ah_clean:
+                continue
+            # 跳过 label 列（通常是第一列，含"项目"/"类别"等）
+            if any(kw in ah_clean for kw in ["项目", "科目", "类别", "名称", "单位", "事项"]):
+                continue
+            matched = any(_col_matches_header(pn, ah) for pn in all_preset_names)
+            if not matched:
                 extra_cols.append(ah)
 
         if not missing_cols and not extra_cols:
             return None
 
         # 构建差异描述
+        account_name = note.account_name or ""
         diff_parts = []
         if missing_cols:
-            diff_parts.append(f"缺少模板列: {', '.join(missing_cols)}")
+            diff_parts.append(f"预设公式列缺失: {', '.join(missing_cols)}")
         if extra_cols:
-            diff_parts.append(f"新增列: {', '.join(extra_cols)}")
+            diff_parts.append(f"实际新增列: {', '.join(extra_cols)}")
 
-        col_diff = len(actual_headers) - len(best_match)
-        col_diff_desc = ""
-        if col_diff > 0:
-            col_diff_desc = f"（实际 {len(actual_headers)} 列，模板 {len(best_match)} 列，多 {col_diff} 列）"
-        elif col_diff < 0:
-            col_diff_desc = f"（实际 {len(actual_headers)} 列，模板 {len(best_match)} 列，少 {abs(col_diff)} 列）"
+        preset_formula_col_count = len(formula_cols)
+        matched_count = preset_formula_col_count - len(missing_cols)
 
         return {
             "account_name": account_name,
             "note_id": note.id,
             "section_title": note.section_title or "",
+            "preset_name": preset.get("name", ""),
+            "formula": preset.get("formula", ""),
             "actual_col_count": len(actual_headers),
-            "template_col_count": len(best_match),
-            "description": f"{account_name}-{note.section_title or ''}: {'; '.join(diff_parts)}{col_diff_desc}",
+            "preset_formula_col_count": preset_formula_col_count,
+            "matched_formula_col_count": matched_count,
+            "description": (
+                f"{account_name}-{note.section_title or ''}: "
+                f"预设'{preset.get('name', '')}' {'; '.join(diff_parts)}，"
+                f"可能影响公式校验: {preset.get('formula', '')}"
+            ),
             "missing_cols": missing_cols,
             "extra_cols": extra_cols,
             "actual_headers": actual_headers,
-            "template_headers": best_match,
+            "preset_columns": [tc["name"] for tc in template_cols],
         }
 
     def _find_template_section_for_account(
@@ -355,36 +352,20 @@ class ReportReviewEngine:
         has_total_count = sum(1 for ts in table_structures.values() if ts.total_row_indices)
         has_formula_count = sum(1 for ts in table_structures.values() if ts.has_balance_formula)
 
-        # ── 模板结构对比：将识别到的表格与模板标准结构进行比较 ──
+        # ── 预设公式表格结构对比：将识别到的表格与预设公式期望的列结构进行比较 ──
         structure_diffs: List[Dict] = []
-        if _template_toc and session.note_tables:
-            note_map_by_id = {n.id: n for n in session.note_tables}
-            # 按科目分组附注表格
-            account_notes: Dict[str, List[NoteTable]] = {}
+        if session.note_tables:
             for note in session.note_tables:
-                acct = note.account_name or ""
-                if acct:
-                    account_notes.setdefault(acct, []).append(note)
-
-            for acct_name, notes_list in account_notes.items():
-                template_content = self._find_template_section_for_account(
-                    acct_name, config.template_type, _template_toc,
-                )
-                if not template_content:
+                if not note.headers or len(note.headers) < 3:
                     continue
-                # 从模板内容中提取标准表格 headers
-                template_tables = self._extract_template_tables(template_content)
-                if not template_tables:
+                # 查找该表格是否有匹配的预设公式
+                preset = TableStructureAnalyzer._find_preset_for_note(note)
+                if not preset:
                     continue
-                # 对比每个实际表格与模板表格
-                for note in notes_list:
-                    if not note.headers or len(note.headers) < 2:
-                        continue
-                    diff = self._compare_table_headers(
-                        acct_name, note, template_tables,
-                    )
-                    if diff:
-                        structure_diffs.append(diff)
+                # 对比实际表头与预设公式列
+                diff = self._compare_preset_columns(note, preset)
+                if diff:
+                    structure_diffs.append(diff)
 
         struct_details = [
             f"共识别 {len(table_structures)} 个附注表格",
