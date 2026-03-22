@@ -57,6 +57,145 @@ class ReportReviewEngine:
     def openai_service(self) -> OpenAIService:
         return OpenAIService()
 
+    # ─── 模板结构对比辅助方法 ───
+
+    @staticmethod
+    def _extract_template_tables(template_content: str) -> List[List[str]]:
+        """从模板 markdown 内容中提取所有表格的 header 行。
+
+        返回: List of header lists, 每个元素是一个表格的表头列名列表。
+        """
+        tables = []
+        lines = template_content.split("\n")
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # 检测 markdown 表格起始行（以 | 开头且包含多个 |）
+            if line.startswith("|") and line.count("|") >= 3:
+                # 收集连续的表格行
+                header_line = line
+                # 下一行应该是分隔行 |---|---|
+                if i + 1 < len(lines) and re.match(r'\|[\s\-:]+\|', lines[i + 1].strip()):
+                    cells = [c.strip() for c in header_line.split("|")]
+                    cells = [c for c in cells if c]  # 去掉空字符串
+                    # 清理 HTML 标签和空白
+                    cleaned = []
+                    for c in cells:
+                        c = re.sub(r'<[^>]+>', '', c)  # 去掉 <br/> 等
+                        c = c.replace("\u3000", " ").strip()
+                        if c:
+                            cleaned.append(c)
+                    if cleaned and len(cleaned) >= 2:
+                        tables.append(cleaned)
+                    # 跳过整个表格
+                    i += 2
+                    while i < len(lines) and lines[i].strip().startswith("|"):
+                        i += 1
+                    continue
+            i += 1
+        return tables
+
+    @staticmethod
+    def _compare_table_headers(
+        account_name: str,
+        note: "NoteTable",
+        template_tables: List[List[str]],
+    ) -> Optional[Dict]:
+        """将实际附注表格 headers 与模板标准 headers 对比。
+
+        返回差异描述 dict，无差异返回 None。
+        """
+        actual_headers = [
+            str(h or "").replace("\u3000", " ").strip()
+            for h in note.headers if str(h or "").strip()
+        ]
+        if len(actual_headers) < 2:
+            return None
+
+        # 找到最匹配的模板表格（通过列名重叠度）
+        best_match = None
+        best_score = 0
+        for tmpl_headers in template_tables:
+            if not tmpl_headers:
+                continue
+            # 计算重叠度：实际 headers 中有多少能在模板中找到（模糊匹配）
+            overlap = 0
+            for ah in actual_headers:
+                ah_clean = re.sub(r'[\s（()）]', '', ah)
+                for th in tmpl_headers:
+                    th_clean = re.sub(r'[\s（()）]', '', th)
+                    if ah_clean == th_clean or ah_clean in th_clean or th_clean in ah_clean:
+                        overlap += 1
+                        break
+            score = overlap / max(len(tmpl_headers), len(actual_headers), 1)
+            if score > best_score:
+                best_score = score
+                best_match = tmpl_headers
+
+        if best_match is None or best_score < 0.2:
+            return None  # 没有匹配的模板表格
+
+        # 找出具体差异列（即使重叠度高，列数不同也需要报告）
+        tmpl_set_clean = set()
+        for th in best_match:
+            tmpl_set_clean.add(re.sub(r'[\s（()）]', '', th))
+
+        actual_set_clean = set()
+        for ah in actual_headers:
+            actual_set_clean.add(re.sub(r'[\s（()）]', '', ah))
+
+        # 模板有但实际没有的列
+        missing_cols = []
+        for th in best_match:
+            th_clean = re.sub(r'[\s（()）]', '', th)
+            found = any(
+                th_clean == ac or th_clean in ac or ac in th_clean
+                for ac in actual_set_clean
+            )
+            if not found and th_clean not in ("", "---"):
+                missing_cols.append(th)
+
+        # 实际有但模板没有的列
+        extra_cols = []
+        for ah in actual_headers:
+            ah_clean = re.sub(r'[\s（()）]', '', ah)
+            found = any(
+                ah_clean == tc or ah_clean in tc or tc in ah_clean
+                for tc in tmpl_set_clean
+            )
+            if not found and ah_clean not in ("", "---"):
+                extra_cols.append(ah)
+
+        if not missing_cols and not extra_cols:
+            return None
+
+        # 构建差异描述
+        diff_parts = []
+        if missing_cols:
+            diff_parts.append(f"缺少模板列: {', '.join(missing_cols)}")
+        if extra_cols:
+            diff_parts.append(f"新增列: {', '.join(extra_cols)}")
+
+        col_diff = len(actual_headers) - len(best_match)
+        col_diff_desc = ""
+        if col_diff > 0:
+            col_diff_desc = f"（实际 {len(actual_headers)} 列，模板 {len(best_match)} 列，多 {col_diff} 列）"
+        elif col_diff < 0:
+            col_diff_desc = f"（实际 {len(actual_headers)} 列，模板 {len(best_match)} 列，少 {abs(col_diff)} 列）"
+
+        return {
+            "account_name": account_name,
+            "note_id": note.id,
+            "section_title": note.section_title or "",
+            "actual_col_count": len(actual_headers),
+            "template_col_count": len(best_match),
+            "description": f"{account_name}-{note.section_title or ''}: {'; '.join(diff_parts)}{col_diff_desc}",
+            "missing_cols": missing_cols,
+            "extra_cols": extra_cols,
+            "actual_headers": actual_headers,
+            "template_headers": best_match,
+        }
+
     def _find_template_section_for_account(
         self,
         account_name: str,
@@ -215,16 +354,53 @@ class ReportReviewEngine:
         low_conf = sum(1 for ts in table_structures.values() if ts.structure_confidence == "low")
         has_total_count = sum(1 for ts in table_structures.values() if ts.total_row_indices)
         has_formula_count = sum(1 for ts in table_structures.values() if ts.has_balance_formula)
+
+        # ── 模板结构对比：将识别到的表格与模板标准结构进行比较 ──
+        structure_diffs: List[Dict] = []
+        if _template_toc and session.note_tables:
+            note_map_by_id = {n.id: n for n in session.note_tables}
+            # 按科目分组附注表格
+            account_notes: Dict[str, List[NoteTable]] = {}
+            for note in session.note_tables:
+                acct = note.account_name or ""
+                if acct:
+                    account_notes.setdefault(acct, []).append(note)
+
+            for acct_name, notes_list in account_notes.items():
+                template_content = self._find_template_section_for_account(
+                    acct_name, config.template_type, _template_toc,
+                )
+                if not template_content:
+                    continue
+                # 从模板内容中提取标准表格 headers
+                template_tables = self._extract_template_tables(template_content)
+                if not template_tables:
+                    continue
+                # 对比每个实际表格与模板表格
+                for note in notes_list:
+                    if not note.headers or len(note.headers) < 2:
+                        continue
+                    diff = self._compare_table_headers(
+                        acct_name, note, template_tables,
+                    )
+                    if diff:
+                        structure_diffs.append(diff)
+
         struct_details = [
             f"共识别 {len(table_structures)} 个附注表格",
             f"识别置信度：高 {high_conf} 个、中 {med_conf} 个、低 {low_conf} 个",
             f"含合计行的表格 {has_total_count} 个，含余额变动结构的表格 {has_formula_count} 个",
         ]
+
+        if structure_diffs:
+            struct_details.append(f"发现 {len(structure_diffs)} 个表格结构与模板存在差异")
+
         yield json.dumps({
             "status": "phase_complete", "phase": "structure_analysis",
             "message": f"结构识别完成，共识别 {len(table_structures)} 个表格",
             "findings_count": 0,
             "details": struct_details,
+            **({"structure_diffs": structure_diffs} if structure_diffs else {}),
         }, ensure_ascii=False)
         await asyncio.sleep(0)
 
