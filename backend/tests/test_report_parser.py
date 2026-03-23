@@ -86,15 +86,22 @@ class TestIdentifyStatementType:
             assert result is None, f"Sheet '{name}' should be skipped (auxiliary keyword takes priority)"
 
     def test_skip_unrecognized_sheet(self, parser):
-        """名称不含报表关键词的 Sheet 一律跳过，不管内容。"""
-        # 即使内容含"资产负债表"，名称不匹配也应跳过
+        """名称不含报表关键词的 Sheet：辅助关键词匹配则跳过，否则内容回退。"""
         cells = [
             CellData(row=1, col=1, value="资产负债表"),
             CellData(row=2, col=1, value="货币资金"),
         ]
-        for name in ["增加额", "Sheet1", "汇总", "数据"]:
+        # 辅助关键词匹配 → 跳过（即使内容含报表标题）
+        for name in ["增加额"]:
             result = parser._identify_statement_type(name, cells)
-            assert result is None, f"Sheet '{name}' should be skipped even with BS content"
+            assert result is None, f"Sheet '{name}' should be skipped (auxiliary keyword)"
+
+        # 名称无法识别、非辅助 → 内容回退生效
+        for name in ["Sheet1", "汇总", "数据"]:
+            result = parser._identify_statement_type(name, cells)
+            assert result == StatementType.BALANCE_SHEET, (
+                f"Sheet '{name}' should be identified via content fallback"
+            )
 
     def test_formal_sheet_by_name(self, parser):
         """正式报表 Sheet 通过名称关键词识别。"""
@@ -103,11 +110,20 @@ class TestIdentifyStatementType:
         assert parser._identify_statement_type("现金流量表", []) == StatementType.CASH_FLOW
         assert parser._identify_statement_type("所有者权益变动表", []) == StatementType.EQUITY_CHANGE
 
-    def test_identify_by_content_ignored(self, parser):
-        """内容检测已移除，名称不匹配时即使内容含关键词也应跳过。"""
+    def test_identify_by_content_fallback(self, parser):
+        """名称无法识别时，通过前 10 行内容回退检测报表类型。"""
         cells = [
             CellData(row=1, col=1, value="现金流量表"),
             CellData(row=2, col=1, value="经营活动"),
+        ]
+        result = parser._identify_statement_type("Sheet1", cells)
+        assert result == StatementType.CASH_FLOW
+
+    def test_content_fallback_no_match(self, parser):
+        """内容不含报表关键词时，仍然跳过。"""
+        cells = [
+            CellData(row=1, col=1, value="科目余额表"),
+            CellData(row=2, col=1, value="货币资金"),
         ]
         result = parser._identify_statement_type("Sheet1", cells)
         assert result is None
@@ -283,7 +299,8 @@ class TestExtractNoteTables:
         assert len(tables[0].headers) == 3
         assert len(tables[0].rows) == 2
 
-    def test_skip_single_row_tables(self, parser):
+    def test_single_row_tables_preserved(self, parser):
+        """单行表格也应被保留（可能包含重要汇总数据）"""
         word_result = WordParseResult(
             paragraphs=[{"text": "标题", "style": "Heading 1", "level": 1}],
             tables=[
@@ -293,7 +310,9 @@ class TestExtractNoteTables:
             comments=[],
         )
         tables = parser.extract_note_tables(word_result)
-        assert len(tables) == 0
+        assert len(tables) == 1
+        assert tables[0].headers == ["只有一行"]
+        assert tables[0].rows == []
 
     def test_empty_tables(self, parser):
         word_result = WordParseResult(

@@ -22,6 +22,11 @@ from ..models.audit_schemas import (
     StatementType,
 )
 from .workpaper_parser import WorkpaperParser
+from .heading_utils import (
+    infer_numbering_level,
+    detect_heading_level as _unified_detect_heading,
+    detect_flat_style_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -871,8 +876,8 @@ class ReportParser(WorkpaperParser):
     def extract_note_tables(self, word_result) -> List[NoteTable]:
         """从 Word 解析结果中提取附注表格及其标题上下文。
 
-        利用 table_contexts（按文档顺序记录每个表格前最近的段落文本）
-        来准确关联表格与其所属的附注科目。
+        利用 table_after_para_idx（按文档顺序记录每个表格前最近的段落索引）
+        向上回溯段落列表，找到真正的科目标题（而非紧邻的描述性段落）。
 
         Args:
             word_result: WordParseResult
@@ -884,38 +889,116 @@ class ReportParser(WorkpaperParser):
 
         # 从段落中构建科目标题索引
         # 匹配 "1、货币资金" "2、应收票据" "(1) 应收票据分类" 等格式
+        # 数字编号后必须跟中文/字母，避免误匹配 "3.14 元" "100、200" 等正文
         note_item_pattern = re.compile(
-            r'^[（(]?\s*[\d一二三四五六七八九十]+\s*[）)、.\s]\s*(.+)'
+            r'^[（(]?\s*[\d一二三四五六七八九十]+\s*[）)、.\s]\s*([\u4e00-\u9fffa-zA-Z].+)'
         )
 
-        # 当前科目上下文（从段落中追踪）
-        current_note_account = ""
-        current_section_title = ""
+        # ── 预构建段落级别索引，用于向上回溯查找科目标题 ──
+        para_levels: List[Optional[int]] = []
+        for para_info in word_result.paragraphs:
+            para_levels.append(para_info.get('level'))
+
+        def _find_account_title(table_idx: int) -> tuple:
+            """向上回溯段落列表，找到表格所属的科目标题。
+
+            返回 (account_name, section_title, sub_title)
+            - account_name: 科目名称（如"货币资金"）
+            - section_title: 紧邻表格的段落文本（可能是子标题或描述）
+            - sub_title: 子标题（如"按坏账计提方法分类"）
+            """
+            # 确定起始段落索引
+            start_pi = -1
+            if (hasattr(word_result, 'table_after_para_idx') and
+                    word_result.table_after_para_idx and
+                    table_idx < len(word_result.table_after_para_idx)):
+                start_pi = word_result.table_after_para_idx[table_idx]
+            elif table_idx < len(word_result.table_contexts):
+                # 旧方式：通过 table_contexts 文本匹配段落索引
+                ctx = word_result.table_contexts[table_idx]
+                if ctx:
+                    for pi, p in enumerate(word_result.paragraphs):
+                        if p.get('text', '').strip() == ctx:
+                            start_pi = pi
+                            break
+
+            if start_pi < 0:
+                # 无法定位段落索引，直接从 table_contexts 提取
+                ctx = ""
+                if (hasattr(word_result, 'table_contexts') and
+                        word_result.table_contexts and
+                        table_idx < len(word_result.table_contexts)):
+                    ctx = word_result.table_contexts[table_idx]
+                extracted = self._extract_account_from_heading(ctx) if ctx else ""
+                return (extracted or ctx, ctx, "")
+
+            # 紧邻表格的段落文本（用作 section_title）
+            immediate_text = word_result.paragraphs[start_pi].get('text', '').strip() if start_pi < len(word_result.paragraphs) else ""
+
+            # 向上回溯，找到最近的有编号的科目标题
+            # 优先找 level=3 的标题（如 "1、货币资金"），其次 level=2（如 "（一）流动资产"）
+            account_name = ""
+            sub_title = ""
+            found_level3 = False
+
+            for pi in range(start_pi, -1, -1):
+                text = word_result.paragraphs[pi].get('text', '').strip()
+                if not text:
+                    continue
+                level = para_levels[pi]
+
+                # 如果没有 level 字段，通过编号模式推断
+                if level is None:
+                    level = infer_numbering_level(text)
+
+                # 检查是否是编号标题
+                m = note_item_pattern.match(text)
+                if m and level is not None:
+                    extracted = self._extract_account_from_heading(text)
+                    if level <= 3 and not found_level3:
+                        # 这是科目级标题（如 "1、货币资金"）
+                        account_name = extracted
+                        found_level3 = True
+                        break
+                    elif level >= 4 and not sub_title:
+                        # 这是子标题（如 "(1) 按坏账计提方法分类"）
+                        sub_title = extracted
+                elif m and not account_name:
+                    # 有编号但无法推断层级，保守处理：继续向上找
+                    extracted = self._extract_account_from_heading(text)
+                    if not sub_title:
+                        sub_title = extracted
+
+            # 如果没找到编号标题，用紧邻段落文本
+            if not account_name:
+                account_name = self._extract_account_from_heading(immediate_text) or immediate_text
+
+            return (account_name, immediate_text, sub_title)
 
         for table_idx, table_data in enumerate(word_result.tables):
-            if not table_data or len(table_data) < 2:
+            if not table_data:
                 continue
 
-            # 使用 table_contexts 获取表格前最近的段落文本
-            context_text = ""
-            if table_idx < len(word_result.table_contexts):
-                context_text = word_result.table_contexts[table_idx]
+            account_name, section_title, sub_title = _find_account_title(table_idx)
 
-            # 从上下文推断科目名称
-            section_title = context_text
-            account_name = self._extract_account_from_heading(context_text)
+            # section_title 优先用紧邻段落，如果紧邻段落为空则用科目名
+            if not section_title:
+                section_title = account_name
 
-            # 如果上下文是子标题（如 "(1) 应收票据分类"），向上查找主科目
-            if not account_name and context_text:
-                account_name = context_text
-
-            # 表头和数据行 — 检测多行表头
-            header_rows_raw, data_start = self._detect_note_table_headers(table_data)
-            headers = self._merge_note_header_rows(header_rows_raw)
-            rows = table_data[data_start:] if data_start < len(table_data) else []
+            # 单行表格：直接作为 headers，无数据行
+            if len(table_data) == 1:
+                headers = table_data[0]
+                header_rows_raw = [table_data[0]]
+                rows = []
+            else:
+                # 表头和数据行 — 检测多行表头
+                header_rows_raw, data_start = self._detect_note_table_headers(table_data)
+                headers = self._merge_note_header_rows(header_rows_raw)
+                rows = table_data[data_start:] if data_start < len(table_data) else []
 
             logger.info(f"[extract_note_tables] table {table_idx}: account={account_name}, "
-                        f"header_rows={len(header_rows_raw)}, data_start={data_start}, "
+                        f"section_title={section_title[:30]}, "
+                        f"header_rows={len(header_rows_raw)}, "
                         f"row0_cols={len(table_data[0]) if table_data else 0}, "
                         f"headers={headers[:4]}...")
 
@@ -968,25 +1051,19 @@ class ReportParser(WorkpaperParser):
             return result.strip()
 
         def detect_heading_level(para_info: Dict) -> Optional[int]:
-            """检测段落的标题级别"""
-            if 'level' in para_info and para_info['level'] is not None:
-                return para_info['level']
+            """检测段落的标题级别（委托给 heading_utils 统一处理）。"""
             text = para_info.get('text', '').strip()
-            if not text:
-                return None
-            # 一级：一、二、三、...
-            if re.match(r'^[一二三四五六七八九十]+、', text):
-                return 1
-            # 二级：（一）（二）...
-            if re.match(r'^[（(][一二三四五六七八九十]+[）)]', text):
-                return 2
-            # 三级：1. 2. 或 1、2、
-            if re.match(r'^\d+[、.]', text):
-                return 3
-            # 四级：(1) (2) 或 ① ②
-            if re.match(r'^[（(]\d+[）)]', text) or re.match(r'^[①②③④⑤⑥⑦⑧⑨⑩]', text):
-                return 4
-            return None
+            word_level = para_info.get('level')
+            return _unified_detect_heading(
+                text=text,
+                word_style_level=word_level,
+                flat_style_mode=flat_style_mode,
+            )
+
+        # ── 预扫描：检测 Word 样式 level 是否全部相同（flat mode） ──
+        flat_style_mode = detect_flat_style_mode(paragraphs)
+        if flat_style_mode:
+            logger.info(f"[extract_note_sections] flat_style_mode detected")
 
         # 使用精确的段落索引关联表格（优先使用 table_after_para_idx）
         table_after_para: Dict[int, List[int]] = {}
@@ -1090,11 +1167,12 @@ class ReportParser(WorkpaperParser):
     # ─── Private helpers ───
 
     def _identify_statement_type(self, sheet_name: str, cells) -> Optional[StatementType]:
-        """根据 Sheet 名称识别报表类型。
+        """根据 Sheet 名称识别报表类型，名称无法识别时回退到内容检测。
 
-        仅通过 Sheet 名称关键词匹配，不做内容回退。
-        正式财务报表的 Sheet 名称一定包含"资产负债"、"利润"、"现金流量"等关键词；
-        辅助 Sheet（增加额、横纵加、校验等）即使内容中含有报表数据也应跳过。
+        优先级：
+        1. 辅助性 Sheet 关键词 → 跳过
+        2. Sheet 名称关键词匹配 → 确定类型
+        3. 内容回退：检查前 10 行单元格中是否包含报表标题关键词
 
         Returns:
             StatementType 或 None（非正式报表 Sheet 应跳过）
@@ -1102,19 +1180,59 @@ class ReportParser(WorkpaperParser):
         name_clean = re.sub(r'\s+', '', sheet_name)
 
         # 先检查是否为辅助性 Sheet（应跳过）
+        is_skip = False
+        skip_matched = ''
         for kw in self.SKIP_SHEET_KEYWORDS:
             if kw in name_clean or kw.lower() in sheet_name.lower():
-                logger.info("[_identify_statement_type] Skipping auxiliary sheet: %s (matched '%s')", sheet_name, kw)
-                return None
+                is_skip = True
+                skip_matched = kw
+                break
 
-        # 仅按 Sheet 名称匹配报表类型
+        # 按 Sheet 名称匹配报表类型
         name_lower = sheet_name.lower()
+        matched_type: Optional[StatementType] = None
         for st_type, keywords in self.STATEMENT_TYPE_KEYWORDS.items():
             for kw in keywords:
                 if kw.lower() in name_lower:
-                    return st_type
+                    matched_type = st_type
+                    break
+            if matched_type:
+                break
 
-        # 名称无法识别 → 跳过
+        if is_skip:
+            if matched_type:
+                # 名称同时含辅助关键词和报表关键词 → 辅助优先跳过
+                # （如"利润及利润分配表增加额"、"现金流量表调整"）
+                logger.info(
+                    "[_identify_statement_type] Skipping auxiliary sheet: %s (matched skip '%s', also matched '%s')",
+                    sheet_name, skip_matched, matched_type.value,
+                )
+            else:
+                logger.info("[_identify_statement_type] Skipping auxiliary sheet: %s (matched '%s')", sheet_name, skip_matched)
+            return None
+
+        if matched_type:
+            return matched_type
+
+        # ── 内容回退：名称无法识别时，检查前 10 行单元格内容 ──
+        if cells:
+            early_texts: list[str] = []
+            for cell in cells:
+                if cell.row <= 10 and cell.value is not None:
+                    cell_str = re.sub(r'\s+', '', str(cell.value))
+                    if cell_str:
+                        early_texts.append(cell_str)
+            combined = ''.join(early_texts)
+            for st_type, keywords in self.STATEMENT_TYPE_KEYWORDS.items():
+                for kw in keywords:
+                    if kw in combined or kw.lower() in combined.lower():
+                        logger.info(
+                            "[_identify_statement_type] Content fallback: sheet '%s' → %s (matched '%s')",
+                            sheet_name, st_type.value, kw,
+                        )
+                        return st_type
+
+        # 名称和内容均无法识别 → 跳过
         logger.info("[_identify_statement_type] Skipping unrecognized sheet: %s", sheet_name)
         return None
 
@@ -1356,7 +1474,8 @@ class ReportParser(WorkpaperParser):
         Word 表格中合并单元格保留所有列位置（合并位置填空），
         所以各行列数通常一致。但仍需处理列数不同的边缘情况。
 
-        检测策略：如果相邻行列数不同且后续行无大数字，则为多行表头。
+        检测策略：逐行扫描，如果行无大数字、有足够非空单元格、
+        且第一列与首行相同或为空（纵向合并），则视为表头行。
         对齐策略：短行在前面补空列使所有行列数一致。
 
         返回 (header_rows, data_start_index)。
@@ -1373,34 +1492,24 @@ class ReportParser(WorkpaperParser):
         for ri in range(1, min(len(table_data), 6)):
             max_cols = max(max_cols, len(table_data[ri]))
 
-        # 如果所有行列数相同，用简单逻辑
-        if len(row0) == max_cols:
-            row1 = table_data[1]
-            first_cell = str(row1[0]).strip() if row1 and row1[0] is not None else ''
-            if first_cell and first_cell != row0[0]:
-                return [row0], 1
-            non_empty = [str(c).strip() for c in row1 if c is not None and str(c).strip()]
-            if len(non_empty) < 2:
-                return [row0], 1
-            if self._row_has_large_number(row1):
-                return [row0], 1
-            header_rows = [row0, [str(c).strip() if c is not None else '' for c in row1]]
-            return header_rows, 2
-
-        # 列数不同 — 有合并单元格
+        # 统一逻辑：逐行扫描，判断是否为表头行
         header_rows_raw: List[List[str]] = [row0]
         data_start = 1
 
         for ri in range(1, min(len(table_data), 4)):
-            row = [str(c).strip() if c is not None else '' for c in table_data[ri]]
-            if self._row_has_large_number(table_data[ri]):
+            row_raw = table_data[ri]
+            row = [str(c).strip() if c is not None else '' for c in row_raw]
+            # 有大数字 → 数据行
+            if self._row_has_large_number(row_raw):
                 break
             non_empty = [v for v in row if v]
+            # 非空单元格太少 → 不是表头
             if len(non_empty) < 2:
                 break
-            # 如果这行列数和 max_cols 相同且第一列是实际科目名，则是数据行
-            if len(row) == max_cols and row[0] and row[0] != row0[0]:
-                # 再检查是否全是文本（子表头特征）
+            first_cell = row[0] if row else ''
+            # 第一列与首行不同且非空 → 可能是数据行
+            if first_cell and first_cell != row0[0]:
+                # 再检查是否全是文本（子表头特征：数字少于 1/3）
                 num_count = 0
                 for c in row:
                     s = c.replace(',', '').replace(' ', '')
@@ -1639,6 +1748,43 @@ class ReportParser(WorkpaperParser):
         # 去除常见后缀
         cleaned = re.sub(r'[（(]续[）)]$', '', cleaned)
         return cleaned.strip()
+
+    @staticmethod
+    def _extract_pdf_table_titles(pdf_text: str) -> List[str]:
+        """从 PDF 文本中提取每个 [表格 N] 标记前的上下文标题。
+
+        扫描 [表格 N] 标记前的非空行，向上回溯找到可能的科目标题。
+        """
+        titles: List[str] = []
+        lines = pdf_text.splitlines()
+        # 编号标题模式（数字后必须跟中文/字母，避免误匹配正文数字）
+        note_item_pat = re.compile(
+            r'^[（(]?\s*[\d一二三四五六七八九十]+\s*[）)、.\s]\s*([\u4e00-\u9fffa-zA-Z].+)'
+        )
+        table_marker_pat = re.compile(r'^\[表格\s*\d+\]')
+
+        for i, line in enumerate(lines):
+            if not table_marker_pat.match(line.strip()):
+                continue
+            # 向上回溯找标题
+            title = ""
+            for j in range(i - 1, max(i - 10, -1), -1):
+                prev = lines[j].strip()
+                if not prev or prev.startswith('[表格结束]') or prev.startswith('---'):
+                    continue
+                # 跳过纯数字行（表格数据残留）
+                if re.match(r'^[\d,.\-\s]+$', prev):
+                    continue
+                m = note_item_pat.match(prev)
+                if m:
+                    title = m.group(1).strip()
+                    break
+                # 短文本行可能是标题
+                if len(prev) <= 40 and not prev.endswith('。'):
+                    title = prev
+                    break
+            titles.append(title)
+        return titles
 
 
 # 模块级单例

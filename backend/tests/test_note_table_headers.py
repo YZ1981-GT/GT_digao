@@ -245,6 +245,27 @@ class TestDetectNoteTableHeaders:
 class TestAlignHeaderRows:
     """测试 _align_header_rows（简单补齐模式，不做展开）"""
 
+    def test_three_row_header_bad_debt_classification(self):
+        """三行表头：坏账准备分类表（截图中的场景）
+
+        Word 去重后（合并单元格展开为空）：
+        row0: ["类 别", "期末余数", "", "", "", "", ""]  (7列)
+        row1: ["", "账面余额", "", "坏账准备", "", "账面价值"]  (6列 or 7列)
+        row2: ["类 别", "金额", "比例(%)", "金额", "预期信用损失率(%)", "账面价值"]  (6列 or 7列)
+        row3: ["单项计提坏账准备的其他应收款项", "", "", "", "", "", ""]  (7列，数据行)
+        """
+        parser = ReportParser()
+        table = [
+            ["类 别", "期末余数", "", "", "", "", ""],
+            ["", "账面余额", "", "坏账准备", "", "账面价值", ""],
+            ["类 别", "金额", "比例(%)", "金额", "预期信用损失率(%)", "账面价值", ""],
+            ["单项计提坏账准备的其他应收款项", "", "", "", "", "", ""],
+            ["按信用风险特征组合计提坏账准备的其他应收款项", "3764954.04", "100.00", "", "", "3764954.04", ""],
+        ]
+        header_rows, data_start = parser._detect_note_table_headers(table)
+        assert len(header_rows) == 3, f"Expected 3 header rows, got {len(header_rows)}: {header_rows}"
+        assert data_start == 3
+
     def test_pad_short_rows(self):
         """智能展开：票据种类独占1列，期末余额展开3列，上年年末余额展开3列"""
         rows = [

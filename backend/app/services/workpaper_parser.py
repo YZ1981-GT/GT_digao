@@ -12,6 +12,16 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from .heading_utils import (
+    CHINESE_NUMBERING_PATTERNS,
+    NOTE_TITLE_PATTERNS,
+    infer_numbering_level,
+    has_top_level_numbering,
+    is_short_heading_candidate,
+    detect_heading_level as _unified_detect_heading,
+    correct_flat_style_level,
+)
+
 from ..models.audit_schemas import (
     CellData,
     ExcelParseResult,
@@ -169,42 +179,22 @@ class WorkpaperParser:
         # .docx 使用 python-docx — 在线程池中执行以避免阻塞事件循环
         return await asyncio.to_thread(self._parse_docx_sync, file_path)
 
-    # ── 从 docx_to_md 移植的增强标题检测逻辑 ──
-
-    # 财务报表附注中常见的描述性标题行模式
-    _NOTE_TITLE_PATTERNS = re.compile('|'.join([
-        r'^按.{1,20}(计提|分类|归集|划分|披露)',
-        r'^组合计提项目[：:]',
-        r'^期末本公司',
-        r'^本期计提',
-        r'^转回或收回',
-        r'^本期实际核销',
-        r'^重要的.{2,30}$',
-        r'^按单项计提',
-        r'^按组合计提',
-        r'^按坏账计提',
-        r'^按(预付|欠款方)归集',
-        r'^作为(承租人|出租人)',
-        r'^外币货币性项目$',
-        r'^境外经营实体$',
-    ]))
+    # ── 标题检测逻辑统一到 heading_utils 模块 ──
+    # 财务报表附注模式已统一到 heading_utils.NOTE_TITLE_PATTERNS
+    _NOTE_TITLE_PATTERNS = NOTE_TITLE_PATTERNS
 
     @staticmethod
-    def _detect_heading_level_enhanced(para, style_name: str, text: str,
-                                        next_is_table: bool = False) -> Optional[int]:
-        """增强的标题级别检测（融合 docx_to_md 的多种检测策略）。
+    def _extract_word_style_level(para, style_name: str) -> Optional[int]:
+        """从 Word 样式和 XML 属性中提取原始层级。
+
+        仅提取 Word 文档自身声明的层级信息，不做编号推断或兜底检测。
+        编号推断和兜底检测统一由 heading_utils.detect_heading_level 处理。
 
         检测顺序：
         1. Word 内置 Heading / 标题 样式
         2. 自定义样式模糊匹配（如"标题3的样式"）
         3. outlineLvl XML 属性
-        4. 加粗短段落 → 子标题
-        5. 财务报表附注模式匹配标题
-        6. 表格前描述性短段落 → 子标题
         """
-        if not text:
-            return None
-
         # 1. Word 内置样式
         if style_name.startswith("Heading"):
             try:
@@ -235,17 +225,10 @@ class WorkpaperParser:
                     if 1 <= lvl <= 6:
                         return lvl
 
-        # 4. 加粗短段落 → 子标题
-        runs = [r for r in para.runs if r.text.strip()]
-        is_all_bold = runs and all(r.bold for r in runs)
-        if is_all_bold and len(text) <= 80 and text[-1] not in '。；;':
-            # 不把括号包裹的内容当标题
-            if not ((text.startswith('（') and text.endswith('）')) or
-                    (text.startswith('(') and text.endswith(')'))):
-                return None  # 标记为 bold_title，由调用方处理
-
-        # 返回 None 表示非标题
         return None
+
+    # 保留旧方法名作为兼容别名（测试可能引用）
+    _detect_heading_level_enhanced = _extract_word_style_level
 
     def _parse_docx_sync(self, file_path: str) -> WordParseResult:
         """同步解析 .docx 文件（在线程池中调用）。
@@ -297,30 +280,22 @@ class WorkpaperParser:
                     if ntype == 'para' and nobj.text.strip():
                         break
 
-                level = self._detect_heading_level_enhanced(para, style_name, text, next_is_table)
+                level = self._extract_word_style_level(para, style_name)
 
-                # 补充检测：加粗短段落 / 模式匹配标题 / 表格前描述行
-                if level is None and text:
-                    runs = [r for r in para.runs if r.text.strip()]
-                    is_all_bold = runs and all(r.bold for r in runs)
-                    is_short = len(text) <= 80 and text[-1] not in '。；;'
-                    not_wrapped = not ((text.startswith('（') and text.endswith('）')) or
-                                       (text.startswith('(') and text.endswith(')')))
+                # 统一标题检测：编号模式 + Word 样式 + 兜底检测
+                runs = [r for r in para.runs if r.text.strip()]
+                is_all_bold = runs and all(r.bold for r in runs)
 
-                    if is_all_bold and is_short and not_wrapped:
-                        # 加粗短段落 → 当前标题级别 + 1
-                        level = min(current_heading_level + 1, 6) if current_heading_level else 4
+                level = _unified_detect_heading(
+                    text=text,
+                    word_style_level=level,
+                    is_bold=is_all_bold,
+                    is_before_table=next_is_table,
+                    current_heading_level=current_heading_level,
+                )
 
-                    elif self._NOTE_TITLE_PATTERNS.search(text) and is_short and not_wrapped:
-                        # 财务报表附注模式匹配标题
-                        level = min(current_heading_level + 1, 6) if current_heading_level else 4
-
-                    elif (next_is_table and len(text) <= 60 and
-                          text[-1] not in '。；;.' and not_wrapped and
-                          not re.match(r'^续[（(：:]', text) and text != '续' and
-                          not re.match(r'^[①②③④⑤⑥⑦⑧⑨⑩]', text)):
-                        # 表格前描述性短段落 → 子标题
-                        level = min(current_heading_level + 1, 6) if current_heading_level else 4
+                # 修正 flat style：Word 样式给出 level=1 但无一级编号
+                level = correct_flat_style_level(level, text, current_heading_level)
 
                 para_info: Dict[str, Any] = {
                     "text": para.text,
@@ -352,6 +327,31 @@ class WorkpaperParser:
                     table_data.append(row_data)
                 tables.append(table_data)
                 table_after_para_idx.append(para_idx)
+
+                # ── 嵌套表格提取：检查单元格内是否包含子表格 ──
+                for row in tbl.rows:
+                    for cell in row.cells:
+                        nested_tbls = cell._tc.findall(qn('w:tbl'))
+                        for nested_tbl_el in nested_tbls:
+                            try:
+                                nested_tbl = DocxTable(nested_tbl_el, doc)
+                                nested_data: List[List[str]] = []
+                                for nrow in nested_tbl.rows:
+                                    nseen: set = set()
+                                    nrow_data: List[str] = []
+                                    for ncell in nrow.cells:
+                                        ncid = id(ncell._tc)
+                                        if ncid in nseen:
+                                            nrow_data.append('')
+                                            continue
+                                        nseen.add(ncid)
+                                        nrow_data.append(ncell.text.strip())
+                                    nested_data.append(nrow_data)
+                                if nested_data:
+                                    tables.append(nested_data)
+                                    table_after_para_idx.append(para_idx)
+                            except Exception:
+                                pass
 
         # 兼容旧字段 table_contexts
         table_contexts: List[str] = []
@@ -395,50 +395,23 @@ class WorkpaperParser:
         """解析旧版 .doc 文件。Windows 上使用 pywin32 COM 接口。"""
         return await asyncio.to_thread(self._parse_doc_legacy_sync, file_path)
 
-    # ── .doc 标题模式检测（与 _parse_docx_sync 对齐） ──
-    _DOC_HEADING_PATTERNS: List[Tuple[re.Pattern, int]] = [
-        (re.compile(r'^[一二三四五六七八九十]+、'), 1),
-        (re.compile(r'^[（(][一二三四五六七八九十]+[）)]'), 2),
-        (re.compile(r'^\d+[、.]'), 3),
-        (re.compile(r'^[（(]\d+[）)]'), 4),
-        (re.compile(r'^[①②③④⑤⑥⑦⑧⑨⑩]'), 4),
-    ]
+    # ── .doc 标题检测统一使用 heading_utils ──
+    _DOC_HEADING_PATTERNS = CHINESE_NUMBERING_PATTERNS  # 兼容别名
 
     def _detect_doc_heading_level(self, para_text: str, outline_level: int,
                                    is_bold: bool) -> Optional[int]:
-        """检测 .doc 段落的标题级别（与 _parse_docx_sync 的检测逻辑对齐）。
-
-        检测顺序：
-        1. COM OutlineLevel 1-9
-        2. 中文编号模式匹配（一、 / （一） / 1. / (1) / ①）
-        3. 加粗短段落 → 子标题
-        4. 财务报表附注模式匹配
-        """
+        """检测 .doc 段落的标题级别（统一使用 heading_utils）。"""
         if not para_text:
             return None
 
-        # 1. COM OutlineLevel
-        if 1 <= outline_level <= 9:
-            return outline_level
+        # COM OutlineLevel 1-9 → 作为 word_style_level
+        word_style_level = outline_level if 1 <= outline_level <= 9 else None
 
-        # 2. 中文编号模式
-        for pattern, level in self._DOC_HEADING_PATTERNS:
-            if pattern.match(para_text):
-                return level
-
-        is_short = len(para_text) <= 80 and para_text[-1] not in '。；;'
-        not_wrapped = not ((para_text.startswith('（') and para_text.endswith('）')) or
-                           (para_text.startswith('(') and para_text.endswith(')')))
-
-        # 3. 加粗短段落
-        if is_bold and is_short and not_wrapped:
-            return 4  # 默认子标题级别
-
-        # 4. 财务报表附注模式
-        if self._NOTE_TITLE_PATTERNS.search(para_text) and is_short and not_wrapped:
-            return 4
-
-        return None
+        return _unified_detect_heading(
+            text=para_text,
+            word_style_level=word_style_level,
+            is_bold=is_bold,
+        )
 
     def _parse_doc_legacy_sync(self, file_path: str) -> WordParseResult:
         """同步解析 .doc 文件（在线程池中调用）。
@@ -494,15 +467,17 @@ class WorkpaperParser:
                             raw_text = obj.Range.Text or ""
                             text = raw_text.strip().rstrip('\r\x07')
 
-                            # 跳过纯空段落
-                            if not text:
-                                continue
-
                             # 获取 OutlineLevel
                             try:
                                 outline_level = obj.OutlineLevel
                             except Exception:
                                 outline_level = 10  # wdOutlineLevelBodyText
+
+                            # 空段落也保留，以维持段落索引与 .docx 一致
+                            if not text:
+                                paragraphs.append({"text": "", "style": ""})
+                                para_idx = len(paragraphs) - 1
+                                continue
 
                             # 检测加粗：段落的 Range.Bold
                             is_bold = False
@@ -526,16 +501,22 @@ class WorkpaperParser:
                                 if (text[-1] not in '。；;.' and not_wrapped and
                                         not re.match(r'^续[（(：:]', text) and text != '续'):
                                     # 检查后续元素是否为表格
+                                    next_is_tbl = False
                                     try:
                                         para_end = obj.Range.End
                                         for ntype, nstart, _nobj in body_elements:
                                             if nstart <= para_end:
                                                 continue
                                             if ntype == 'table':
-                                                level = min(current_heading_level + 1, 6) if current_heading_level else 4
-                                            break  # 只看紧邻的下一个元素
+                                                next_is_tbl = True
+                                            break
                                     except Exception:
                                         pass
+                                    if next_is_tbl:
+                                        level = min(current_heading_level + 1, 6) if current_heading_level else 4
+
+                            # 修正 flat style（与 _parse_docx_sync 对齐）
+                            level = correct_flat_style_level(level, text, current_heading_level)
 
                             para_info: Dict[str, Any] = {
                                 "text": text,

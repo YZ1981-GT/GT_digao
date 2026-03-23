@@ -69,19 +69,16 @@ const fmtNum = (v: any): string => {
 const lvlBorder  = (l: number) => LEVEL_COLORS.border[l]  || '#ccc';
 
 // ─── 判断是否为"财务报表主要项目注释"类标题 ───
-// 上市版: "合并财务报表项目附注"  国企版: "财务报表主要项目注释"
-const MAIN_NOTE_KW = [
-  '财务报表主要项目', '主要项目注释', '报表项目注释',
-  '报表主要项目', '合并财务报表项目',
-];
-// 上市版: "公司财务报表主要项目注释"（无"母"字）
-// 国企版: "母公司财务报表的主要项目附注"
-const PARENT_NOTE_KW = [
-  '母公司财务报表', '母公司报表主要项目',
-  '公司财务报表主要项目注释', '公司财务报表主要项目附注',
-];
+// 通用规则：标题中同时包含"报表"相关词 + "项目"相关词即可匹配
+// 不再穷举关键词，而是用组合模式覆盖所有模板变体
+const _STMT_KW = ['财务报表', '会计报表', '报表'];
+const _ITEM_KW = ['项目注释', '项目说明', '项目附注', '主要项目', '重要项目'];
 
-// 合并报表注释的延续章节（位于主项目注释之后、母公司之前，单独页签显示）
+// 母公司标识词
+const _PARENT_KW = ['母公司'];
+
+// 合并报表注释的延续章节（位于主项目注释之后、母公司之前）
+// 使用通用模式：这些是审计准则要求的固定披露事项，不会因模板不同而变化
 const EXTRA_DISCLOSURE_KW = [
   '研发支出', '在其他主体中的权益', '政府补助', '金融工具风险',
   '公允价值', '关联方', '股份支付', '企业合并及合并',
@@ -90,6 +87,23 @@ const EXTRA_DISCLOSURE_KW = [
   '其他重要事项',
 ];
 
+// 审计报告正文关键词（混入附注时需过滤）
+const AUDIT_REPORT_KW = [
+  '审计意见', '形成审计意见', '注册会计师', '管理层和治理层',
+  '关键审计事项', '其他信息', '对其他法律法规要求的报告',
+];
+
+function isAuditReportContent(title: string): boolean {
+  return AUDIT_REPORT_KW.some(k => title.includes(k));
+}
+
+// 检测节点是否为审计报告封面/结构（子节点含"审计报告"、"目录"等）
+function isAuditReportCover(sec: NoteSection): boolean {
+  if (sec.children.some(c => /^审计报告$|^目\s*录$/.test(c.title.trim()))) return true;
+  if (/^审计报告$/.test(sec.title.trim())) return true;
+  return false;
+}
+
 function isExtraDisclosure(title: string): boolean {
   const c = title.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
   return EXTRA_DISCLOSURE_KW.some(k => c.includes(k));
@@ -97,13 +111,19 @@ function isExtraDisclosure(title: string): boolean {
 
 function isMainNoteSection(title: string): boolean {
   const c = title.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
-  // 先排除母公司标题，避免"公司财务报表主要项目注释"同时命中两个
+  // 先排除母公司标题
   if (isParentNoteSection(title)) return false;
-  return MAIN_NOTE_KW.some(k => c.includes(k));
+  // 通用规则：包含"报表"相关词 + "项目"相关词
+  const hasStmt = _STMT_KW.some(k => c.includes(k));
+  const hasItem = _ITEM_KW.some(k => c.includes(k));
+  return hasStmt && hasItem;
 }
 function isParentNoteSection(title: string): boolean {
   const c = title.replace(/[\s（()）一二三四五六七八九十、.\d]/g, '');
-  return PARENT_NOTE_KW.some(k => c.includes(k));
+  // 通用规则：包含"母公司" + ("报表" 或 "项目")
+  const hasParent = _PARENT_KW.some(k => c.includes(k));
+  const hasStmtOrItem = _STMT_KW.some(k => c.includes(k)) || _ITEM_KW.some(k => c.includes(k));
+  return hasParent && hasStmtOrItem;
 }
 
 // ─── Props ───
@@ -386,15 +406,22 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
   }, [noteToStmtMap, statementItems]);
 
   // ─── 附注分组：前段 / 主项目注释 / 其他专项披露 / 母公司 / 后段 ───
+  // 判断标题是否以一级中文编号开头（一、二、三...十一、）
+  const hasTopNumbering = (title: string) => /^[一二三四五六七八九十百]+、/.test(title.trim());
+
   const noteGroups = useMemo(() => {
     const before: NoteSection[] = [];
     let mainSec: NoteSection | null = null;
     let parentSec: NoteSection | null = null;
     const extra: NoteSection[] = [];
     const after: NoteSection[] = [];
+    // 收集 mainSec 之后、无一级编号的"孤儿"节点（flat 结构兼容）
+    const orphans: NoteSection[] = [];
     let foundMain = false;
 
     for (const sec of sections) {
+      // 在 mainSec 之后检测审计报告内容：一旦发现，后续全部截断
+      if (foundMain && (isAuditReportContent(sec.title) || isAuditReportCover(sec))) break;
       if (isMainNoteSection(sec.title)) {
         mainSec = sec;
         foundMain = true;
@@ -404,9 +431,31 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         before.push(sec);
       } else if (isExtraDisclosure(sec.title)) {
         extra.push(sec);
-      } else {
+      } else if (hasTopNumbering(sec.title)) {
+        // 有一级编号（如 八、九、十...）→ 属于后续独立章节
         after.push(sec);
+      } else {
+        // 无一级编号 → 可能是 mainSec 的子项（flat 结构下被错误提升到根级）
+        orphans.push(sec);
       }
+    }
+
+    // 兼容 flat 结构：如果 mainSec 没有子节点但存在孤儿节点，将孤儿收编为子节点
+    if (mainSec && mainSec.children.length === 0 && orphans.length > 0) {
+      // 修正孤儿节点的 level：作为 mainSec 的子节点，level 应为 mainSec.level + 1
+      const baseLvl = mainSec.level + 1;
+      const fixLevel = (sec: NoteSection, depth: number): NoteSection => ({
+        ...sec,
+        level: baseLvl + depth,
+        children: sec.children.map(c => fixLevel(c, depth + 1)),
+      });
+      mainSec = {
+        ...mainSec,
+        children: orphans.map(o => fixLevel(o, 0)),
+      } as NoteSection;
+    } else {
+      // mainSec 已有正确的子节点层级，孤儿归入"其他事项"
+      after.push(...orphans);
     }
 
     // 如果母公司节点未在根级找到，检查 mainSec 的子节点中是否有母公司容器
@@ -436,14 +485,11 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     return tabs;
   }, [noteGroups]);
 
-  // 所有 sheets 扁平化（过滤掉辅助性 sheet）
-  const SKIP_SHEET_KW = ['校验', 'custom', '辅助', '参数', '配置', 'config', 'setting', 'template', '横纵加', '勾稽', '目录', '封面', '说明', '备注', '增加额', '调整'];
+  // 所有 sheets 扁平化（后端已过滤辅助性 sheet，此处直接使用）
   const allSheets = useMemo(() => {
     const result: { fileId: string; sheet: any }[] = [];
     for (const [fileId, sheets] of Object.entries(sheetData)) {
       for (const sheet of sheets) {
-        const name = (sheet.sheet_name || '').toLowerCase();
-        if (SKIP_SHEET_KW.some(kw => name.includes(kw))) continue;
         result.push({ fileId, sheet });
       }
     }
@@ -501,7 +547,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
           marginBottom: isCollapsed ? 8 : 0,
         }}>
         <span style={{ fontSize: level <= 2 ? 14 : 13, fontWeight: 600, color: tc }}>
-          {seqNo && !(/^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇㈠㈡㈢㈣㈤㈥㈦㈧㈨㈩]/.test(title.trim()) || /^\d+[.、)）\s]/.test(title.trim()) || /^[\(（]\d+[\)）]/.test(title.trim())) && <span style={{ marginRight: 8, opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{seqNo}</span>}
+          {seqNo && !(/^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇㈠㈡㈢㈣㈤㈥㈦㈧㈨㈩]/.test(title.trim()) || /^\d+[.．、)）\s]/.test(title.trim()) || /^[\(（]\d+[\)）]/.test(title.trim())) && <span style={{ marginRight: 8, opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{seqNo}</span>}
           {title}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -544,10 +590,29 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
     const tc = level ? lvlColor(level) : GT.primary;
     const hBg = level ? lvlTitleBg(level) : GT.primaryBgDeep;
     const sBg = level ? lvlBodyBg(level) : GT.bgPage;
-    const rawHeaders: string[][] = nt.header_rows && nt.header_rows.length > 1 ? nt.header_rows : [];
+
+    // ── 智能修正：如果数据行第一行全是文本（无数字），提升为表头行 ──
+    let effectiveHeaderRows: string[][] = nt.header_rows && nt.header_rows.length > 0 ? [...nt.header_rows] : [];
+    let effectiveRows = nt.rows;
+    if (effectiveRows.length > 0) {
+      const firstDataRow = effectiveRows[0];
+      const hasNumber = firstDataRow.some((v: any) => {
+        if (v == null) return false;
+        const s = String(v).replace(/[,，\s]/g, '');
+        return s !== '' && !isNaN(Number(s)) && Math.abs(Number(s)) > 0;
+      });
+      const nonEmpty = firstDataRow.filter((v: any) => v != null && String(v).trim() !== '');
+      // 全是文本且至少有2个非空值 → 很可能是被误判为数据行的表头
+      if (!hasNumber && nonEmpty.length >= 2) {
+        effectiveHeaderRows = [...effectiveHeaderRows, firstDataRow.map((v: any) => String(v ?? '').trim())];
+        effectiveRows = effectiveRows.slice(1);
+      }
+    }
+
+    const rawHeaders: string[][] = effectiveHeaderRows.length > 1 ? effectiveHeaderRows : [];
 
     // 数据行的最大列数（用于确定表格总列数）
-    const dataCols = nt.rows.length > 0 ? Math.max(...nt.rows.map(r => r.length)) : 0;
+    const dataCols = effectiveRows.length > 0 ? Math.max(...effectiveRows.map(r => r.length)) : 0;
     const headerCols = rawHeaders.length > 0 ? Math.max(...rawHeaders.map(r => r.length)) : nt.headers.length;
     const totalCols = Math.max(dataCols, headerCols);
 
@@ -680,7 +745,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
               </thead>
             )}
             <tbody>
-              {nt.rows.slice(0, 30).map((row, ri) => (
+              {effectiveRows.slice(0, 30).map((row, ri) => (
                 <tr key={ri} style={{ background: ri % 2 === 0 ? GT.bgWhite : sBg }}>
                   {row.map((c: any, ci: number) => (
                     <td key={ci} style={{

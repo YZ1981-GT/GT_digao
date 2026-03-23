@@ -2726,29 +2726,19 @@ class ReconciliationEngine:
 
 
 
-            # ── 位置限制：每个科目下，只有第 1 个通过过滤的表格
+            # ── 白名单过滤：使用 amount_check_presets 预设规则判断
 
 
-            # 参与报表-附注余额核对，后续表格仅参与表间核对。
+            # 每个附注表格是否应参与报表-附注余额核对。
 
 
-            # 按口径（合并/母公司）分别计数。
+            # 按口径（合并/母公司）分别计数，每个口径最多匹配 MAX_VERIFY_TABLES 个表格。
 
 
-            # 依据：国企/上市报表附注中，科目标题下的第一个表格是汇总表
-
-
-            # （含期末/期初余额），后续表格均为明细/变动/政策描述表，
-
-
-            # 不应与报表余额直接比对。
-
-
-            MAX_VERIFY_TABLES = 1
+            MAX_VERIFY_TABLES = 2
 
 
             scope_verify_count: Dict[str, int] = {}  # scope_key → 已参与核对的表格数
-
 
 
 
@@ -2780,70 +2770,13 @@ class ReconciliationEngine:
 
 
 
-                # 跳过资产组成部分子表（原价/累计折旧/减值准备），
+                # 白名单过滤：使用预设规则判断该表格是否应参与报表-附注余额核对
 
 
-                # 它们的合计值不代表报表余额（账面价值）
+                from .amount_check_presets import should_verify_note_table
 
 
-                if self._is_component_subtable(note):
-
-
-                    valid_note_ids.pop()
-
-
-                    continue
-
-
-
-
-
-                # 跳过应收类科目的明细/分类子表（按账龄、按组合、坏账准备计提等），
-
-
-                # 这些表仅参与表间核对，不与报表余额直接比对
-
-
-                if self._is_detail_subtable(note):
-
-
-                    valid_note_ids.pop()
-
-
-                    continue
-
-
-
-
-
-                # 跳过纯政策/描述性表格（如坏账准备计提政策说明表），
-
-
-                # 这些表格仅描述会计政策，不含数值数据
-
-
-                if self._is_policy_description_table(note):
-
-
-                    valid_note_ids.pop()
-
-
-                    continue
-
-
-
-
-
-                # 跳过营业收入/营业成本的明细子表（按行业、按地区、按商品转让时间划分），
-
-
-                # 仅汇总表（主营业务/其他业务/合计）与报表余额直接比对
-
-
-                if (self._is_revenue_cost_combined_table(note)
-
-
-                        and self._is_revenue_cost_detail_table(note)):
+                if not should_verify_note_table(item.account_name, note.section_title, note.account_name):
 
 
                     valid_note_ids.pop()
@@ -12483,6 +12416,15 @@ class ReconciliationEngine:
     }
 
 
+    # 二级明细中的"组件"关键词：含这些词的子项需要在附注的组件明细表中匹配，
+
+
+    # 而非汇总表。例如"固定资产原价"应匹配原价明细表，不应匹配固定资产汇总表。
+
+
+    _SUB_ITEM_COMPONENT_KW = ["原价", "原值", "累计折旧", "累计摊销", "减值准备", "跌价准备"]
+
+
 
 
 
@@ -12648,6 +12590,27 @@ class ReconciliationEngine:
 
 
 
+            # 判断子项是否为组件类（原价/折旧/减值等）
+
+
+            component_kw_hit = None
+
+
+            for ckw in self._SUB_ITEM_COMPONENT_KW:
+
+
+                if ckw in clean_name:
+
+
+                    component_kw_hit = ckw
+
+
+                    break
+
+
+
+
+
             # 在附注表格中查找匹配行
 
 
@@ -12669,10 +12632,34 @@ class ReconciliationEngine:
                     continue
 
 
+                # 组件类子项：附注表格必须包含该组件关键词（在行标签中），
+
+
+                # 否则跳过（避免匹配到汇总表）
+
+
+                if component_kw_hit:
+
+
+                    table_text = " ".join(
+
+
+                        str(r[0] or "") for r in note.rows if r
+
+
+                    )
+
+
+                    if component_kw_hit not in table_text:
+
+
+                        continue
 
 
 
-                # 找期末/期初列
+
+
+                # 找期末/期初列（优先选择"账面价值"列）
 
 
                 closing_col = None
@@ -12681,19 +12668,85 @@ class ReconciliationEngine:
                 opening_col = None
 
 
+                closing_bv_col = None  # 含"账面价值"的期末列
+
+
+                opening_bv_col = None  # 含"账面价值"的期初列
+
+
+                _bv_kw = self._BOOK_VALUE_KW
+
+
+                _hdrs = note.headers or []
+
+
+                # 多行表头时也检查最后一行（子列名称行）
+
+
+                _last_hdr_row = note.header_rows[-1] if note.header_rows else []
+
+
                 for col in ts.columns:
 
 
-                    if col.semantic == "closing_balance" and closing_col is None:
+                    ci = col.col_index
 
 
-                        closing_col = col.col_index
+                    hdr_text = str(_hdrs[ci] or "").replace(" ", "") if ci < len(_hdrs) else ""
 
 
-                    elif col.semantic == "opening_balance" and opening_col is None:
+                    # 也检查多行表头最后一行
 
 
-                        opening_col = col.col_index
+                    hdr_text2 = str(_last_hdr_row[ci] or "").replace(" ", "") if ci < len(_last_hdr_row) else ""
+
+
+                    has_bv = any(kw in hdr_text for kw in _bv_kw) or any(kw in hdr_text2 for kw in _bv_kw)
+
+
+                    if col.semantic == "closing_balance":
+
+
+                        if closing_col is None:
+
+
+                            closing_col = ci
+
+
+                        if has_bv and closing_bv_col is None:
+
+
+                            closing_bv_col = ci
+
+
+                    elif col.semantic == "opening_balance":
+
+
+                        if opening_col is None:
+
+
+                            opening_col = ci
+
+
+                        if has_bv and opening_bv_col is None:
+
+
+                            opening_bv_col = ci
+
+
+                # 优先使用含"账面价值"的列
+
+
+                if closing_bv_col is not None:
+
+
+                    closing_col = closing_bv_col
+
+
+                if opening_bv_col is not None:
+
+
+                    opening_col = opening_bv_col
 
 
 
@@ -14640,22 +14693,37 @@ class ReconciliationEngine:
                 continue
 
 
-            # 期初
+            # 判断是否为期初行
 
 
-            if opening_row_idx is None:
+            is_opening = any(kw in label for kw in self._EQUITY_OPENING_ROW_KW)
 
 
-                if any(kw in label for kw in self._EQUITY_OPENING_ROW_KW):
+            # 判断是否为期末行（排除同时匹配期初的行，如"上年年末余额"）
 
 
-                    opening_row_idx = ri
+            is_closing = (
 
 
-            # 期末（取最后一个匹配的行，因为可能有"调整后期初"等中间行）
+                any(kw in label for kw in self._EQUITY_CLOSING_ROW_KW)
 
 
-            if any(kw in label for kw in self._EQUITY_CLOSING_ROW_KW):
+                and not is_opening
+
+
+            )
+
+
+            # 取第一个匹配行（权益变动表先本年后上年，第一段属于本年金额）
+
+
+            if opening_row_idx is None and is_opening:
+
+
+                opening_row_idx = ri
+
+
+            if closing_row_idx is None and is_closing:
 
 
                 closing_row_idx = ri
@@ -16271,9 +16339,18 @@ class ReconciliationEngine:
         因此取该行的"合计"列或第一个非空数值即可。
         不应按表头期间关键词选列（"本年金额"列中的"期初余额"行
         才是正确的本年期初值）。
+
+        注意：未分配利润表中"调整前 上期末未分配利润"包含"期末未分配"，
+        但它实际是期初调整行，不是期末行。通过排除"调整前"/"上期末"/"上年末"
+        前缀来避免误匹配，并优先取最后一个匹配行（期末行通常在表格末尾）。
         """
         closing_label_kw = ["期末余额", "期末未分配", "本期期末余额", "年末余额", "期末数", "期末金额", "期末合计"]
-        opening_label_kw = ["期初余额", "期初未分配", "本期期初余额", "年初余额", "期初数", "期初金额", "期初合计"]
+        opening_label_kw = ["期初余额", "期初未分配", "本期期初余额", "年初余额", "期初数", "期初金额", "期初合计",
+                            "上年年末余额", "上年末余额", "上期末余额"]
+        # 排除前缀：标签以这些词开头时，不视为期末行
+        _closing_exclude_prefix = ["调整前", "调整后"]
+        # 排除关键词：标签包含这些词时，不视为期末行（"上期末"="上期的期末"=期初）
+        _closing_exclude_kw = ["上期末", "上年末", "上年年末"]
 
         # 找"合计"/"总计"列索引（优先取该列的值）
         total_col = -1
@@ -16291,7 +16368,16 @@ class ReconciliationEngine:
                 continue
             first = str(row[0] if row else "").replace(" ", "").replace("\u3000", "").strip()
 
-            is_closing_row = any(kw in first for kw in closing_label_kw)
+            # 排除"调整前上期末未分配利润"等行被误匹配为期末行
+            _excluded_as_closing = (
+                any(first.startswith(p) for p in _closing_exclude_prefix)
+                or any(kw in first for kw in _closing_exclude_kw)
+            )
+
+            is_closing_row = (
+                not _excluded_as_closing
+                and any(kw in first for kw in closing_label_kw)
+            )
             is_opening_row = any(kw in first for kw in opening_label_kw)
 
             if not is_closing_row and not is_opening_row:
@@ -16310,7 +16396,8 @@ class ReconciliationEngine:
                         break
 
             if val is not None:
-                if is_closing_row and closing_val is None:
+                if is_closing_row:
+                    # 取最后一个匹配的期末行（"期末未分配利润"通常在表格末尾）
                     closing_val = val
                 elif is_opening_row and opening_val is None:
                     opening_val = val
@@ -18509,6 +18596,10 @@ class ReconciliationEngine:
     _ECL_CLOSING_ROW_KW = ["期末余额", "年末余额", "期末"]
 
 
+    # ECL表变动行负号关键词（这些行应从期初中减去）
+    _ECL_NEGATIVE_MOVEMENT_KW = ["转回", "转销", "核销", "减少", "冲销"]
+
+
 
 
 
@@ -19061,13 +19152,25 @@ class ReconciliationEngine:
 
 
 
-            # 其余行视为变动项
+            # 其余行视为变动项，根据标签判断正负号
 
 
             if val is not None:
 
 
-                movement_sum += val
+                # 转回/转销/核销/减少等行应取反（减去）
+
+
+                if any(kw in label for kw in self._ECL_NEGATIVE_MOVEMENT_KW):
+
+
+                    movement_sum -= val
+
+
+                else:
+
+
+                    movement_sum += val
 
 
                 has_movement = True
@@ -19259,12 +19362,78 @@ class ReconciliationEngine:
 
 
 
+        # 多行表头：构建每列的"父组"标签（第一行表头，空列继承左边最近的非空列）
+
+
+        # 例如：第一行 ["票据种类", "期末数", "", "", "期初数", "", ""]
+
+
+        # → parent_group = ["票据种类", "期末数", "期末数", "期末数", "期初数", "期初数", "期初数"]
+
+
+        header_rows = getattr(note_table, "header_rows", None) or []
+
+
+        parent_group: List[str] = [""] * len(norm_h)
+
+
+        if header_rows and len(header_rows) >= 2:
+
+
+            first_row = header_rows[0]
+
+
+            last_label = ""
+
+
+            for ci in range(len(norm_h)):
+
+
+                h = str(first_row[ci] if ci < len(first_row) else "").replace(" ", "").replace("\u3000", "")
+
+
+                if h:
+
+
+                    last_label = h
+
+
+                parent_group[ci] = last_label
+
+
+
         # 按期间分组查找列：(gross_col, [prov_cols], net_col)
 
 
         col_groups = []  # [(gross, [prov_col1, ...], net, period_label)]
 
 
+
+        def _col_matches_period(ci: int, period_kw: list) -> bool:
+
+
+            """判断列是否属于指定期间：先查最后一行表头，再查父组标签。"""
+
+
+            h = norm_h[ci] if ci < len(norm_h) else ""
+
+
+            if any(pk in h for pk in period_kw):
+
+
+                return True
+
+
+            pg = parent_group[ci] if ci < len(parent_group) else ""
+
+
+            if pg and any(pk in pg for pk in period_kw):
+
+
+                return True
+
+
+            return False
 
 
 
@@ -19283,15 +19452,13 @@ class ReconciliationEngine:
                 if any(kw in h for kw in keywords):
 
 
-                    if period_kw is None or any(pk in h for pk in period_kw):
+                    if period_kw is None or _col_matches_period(ci, period_kw):
 
 
                         return ci
 
 
             return None
-
-
 
 
 
@@ -19316,15 +19483,13 @@ class ReconciliationEngine:
                 if any(kw in h for kw in keywords):
 
 
-                    if period_kw is None or any(pk in h for pk in period_kw):
+                    if period_kw is None or _col_matches_period(ci, period_kw):
 
 
                         result.append(ci)
 
 
             return result
-
-
 
 
 
@@ -19350,8 +19515,6 @@ class ReconciliationEngine:
 
 
 
-
-
         # 如果按期间没找到，尝试不区分期间（表格只有一组列）
 
 
@@ -19371,8 +19534,6 @@ class ReconciliationEngine:
 
 
                 col_groups.append((g, prov_cols, n, ""))
-
-
 
 
 

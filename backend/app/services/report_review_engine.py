@@ -258,11 +258,21 @@ class ReportReviewEngine:
         session: ReportReviewSession,
         config: ReportReviewConfig,
     ) -> AsyncGenerator[str, None]:
-        """流式执行五层复核。每次 yield 后用 asyncio.sleep(0) 确保事件及时 flush。"""
+        """流式执行五层复核。每次 yield 后用 asyncio.sleep(0) 确保事件及时 flush。
+        
+        review_mode:
+          - "local": 仅本地规则校验（跳过所有 LLM 调用）
+          - "llm": 仅 LLM 增强校验（跳过本地规则，执行 LLM 反馈循环 + 正文/附注/文本质量）
+          - "full": 完整复核（默认，等同于先 local 再 llm）
+        """
+        review_mode = getattr(config, 'review_mode', 'full')
+        run_local = True  # 本地规则校验始终运行（LLM 模式也需要本地结果作为输入）
+        run_llm = review_mode in ("llm", "full")
         all_findings: List[ReportReviewFinding] = []
         oai = self.openai_service
 
-        yield json.dumps({"status": "started", "message": "开始审计报告复核"}, ensure_ascii=False)
+        _mode_labels = {"local": "本地复核", "llm": "LLM复核", "full": "完整复核"}
+        yield json.dumps({"status": "started", "message": f"开始审计报告{_mode_labels.get(review_mode, '复核')}", "review_mode": review_mode}, ensure_ascii=False)
         await asyncio.sleep(0)
 
         # ── 预加载模板 TOC 和 note_id → StatementItem 映射（Phase 1 & 2 共用）──
@@ -309,7 +319,7 @@ class ReportReviewEngine:
                 try:
                     t_hint, s_hint = _build_hints_for_note(note.id)
                     ts = await self.table_analyzer.analyze_table_structure(
-                        note, oai,
+                        note, oai if run_llm else None,
                         template_hint=t_hint,
                         statement_amount_hint=s_hint,
                     )
@@ -385,7 +395,7 @@ class ReportReviewEngine:
                 _llm_structure_check_notes.append((note, preset, diff))
 
         # ── 第四层：对剩余有差异的表格调用 LLM 重新识别 ──
-        if _llm_structure_check_notes and oai:
+        if _llm_structure_check_notes and oai and run_llm:
             async def _llm_check_one(note: NoteTable, preset: Dict, diff: Dict) -> Optional[Dict]:
                 try:
                     t_hint, s_hint = _build_hints_for_note(note.id)
@@ -694,7 +704,7 @@ class ReportReviewEngine:
 
             # ── 统一 LLM 反馈循环：合并金额不一致 + 本地校验失败的表格，一次性 LLM reanalyze ──
             all_problem_note_ids = mismatch_note_ids | local_error_note_ids
-            if all_problem_note_ids and oai:
+            if all_problem_note_ids and oai and run_llm:
                 logger.info(
                     "合并 LLM 反馈循环：金额不一致 %d 个 + 本地校验失败 %d 个 = 共 %d 个表格需 LLM 复核",
                     len(mismatch_note_ids), len(local_error_note_ids), len(all_problem_note_ids),
@@ -861,7 +871,7 @@ class ReportReviewEngine:
                 n for n in session.note_tables
                 if self.table_analyzer.is_wide_table_candidate(n, table_structures.get(n.id))
             ]
-            if wide_table_candidates and oai:
+            if wide_table_candidates and oai and run_llm:
                 yield json.dumps({
                     "status": "phase_progress", "phase": "reconciliation",
                     "message": f"正在对 {len(wide_table_candidates)} 个宽表进行横向公式分析...",
@@ -1013,14 +1023,15 @@ class ReportReviewEngine:
             all_findings.extend(equity_change_findings)
 
             # ── 受限资产交叉披露验证（LLM 辅助）──
-            try:
-                restricted_findings = await self.reconciliation.check_restricted_asset_disclosure(
-                    session.note_tables, session.note_sections, oai,
-                )
-                cross_table_check_count += len(restricted_findings)
-                all_findings.extend(restricted_findings)
-            except Exception as e:
-                logger.warning("受限资产交叉披露验证失败: %s", e)
+            if run_llm:
+                try:
+                    restricted_findings = await self.reconciliation.check_restricted_asset_disclosure(
+                        session.note_tables, session.note_sections, oai,
+                    )
+                    cross_table_check_count += len(restricted_findings)
+                    all_findings.extend(restricted_findings)
+                except Exception as e:
+                    logger.warning("受限资产交叉披露验证失败: %s", e)
 
             # ── 所得税费用调整过程表校验 (F74-4~F74-6) ──
             income_tax_adj_findings = self.reconciliation.check_income_tax_adjustment_process(
@@ -1044,14 +1055,15 @@ class ReportReviewEngine:
             all_findings.extend(supp_depr_findings)
 
             # ── LLM 文本合理性审核 (40+ formulas) ──
-            try:
-                text_reason_findings = await self.reconciliation.check_text_reasonableness(
-                    session.note_tables, oai,
-                )
-                cross_table_check_count += len(text_reason_findings)
-                all_findings.extend(text_reason_findings)
-            except Exception as e:
-                logger.warning("LLM文本合理性审核失败: %s", e)
+            if run_llm:
+                try:
+                    text_reason_findings = await self.reconciliation.check_text_reasonableness(
+                        session.note_tables, oai,
+                    )
+                    cross_table_check_count += len(text_reason_findings)
+                    all_findings.extend(text_reason_findings)
+                except Exception as e:
+                    logger.warning("LLM文本合理性审核失败: %s", e)
 
         # 变动分析：1级报表科目 + 2级附注明细行
         logger.info(
@@ -1318,12 +1330,15 @@ class ReportReviewEngine:
         await asyncio.sleep(0)
 
         # 3. 正文复核（并发执行多项检查）
-        yield json.dumps({"status": "phase", "phase": "body_review", "message": "正在复核审计报告正文..."}, ensure_ascii=False)
+        if run_llm:
+            yield json.dumps({"status": "phase", "phase": "body_review", "message": "正在复核审计报告正文..."}, ensure_ascii=False)
+        else:
+            yield json.dumps({"status": "phase_complete", "phase": "body_review", "message": "本地模式跳过正文复核", "findings_count": 0, "details": ["本地复核模式不执行 LLM 正文复核"]}, ensure_ascii=False)
         await asyncio.sleep(0)
         report_body = "\n".join(
             p.get("text", "") for p in session.audit_report_content if p.get("text")
         ) if session.audit_report_content else ""
-        if isinstance(report_body, str) and report_body:
+        if run_llm and isinstance(report_body, str) and report_body:
             try:
                 body_results = await asyncio.gather(
                     self.body_reviewer.check_entity_name_consistency(
@@ -1343,24 +1358,30 @@ class ReportReviewEngine:
             except Exception as e:
                 logger.warning("正文复核失败: %s", e)
 
-        body_finding_count = len(all_findings) - recon_finding_count - change_finding_count
-        body_details = []
-        body_content_len = len(report_body) if isinstance(report_body, str) else 0
-        if body_content_len > 0:
-            body_details.append(f"审计报告正文共 {body_content_len} 字")
-            body_details.append("已检查：主体名称一致性、简称使用规范性、模板合规性")
+        if run_llm:
+            body_finding_count = len(all_findings) - recon_finding_count - change_finding_count
+            body_details = []
+            body_content_len = len(report_body) if isinstance(report_body, str) else 0
+            if body_content_len > 0:
+                body_details.append(f"审计报告正文共 {body_content_len} 字")
+                body_details.append("已检查：主体名称一致性、简称使用规范性、模板合规性")
+            else:
+                body_details.append("未检测到审计报告正文内容，跳过正文复核")
+            yield json.dumps({
+                "status": "phase_complete", "phase": "body_review",
+                "message": f"正文复核完成，发现 {body_finding_count} 个问题",
+                "findings_count": body_finding_count,
+                "details": body_details,
+            }, ensure_ascii=False)
+            await asyncio.sleep(0)
         else:
-            body_details.append("未检测到审计报告正文内容，跳过正文复核")
-        yield json.dumps({
-            "status": "phase_complete", "phase": "body_review",
-            "message": f"正文复核完成，发现 {body_finding_count} 个问题",
-            "findings_count": body_finding_count,
-            "details": body_details,
-        }, ensure_ascii=False)
-        await asyncio.sleep(0)
+            body_finding_count = 0
 
         # 4. 附注内容复核（并发处理各章节，带进度反馈）
-        yield json.dumps({"status": "phase", "phase": "note_review", "message": "正在复核附注内容..."}, ensure_ascii=False)
+        if run_llm:
+            yield json.dumps({"status": "phase", "phase": "note_review", "message": "正在复核附注内容..."}, ensure_ascii=False)
+        else:
+            yield json.dumps({"status": "phase_complete", "phase": "note_review", "message": "本地模式跳过附注复核", "findings_count": 0, "details": ["本地复核模式不执行 LLM 附注复核"]}, ensure_ascii=False)
         await asyncio.sleep(0)
         total_sections = 0
         total_paragraphs = 0
@@ -1441,7 +1462,7 @@ class ReportReviewEngine:
                     logger.warning("附注章节复核失败 %s: %s", section.title, e)
                 return results
 
-            if sections:
+            if sections and run_llm:
                 note_review_semaphore = asyncio.Semaphore(5)
 
                 async def _review_section_with_limit(section):
@@ -1490,150 +1511,154 @@ class ReportReviewEngine:
         except Exception as e:
             logger.warning("附注内容复核失败: %s", e)
 
-        pre_text_count = len(all_findings)
-        note_finding_count = pre_text_count - recon_finding_count - change_finding_count - body_finding_count
-        note_details = []
-        if total_sections > 0:
-            report_item_count = sum(1 for s in sections if s.section_type == "report_item_note")
-            template_count = sum(1 for s in sections if s.section_type in TEMPLATE_SECTION_TYPES)
-            other_count = total_sections - report_item_count - template_count
-            note_details.append(f"共提取 {total_sections} 个叙述性章节（{total_paragraphs} 个正文段落）")
-            review_parts = []
-            if report_item_count > 0:
-                review_parts.append(f"报表项目注释 {report_item_count} 个（重点复核）")
-            if other_count > 0:
-                review_parts.append(f"其他章节 {other_count} 个")
-            if template_count > 0:
-                review_parts.append(f"模板化章节 {template_count} 个（跳过表达检查）")
-            note_details.append(f"复核范围：{', '.join(review_parts)}")
-            # 统计章节类型分布
-            type_counts: Dict[str, int] = {}
-            for s in sections:
-                type_counts[s.section_type] = type_counts.get(s.section_type, 0) + 1
-            type_labels = {
-                "accounting_policy": "会计政策",
-                "basic_info": "基本情况",
-                "tax": "税项",
-                "related_party": "关联方",
-                "report_item_note": "报表项目注释",
-                "other": "其他",
-            }
-            type_parts = [f"{type_labels.get(k, k)} {v} 个" for k, v in type_counts.items()]
-            note_details.append(f"章节分布：{', '.join(type_parts)}")
+        if run_llm:
+            pre_text_count = len(all_findings)
+            note_finding_count = pre_text_count - recon_finding_count - change_finding_count - body_finding_count
+            note_details = []
+            if total_sections > 0:
+                report_item_count = sum(1 for s in sections if s.section_type == "report_item_note")
+                template_count = sum(1 for s in sections if s.section_type in TEMPLATE_SECTION_TYPES)
+                other_count = total_sections - report_item_count - template_count
+                note_details.append(f"共提取 {total_sections} 个叙述性章节（{total_paragraphs} 个正文段落）")
+                review_parts = []
+                if report_item_count > 0:
+                    review_parts.append(f"报表项目注释 {report_item_count} 个（重点复核）")
+                if other_count > 0:
+                    review_parts.append(f"其他章节 {other_count} 个")
+                if template_count > 0:
+                    review_parts.append(f"模板化章节 {template_count} 个（跳过表达检查）")
+                note_details.append(f"复核范围：{', '.join(review_parts)}")
+                # 统计章节类型分布
+                type_counts: Dict[str, int] = {}
+                for s in sections:
+                    type_counts[s.section_type] = type_counts.get(s.section_type, 0) + 1
+                type_labels = {
+                    "accounting_policy": "会计政策",
+                    "basic_info": "基本情况",
+                    "tax": "税项",
+                    "related_party": "关联方",
+                    "report_item_note": "报表项目注释",
+                    "other": "其他",
+                }
+                type_parts = [f"{type_labels.get(k, k)} {v} 个" for k, v in type_counts.items()]
+                note_details.append(f"章节分布：{', '.join(type_parts)}")
+            else:
+                note_details.append("未提取到附注叙述性章节内容")
+            unique_accounts = len(set(n.account_name for n in session.note_tables))
+            note_details.append(f"附注表格共 {len(session.note_tables)} 个，涉及 {unique_accounts} 个报表科目")
+            yield json.dumps({
+                "status": "phase_complete", "phase": "note_review",
+                "message": f"附注复核完成，发现 {note_finding_count} 个问题",
+                "findings_count": note_finding_count,
+                "details": note_details,
+            }, ensure_ascii=False)
+            await asyncio.sleep(0)
         else:
-            note_details.append("未提取到附注叙述性章节内容")
-        unique_accounts = len(set(n.account_name for n in session.note_tables))
-        note_details.append(f"附注表格共 {len(session.note_tables)} 个，涉及 {unique_accounts} 个报表科目")
-        yield json.dumps({
-            "status": "phase_complete", "phase": "note_review",
-            "message": f"附注复核完成，发现 {note_finding_count} 个问题",
-            "findings_count": note_finding_count,
-            "details": note_details,
-        }, ensure_ascii=False)
-        await asyncio.sleep(0)
+            note_finding_count = 0
+            pre_text_count = len(all_findings)
 
         # 5. 文本质量检查（并发执行）
-        yield json.dumps({"status": "phase", "phase": "text_quality", "message": "正在检查文本质量..."}, ensure_ascii=False)
-        await asyncio.sleep(0)
-        try:
-            # 拼接报告正文 + 附注叙述性内容，作为全文检查范围
-            text_parts = []
-            body_char_count = 0
-            note_text_char_count = 0
-
-            if isinstance(report_body, str) and report_body:
-                text_parts.append(report_body)
-                body_char_count = len(report_body)
-
-            # 附注叙述性段落
-            note_text_parts = []
-            if session.note_sections:
-                def _collect_paragraphs(nodes: list):
-                    for node in nodes:
-                        for p in node.content_paragraphs:
-                            if p.strip():
-                                note_text_parts.append(p)
-                        if node.children:
-                            _collect_paragraphs(node.children)
-                _collect_paragraphs(session.note_sections)
-            if note_text_parts:
-                note_text = "\n".join(note_text_parts)
-                text_parts.append(note_text)
-                note_text_char_count = len(note_text)
-
-            all_text = "\n\n".join(text_parts)
-
-            if all_text.strip():
-                quality_results = await asyncio.gather(
-                    self.text_analyzer.analyze_punctuation(all_text, oai, body_char_count=body_char_count),
-                    self.text_analyzer.analyze_typos(all_text, oai, body_char_count=body_char_count),
-                    return_exceptions=True,
-                )
-                for r in quality_results:
-                    if isinstance(r, list):
-                        all_findings.extend(r)
-                    elif isinstance(r, Exception):
-                        logger.warning("文本质量子任务失败: %s", r)
-        except Exception as e:
-            logger.warning("文本质量检查失败: %s", e)
-
-        text_finding_count = len(all_findings) - pre_text_count
-        text_details = []
-        checked_parts = []
-        if body_char_count > 0:
-            checked_parts.append(f"审计报告正文 {body_char_count} 字")
-        if note_text_char_count > 0:
-            checked_parts.append(f"附注叙述性内容 {note_text_char_count} 字")
-        if checked_parts:
-            text_details.append(f"检查范围：{'、'.join(checked_parts)}，合计 {body_char_count + note_text_char_count} 字")
-            text_details.append("已检查：中英文标点混用、标点符号规范、错别字检测")
+        if run_llm:
+            yield json.dumps({"status": "phase", "phase": "text_quality", "message": "正在检查文本质量..."}, ensure_ascii=False)
+            await asyncio.sleep(0)
         else:
-            text_details.append("未检测到正文或附注文本，跳过文本质量检查")
-        yield json.dumps({
-            "status": "phase_complete", "phase": "text_quality",
-            "message": f"文本质量检查完成，发现 {text_finding_count} 个问题",
-            "findings_count": text_finding_count,
-            "details": text_details,
-        }, ensure_ascii=False)
-        await asyncio.sleep(0)
+            yield json.dumps({"status": "phase_complete", "phase": "text_quality", "message": "本地模式跳过文本质量检查", "findings_count": 0, "details": ["本地复核模式不执行 LLM 文本质量检查"]}, ensure_ascii=False)
+            await asyncio.sleep(0)
+        if run_llm:
+            try:
+                # 拼接报告正文 + 附注叙述性内容，作为全文检查范围
+                text_parts = []
+                body_char_count = 0
+                note_text_char_count = 0
 
-        # ── 跨阶段去重：TEXT_QUALITY findings 与 REPORT_BODY_COMPLIANCE / NOTE_CONTENT 去重 ──
-        # Phase 3 (正文复核) 和 Phase 4 (附注复核) 的 LLM 可能已经报告了同一位置的问题，
-        # Phase 5 (文本质量) 的 LLM 可能再次报告相同位置的类似问题。
-        # 策略：如果 TEXT_QUALITY finding 的 location 中引用的原文片段与
-        #        REPORT_BODY_COMPLIANCE 或 NOTE_CONTENT finding 的 description 有重叠，则去除。
-        prior_phase_snippets: List[str] = []
-        for f in all_findings:
-            if f.category in (
-                ReportReviewFindingCategory.REPORT_BODY_COMPLIANCE,
-                ReportReviewFindingCategory.NOTE_CONTENT,
-            ):
-                # 提取 description 中的中文片段（去掉标点和空白后取连续中文子串）
-                for seg in re.findall(r'[\u4e00-\u9fff]{4,}', f.description or ""):
-                    prior_phase_snippets.append(seg)
-                for seg in re.findall(r'[\u4e00-\u9fff]{4,}', f.location or ""):
-                    prior_phase_snippets.append(seg)
+                if isinstance(report_body, str) and report_body:
+                    text_parts.append(report_body)
+                    body_char_count = len(report_body)
 
-        if prior_phase_snippets:
-            cross_dedup_removed = 0
-            filtered_findings: List[ReportReviewFinding] = []
+                # 附注叙述性段落
+                note_text_parts = []
+                if session.note_sections:
+                    def _collect_paragraphs(nodes: list):
+                        for node in nodes:
+                            for p in node.content_paragraphs:
+                                if p.strip():
+                                    note_text_parts.append(p)
+                            if node.children:
+                                _collect_paragraphs(node.children)
+                    _collect_paragraphs(session.note_sections)
+                if note_text_parts:
+                    note_text = "\n".join(note_text_parts)
+                    text_parts.append(note_text)
+                    note_text_char_count = len(note_text)
+
+                all_text = "\n\n".join(text_parts)
+
+                if all_text.strip():
+                    quality_results = await asyncio.gather(
+                        self.text_analyzer.analyze_punctuation(all_text, oai, body_char_count=body_char_count),
+                        self.text_analyzer.analyze_typos(all_text, oai, body_char_count=body_char_count),
+                        return_exceptions=True,
+                    )
+                    for r in quality_results:
+                        if isinstance(r, list):
+                            all_findings.extend(r)
+                        elif isinstance(r, Exception):
+                            logger.warning("文本质量子任务失败: %s", r)
+            except Exception as e:
+                logger.warning("文本质量检查失败: %s", e)
+
+            text_finding_count = len(all_findings) - pre_text_count
+            text_details = []
+            checked_parts = []
+            if body_char_count > 0:
+                checked_parts.append(f"审计报告正文 {body_char_count} 字")
+            if note_text_char_count > 0:
+                checked_parts.append(f"附注叙述性内容 {note_text_char_count} 字")
+            if checked_parts:
+                text_details.append(f"检查范围：{'、'.join(checked_parts)}，合计 {body_char_count + note_text_char_count} 字")
+                text_details.append("已检查：中英文标点混用、标点符号规范、错别字检测")
+            else:
+                text_details.append("未检测到正文或附注文本，跳过文本质量检查")
+            yield json.dumps({
+                "status": "phase_complete", "phase": "text_quality",
+                "message": f"文本质量检查完成，发现 {text_finding_count} 个问题",
+                "findings_count": text_finding_count,
+                "details": text_details,
+            }, ensure_ascii=False)
+            await asyncio.sleep(0)
+
+        # ── 跨阶段去重（仅 LLM 模式需要）──
+        if run_llm:
+            prior_phase_snippets: List[str] = []
             for f in all_findings:
-                if f.category == ReportReviewFindingCategory.TEXT_QUALITY:
-                    # 检查此 TEXT_QUALITY finding 是否与 Phase 3/4 的 finding 重叠
-                    desc_text = (f.description or "") + (f.location or "")
-                    is_dup = False
-                    for snippet in prior_phase_snippets:
-                        if snippet in desc_text:
-                            is_dup = True
-                            break
-                    if is_dup:
-                        cross_dedup_removed += 1
-                        logger.info("跨阶段去重：移除 TEXT_QUALITY finding '%s'（与正文/附注复核重叠）", f.description[:50] if f.description else "")
-                        continue
-                filtered_findings.append(f)
-            if cross_dedup_removed > 0:
-                logger.info("跨阶段去重：移除 %d 个与正文/附注复核重叠的文本质量 finding", cross_dedup_removed)
-            all_findings = filtered_findings
+                if f.category in (
+                    ReportReviewFindingCategory.REPORT_BODY_COMPLIANCE,
+                    ReportReviewFindingCategory.NOTE_CONTENT,
+                ):
+                    for seg in re.findall(r'[\u4e00-\u9fff]{4,}', f.description or ""):
+                        prior_phase_snippets.append(seg)
+                    for seg in re.findall(r'[\u4e00-\u9fff]{4,}', f.location or ""):
+                        prior_phase_snippets.append(seg)
+
+            if prior_phase_snippets:
+                cross_dedup_removed = 0
+                filtered_findings: List[ReportReviewFinding] = []
+                for f in all_findings:
+                    if f.category == ReportReviewFindingCategory.TEXT_QUALITY:
+                        desc_text = (f.description or "") + (f.location or "")
+                        is_dup = False
+                        for snippet in prior_phase_snippets:
+                            if snippet in desc_text:
+                                is_dup = True
+                                break
+                        if is_dup:
+                            cross_dedup_removed += 1
+                            logger.info("跨阶段去重：移除 TEXT_QUALITY finding '%s'（与正文/附注复核重叠）", f.description[:50] if f.description else "")
+                            continue
+                    filtered_findings.append(f)
+                if cross_dedup_removed > 0:
+                    logger.info("跨阶段去重：移除 %d 个与正文/附注复核重叠的文本质量 finding", cross_dedup_removed)
+                all_findings = filtered_findings
 
         # ── 同阶段去重：按 (category, account_name, location) 去除重复 finding ──
         seen_keys: set = set()

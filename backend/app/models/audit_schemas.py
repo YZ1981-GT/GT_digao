@@ -685,6 +685,7 @@ class ReportReviewSession(BaseModel):
     source_file_names: Dict[str, str] = Field(default_factory=dict, description="file_id → 原始文件名映射")
     entity_name: str = Field("", description="编制单位名称（从报表表头自动提取）")
     status: str = Field("created", description="会话状态：created/parsed/matched/analyzing_structure/reviewing/completed")
+    local_review_done: bool = Field(False, description="本地复核是否已完成")
     created_at: str = Field(..., description="创建时间ISO格式")
 
 
@@ -722,6 +723,7 @@ class ReportReviewConfig(BaseModel):
     custom_prompt: Optional[str] = Field(None, description="自定义复核要求")
     change_threshold: float = Field(0.3, description="变动阈值，默认30%")
     change_amount_threshold: float = Field(0, description="变动金额阈值（元），变动金额低于此值不报异常，默认0（不过滤）")
+    review_mode: str = Field("full", description="复核模式：local=仅本地规则, llm=仅LLM增强, full=完整复核")
 
 
 class ReportReviewResult(BaseModel):

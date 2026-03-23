@@ -37,6 +37,9 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
   const [currentPhase, setCurrentPhase] = useState<PhaseKey | null>(null);
   const [completedPhases, setCompletedPhases] = useState<Set<PhaseKey>>(new Set());
   const [accountProgress, setAccountProgress] = useState<string | null>(null);
+  const [localReviewDone, setLocalReviewDone] = useState(false);
+  const [showLlmWarning, setShowLlmWarning] = useState(false);
+  const [currentReviewMode, setCurrentReviewMode] = useState<'local' | 'llm' | 'full' | null>(null);
 
   /** 每个阶段的完成信息 */
   interface PhaseResult {
@@ -51,7 +54,7 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
   const [reviewDone, setReviewDone] = useState(false);
   const [totalFindings, setTotalFindings] = useState(0);
 
-  const handleStart = useCallback(async () => {
+  const handleStart = useCallback(async (reviewMode: 'local' | 'llm' | 'full' = 'full') => {
     if (!sessionId) return;
     setStarting(true);
     setError(null);
@@ -62,6 +65,7 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
     setPhaseResults({});
     setReviewDone(false);
     setTotalFindings(0);
+    setCurrentReviewMode(reviewMode);
     try {
       const resp = await fetch(`${API}/api/report-review/start`, {
         method: 'POST',
@@ -71,7 +75,8 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
           template_type: templateType,
           custom_prompt: customPrompt || undefined,
           change_threshold: threshold / 100,
-          change_amount_threshold: amountThreshold * 10000,  // 前端输入万元，后端用元
+          change_amount_threshold: amountThreshold * 10000,
+          review_mode: reviewMode,
         }),
       });
       if (!resp.ok) throw new Error(await resp.text());
@@ -115,6 +120,10 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
               setCurrentPhase(null);
               setProgress('复核完成');
               setReviewDone(true);
+              // 本地复核完成后标记
+              if (reviewMode === 'local' || reviewMode === 'full') {
+                setLocalReviewDone(true);
+              }
               // Count total findings
               const result = parsed.result;
               if (result?.findings) {
@@ -254,14 +263,43 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
         </div>
       )}
 
-      <button
-        className="gt-button"
-        style={{ backgroundColor: 'var(--gt-primary)', color: '#fff', padding: '10px 32px', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 15, fontWeight: 600 }}
-        onClick={handleStart}
-        disabled={starting}
-      >
-        {starting ? '正在复核中...' : '开始复核'}
-      </button>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <button
+          className="gt-button"
+          style={{
+            backgroundColor: 'var(--gt-primary)', color: '#fff', padding: '10px 28px',
+            border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 14, fontWeight: 600,
+            opacity: starting ? 0.6 : 1,
+          }}
+          onClick={() => handleStart('local')}
+          disabled={starting}
+          title="仅执行本地规则校验，不调用 LLM，速度快"
+        >
+          {starting && currentReviewMode === 'local' ? '本地复核中...' : '📋 本地复核'}
+        </button>
+        <button
+          className="gt-button"
+          style={{
+            backgroundColor: localReviewDone ? '#7c4dff' : '#ccc',
+            color: '#fff', padding: '10px 28px',
+            border: 'none', borderRadius: 8,
+            cursor: localReviewDone && !starting ? 'pointer' : 'not-allowed',
+            fontSize: 14, fontWeight: 600,
+            opacity: starting ? 0.6 : 1,
+          }}
+          onClick={() => {
+            if (!localReviewDone) {
+              setShowLlmWarning(true);
+              return;
+            }
+            handleStart('llm');
+          }}
+          disabled={starting}
+          title="在本地复核基础上，调用 LLM 进行智能增强复核"
+        >
+          {starting && currentReviewMode === 'llm' ? 'LLM复核中...' : '🤖 LLM复核'}
+        </button>
+      </div>
       </div>{/* 左侧配置面板结束 */}
 
       {/* 右侧：复核详情面板 */}
@@ -273,7 +311,7 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
       }}>
         {!starting && !reviewDone && (
           <div style={{ textAlign: 'center', color: '#bbb', padding: 60, fontSize: 14 }}>
-            点击"开始复核"后，复核过程将在此处实时显示
+            点击"本地复核"开始基础校验，完成后可选择"LLM复核"进行智能增强分析
           </div>
         )}
 
@@ -383,27 +421,84 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
                 backgroundColor: '#f7f5fb',
               }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--gt-primary)', marginBottom: 8 }}>
-                  ✅ 复核完成
+                  ✅ {currentReviewMode === 'local' ? '本地复核完成' : currentReviewMode === 'llm' ? 'LLM复核完成' : '复核完成'}
                 </div>
                 <div style={{ fontSize: 13, color: '#555', marginBottom: 12 }}>
-                  共发现 <span style={{ fontWeight: 700, color: 'var(--gt-danger, #e53935)' }}>{totalFindings}</span> 个问题，请确认后进入下一步进行问题审核。
+                  共发现 <span style={{ fontWeight: 700, color: 'var(--gt-danger, #e53935)' }}>{totalFindings}</span> 个问题
+                  {currentReviewMode === 'local' && '。可继续点击"LLM复核"进行智能增强分析。'}
+                  {currentReviewMode !== 'local' && '，请确认后进入下一步进行问题审核。'}
                 </div>
-                <button
-                  onClick={onStart}
-                  style={{
-                    padding: '8px 28px', border: 'none', borderRadius: 8, cursor: 'pointer',
-                    background: 'linear-gradient(135deg, var(--gt-primary, #4b2d77) 0%, #7c4dff 100%)',
-                    color: '#fff', fontSize: 14, fontWeight: 600,
-                    boxShadow: '0 2px 10px rgba(75,45,119,0.3)',
-                  }}
-                >
-                  确认并继续 →
-                </button>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  {currentReviewMode === 'local' && (
+                    <button
+                      onClick={() => handleStart('llm')}
+                      disabled={starting}
+                      style={{
+                        padding: '8px 28px', border: 'none', borderRadius: 8, cursor: 'pointer',
+                        background: 'linear-gradient(135deg, #7c4dff 0%, #b388ff 100%)',
+                        color: '#fff', fontSize: 14, fontWeight: 600,
+                        boxShadow: '0 2px 10px rgba(124,77,255,0.3)',
+                      }}
+                    >
+                      🤖 继续LLM复核
+                    </button>
+                  )}
+                  <button
+                    onClick={onStart}
+                    style={{
+                      padding: '8px 28px', border: 'none', borderRadius: 8, cursor: 'pointer',
+                      background: 'linear-gradient(135deg, var(--gt-primary, #4b2d77) 0%, #7c4dff 100%)',
+                      color: '#fff', fontSize: 14, fontWeight: 600,
+                      boxShadow: '0 2px 10px rgba(75,45,119,0.3)',
+                    }}
+                  >
+                    确认并继续 →
+                  </button>
+                </div>
               </div>
             )}
           </div>
         )}
       </div>
+
+      {/* LLM复核提示弹窗 */}
+      {showLlmWarning && (
+        <div
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.4)', zIndex: 10000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setShowLlmWarning(false); }}
+          role="dialog"
+          aria-label="LLM复核提示"
+          aria-modal="true"
+        >
+          <div style={{
+            backgroundColor: '#fff', borderRadius: 12, padding: '28px 32px',
+            maxWidth: 420, width: '90%', boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
+            textAlign: 'center',
+          }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: '#333', marginBottom: 12 }}>
+              请先完成本地复核
+            </div>
+            <div style={{ fontSize: 14, color: '#666', marginBottom: 20, lineHeight: 1.6 }}>
+              LLM复核需要在本地复核完成后运行。请先点击"本地复核"完成基础校验，再运行LLM增强复核。
+            </div>
+            <button
+              onClick={() => setShowLlmWarning(false)}
+              style={{
+                padding: '8px 32px', border: 'none', borderRadius: 8,
+                backgroundColor: 'var(--gt-primary, #4b2d77)', color: '#fff',
+                fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              }}
+            >
+              知道了
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 模板编辑器弹窗 */}
       {showTemplateEditor && (

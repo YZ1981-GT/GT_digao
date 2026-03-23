@@ -71,6 +71,7 @@ class StartReviewRequest(BaseModel):
     custom_prompt: Optional[str] = None
     change_threshold: float = 0.3
     change_amount_threshold: float = 0
+    review_mode: str = "full"  # local / llm / full
 
 class EditFindingRequest(BaseModel):
     description: Optional[str] = None
@@ -204,6 +205,24 @@ async def upload_files(
                     file_type = report_parser.classify_report_file(filename, word_text)
                     session.file_classifications[file_id] = file_type
 
+                    # ── Word 嵌入图片 OCR：提取截图/图表中的文字 ──
+                    try:
+                        from ..services.ocr_service import OCRService
+                        img_ocr_text = await OCRService.extract_images_ocr_from_word(tmp_path)
+                        if img_ocr_text:
+                            logger.info(f"Word 嵌入图片 OCR: {filename}, {len(img_ocr_text)}字")
+                            # 将 OCR 文本作为额外段落追加到解析结果
+                            for line in img_ocr_text.splitlines():
+                                line = line.strip()
+                                if line:
+                                    word_result.paragraphs.append({
+                                        "text": line,
+                                        "style": "",
+                                        "_ocr_source": "pytesseract",
+                                    })
+                    except Exception as e:
+                        logger.debug(f"Word 嵌入图片 OCR 跳过 {filename}: {e}")
+
                     if file_type == ReportFileType.NOTES_TO_STATEMENTS:
                         # 附注文件：提取表格和层级结构
                         note_tables = report_parser.extract_note_tables(word_result)
@@ -226,11 +245,90 @@ async def upload_files(
                                 'style': para.get('style', ''),
                             })
                     else:
-                        logger.info(f"Word 文件 {filename} 分类为 {file_type.value}")
+                        # 分类为 FINANCIAL_STATEMENT 或其他类型的 Word 文件
+                        # 仍然尝试提取附注表格，避免内容丢失
+                        logger.info(f"Word 文件 {filename} 分类为 {file_type.value}，尝试提取附注表格")
+                        if word_result.tables:
+                            note_tables = report_parser.extract_note_tables(word_result)
+                            if note_tables:
+                                session.note_tables.extend(note_tables)
+                                note_sections = report_parser.extract_note_sections(word_result, note_tables)
+                                session.note_sections.extend(note_sections)
+                                logger.info(f"从 {filename} 提取到 {len(note_tables)} 个附注表格")
 
                 elif ext == '.pdf':
                     pdf_result = await report_parser.parse_pdf(tmp_path)
+                    # 用 PDF 文本内容重新分类
+                    if pdf_result.text:
+                        file_type = report_parser.classify_report_file(filename, pdf_result.text[:2000])
+                        session.file_classifications[file_id] = file_type
+
+                    # ── 扫描版/混合版 PDF：调用 OCR 补充提取 ──
+                    # 如果 pdfplumber 提取的文本过少，说明可能是扫描版
+                    pdf_text_len = len(pdf_result.text.strip()) if pdf_result.text else 0
+                    if pdf_text_len < 200:
+                        try:
+                            from ..services.ocr_service import OCRService
+                            ocr_text, ocr_method = await OCRService.smart_parse(
+                                tmp_path, filename, ext,
+                                skip_embedded_image_ocr=True,  # pdfplumber 已内联图片 OCR
+                            )
+                            if ocr_text and len(ocr_text.strip()) > pdf_text_len:
+                                logger.info(f"PDF OCR 补充: {filename}, 方法={ocr_method}, "
+                                            f"原文本={pdf_text_len}字, OCR={len(ocr_text.strip())}字")
+                                # 用 OCR 文本重新提取表格
+                                ocr_tables = report_parser._extract_tables_from_text(ocr_text)
+                                if ocr_tables:
+                                    pdf_result = pdf_result.model_copy(update={
+                                        'text': ocr_text,
+                                        'tables': ocr_tables,
+                                    })
+                                else:
+                                    pdf_result = pdf_result.model_copy(update={
+                                        'text': ocr_text,
+                                    })
+                                # 重新分类
+                                file_type = report_parser.classify_report_file(filename, ocr_text[:2000])
+                                session.file_classifications[file_id] = file_type
+                        except Exception as e:
+                            logger.warning(f"PDF OCR 补充失败 {filename}: {e}")
+
                     logger.info(f"PDF 文件 {filename} 分类为 {file_type.value}")
+
+                    if file_type == ReportFileType.AUDIT_REPORT_BODY:
+                        # 审计报告正文：按行提取段落
+                        for line in pdf_result.text.splitlines():
+                            text = line.strip()
+                            session.audit_report_content.append({
+                                'text': text,
+                                'level': None,
+                                'style': '',
+                            })
+
+                    # 提取 PDF 中的表格作为附注表格
+                    if pdf_result.tables:
+                        import uuid as _uuid_pdf
+                        # 从 PDF 文本中提取表格前的上下文标题
+                        pdf_table_titles = report_parser._extract_pdf_table_titles(pdf_result.text)
+                        for tidx, tdata in enumerate(pdf_result.tables):
+                            if not tdata:
+                                continue
+                            from app.models.audit_schemas import NoteTable
+                            headers = tdata[0] if tdata else []
+                            rows = tdata[1:] if len(tdata) > 1 else []
+                            # 尝试从上下文获取科目名称
+                            title = pdf_table_titles[tidx] if tidx < len(pdf_table_titles) else ""
+                            account_name = title if title else f"PDF表格 {tidx + 1}"
+                            session.note_tables.append(NoteTable(
+                                id=str(_uuid_pdf.uuid4()),
+                                account_name=account_name,
+                                section_title=title or f"PDF表格 {tidx + 1} ({filename})",
+                                headers=headers,
+                                header_rows=[headers] if headers else [],
+                                rows=rows,
+                                source_location=f"PDF 表格 {tidx + 1}",
+                            ))
+                        logger.info(f"从 PDF {filename} 提取到 {len(pdf_result.tables)} 个表格")
 
             except Exception as e:
                 logger.warning(f"文件 {filename} 解析失败: {e}")
@@ -404,6 +502,10 @@ async def start_review(req: StartReviewRequest):
     except ValueError:
         tt = session.template_type
 
+    # LLM 模式需要先完成本地复核
+    if req.review_mode == "llm" and not session.local_review_done:
+        raise HTTPException(400, "请先完成本地复核后再运行 LLM 复核")
+
     config = ReportReviewConfig(
         session_id=req.session_id,
         template_type=tt,
@@ -411,6 +513,7 @@ async def start_review(req: StartReviewRequest):
         custom_prompt=req.custom_prompt,
         change_threshold=req.change_threshold,
         change_amount_threshold=req.change_amount_threshold,
+        review_mode=req.review_mode,
     )
 
     async def event_stream():
@@ -422,17 +525,33 @@ async def start_review(req: StartReviewRequest):
                 data = json.loads(event)
                 if data.get("status") == "completed" and "result" in data:
                     result = data["result"]
+                    # 本地复核完成后标记 session
+                    if req.review_mode in ("local", "full"):
+                        session.local_review_done = True
+                        session_store.save_session(req.session_id, session)
                     if "findings" in result:
                         new_findings = [
                             ReportReviewFinding(**f) for f in result["findings"]
                         ]
-                        # 保留已有的手动批注（manual_annotation），与新复核结果合并
-                        existing = _findings.get(req.session_id, [])
-                        annotations = [
-                            f for f in existing
-                            if f.category == ReportReviewFindingCategory.MANUAL_ANNOTATION
-                        ]
-                        _findings[req.session_id] = annotations + new_findings
+                        if req.review_mode == "llm":
+                            # LLM 模式：合并到已有 findings（保留本地复核结果 + 手动批注）
+                            existing = _findings.get(req.session_id, [])
+                            # 已有的本地复核 finding IDs
+                            existing_ids = {f.id for f in existing}
+                            # 只追加新的 LLM findings
+                            merged = list(existing)
+                            for f in new_findings:
+                                if f.id not in existing_ids:
+                                    merged.append(f)
+                            _findings[req.session_id] = merged
+                        else:
+                            # local / full 模式：保留手动批注，替换其他
+                            existing = _findings.get(req.session_id, [])
+                            annotations = [
+                                f for f in existing
+                                if f.category == ReportReviewFindingCategory.MANUAL_ANNOTATION
+                            ]
+                            _findings[req.session_id] = annotations + new_findings
                         session_store.save_findings(req.session_id, _findings[req.session_id])
             except Exception:
                 pass
