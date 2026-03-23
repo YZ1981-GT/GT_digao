@@ -27,9 +27,12 @@ class VerifyTableRule(TypedDict, total=False):
     max_tables: int              # 最多匹配几个（默认1）
 
 
-class AmountCheckPreset(TypedDict):
-    account_keywords: List[str]  # 报表科目匹配关键词
-    verify_tables: List[VerifyTableRule]  # 需要校对的表格规则
+class AmountCheckPreset(TypedDict, total=False):
+    account_keywords: List[str]  # 报表科目匹配关键词（required）
+    verify_tables: List[VerifyTableRule]  # 需要校对的表格规则（required）
+    # 模板类型特定覆盖：key 为 'soe'(国企版) 或 'listed'(上市版)
+    # 值为 verify_tables 列表，覆盖默认规则
+    template_overrides: Dict[str, List[VerifyTableRule]]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -152,13 +155,22 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
                            'exclude_keywords': ['坏账准备', '减值准备', '终止确认']}],
     },
     {
-        # 长期股权投资：分类表（对合营/联营投资汇总）
+        # 长期股权投资：
+        # 国企版(默认)：①分类表（合营/联营/小计/减：减值准备/合计，4列宽表）
+        # 上市版：无分类汇总表，只有①明细表（含合营/联营分段、小计、合计）
         'account_keywords': ['长期股权投资'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['长期股权投资分类', '长期股权投资'],
                            'exclude_keywords': [
                                '明细', '对联营', '对合营', '对子公司',
                                '主要财务信息', '减值测试', '不重要',
                            ]}],
+        'template_overrides': {
+            'listed': [{'type': 'summary', 'title_keywords': ['长期股权投资'],
+                        'exclude_keywords': [
+                            '对联营', '对合营', '对子公司',
+                            '主要财务信息', '减值测试', '不重要',
+                        ]}],
+        },
     },
     {
         'account_keywords': ['其他权益工具投资'],
@@ -478,24 +490,40 @@ def find_amount_check_preset(account_name: str) -> Optional[AmountCheckPreset]:
     return None
 
 
+def _get_verify_tables(preset: AmountCheckPreset, template_type: Optional[str] = None) -> List[VerifyTableRule]:
+    """获取预设规则中的 verify_tables，优先使用模板类型特定覆盖。
+
+    如果 preset 有 template_overrides 且 template_type 匹配，返回覆盖规则；
+    否则返回默认的 verify_tables。
+    """
+    if template_type:
+        overrides = preset.get('template_overrides')
+        if overrides and template_type in overrides:
+            return overrides[template_type]
+    return preset['verify_tables']
+
+
 def should_verify_note_table(
     account_name: str,
     note_section_title: str,
     note_account_name: str,
+    template_type: Optional[str] = None,
 ) -> bool:
     """判断某个附注表格是否应参与报表-附注一致性校对。
 
     白名单匹配逻辑：
     1. 查找科目对应的预设规则
-    2. 遍历 verify_tables 中的每条规则
-    3. 先检查 exclude_keywords（命中则跳过该规则）
-    4. 再检查 title_keywords（命中则通过）
-    5. 所有规则都不匹配 → 不参与校对
+    2. 根据 template_type 选择对应的 verify_tables（有覆盖则用覆盖）
+    3. 遍历 verify_tables 中的每条规则
+    4. 先检查 exclude_keywords（命中则跳过该规则）
+    5. 再检查 title_keywords（命中则通过）
+    6. 所有规则都不匹配 → 不参与校对
 
     Args:
         account_name: 报表科目名称
         note_section_title: 附注表格的 section_title
         note_account_name: 附注表格的 account_name
+        template_type: 模板类型 'soe'(国企版) / 'listed'(上市版)，None 时用默认规则
 
     Returns:
         True = 应参与校对，False = 不参与
@@ -507,7 +535,8 @@ def should_verify_note_table(
     combined_title = (note_section_title or '') + (note_account_name or '')
     combined_title = combined_title.replace(' ', '').replace('\u3000', '')
 
-    for rule in preset['verify_tables']:
+    verify_tables = _get_verify_tables(preset, template_type)
+    for rule in verify_tables:
         exclude_kws = rule.get('exclude_keywords', [])
         if exclude_kws and any(kw in combined_title for kw in exclude_kws):
             continue

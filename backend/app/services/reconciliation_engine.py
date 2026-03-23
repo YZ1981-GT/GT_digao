@@ -2776,7 +2776,7 @@ class ReconciliationEngine:
                 from .amount_check_presets import should_verify_note_table
 
 
-                if not should_verify_note_table(item.account_name, note.section_title, note.account_name):
+                if not should_verify_note_table(item.account_name, note.section_title, note.account_name, template_type=template_type):
 
 
                     valid_note_ids.pop()
