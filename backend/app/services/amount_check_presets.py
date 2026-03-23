@@ -76,6 +76,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         'verify_tables': [{'type': 'summary', 'title_keywords': ['按账龄', '应收账款'],
                            'exclude_keywords': [
                                '坏账准备计提方法', '按计提方法', '按组合', '按单项',
+                               '计提坏账准备', '组合方法',
                                '前五名', '前5名', '核销', '转回', '逾期',
                                '款项性质', '终止确认', '金融资产转移',
                                '坏账准备变动', '组合计提',
@@ -232,7 +233,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         'account_keywords': ['无形资产'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['无形资产情况', '无形资产'],
                            'exclude_keywords': ['减值', '未办妥', '数据资源', '开发支出',
-                                                '原价', '累计摊销', '账面净值']}],
+                                                '原价', '累计摊销', '账面净值', '摊销方法']}],
     },
     {
         'account_keywords': ['开发支出'],
@@ -471,8 +472,9 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
     },
     {
         'account_keywords': ['所得税费用', '所得税'],
-        'verify_tables': [{'type': 'summary', 'title_keywords': ['所得税费用', '所得税'],
-                           'exclude_keywords': ['调整过程', '适用税率']}],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['所得税费用'],
+                           'exclude_keywords': ['调整过程', '适用税率', '递延所得税',
+                                                '其他综合收益']}],
     },
 ]
 
