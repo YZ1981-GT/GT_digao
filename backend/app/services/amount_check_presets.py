@@ -67,6 +67,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
                                '前五名', '前5名', '出票人', '转为应收账款',
                                '终止确认', '逾期', '核销', '转回', '按账龄',
                                '按组合', '按单项', '计提方法',
+                               '预期信用损失', '划分为组合',
                            ]}],
     },
     {
@@ -80,13 +81,15 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
                                '前五名', '前5名', '核销', '转回', '逾期',
                                '款项性质', '终止确认', '金融资产转移',
                                '坏账准备变动', '组合计提',
+                               '预期信用损失', '划分为组合', '未履约',
                            ]}],
     },
     {
         # 应收款项融资：汇总表（种类/期末余额/期初余额）
         'account_keywords': ['应收款项融资'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['应收款项融资'],
-                           'exclude_keywords': ['坏账准备', '减值准备']}],
+                           'exclude_keywords': ['坏账准备', '减值准备', '已背书', '已贴现',
+                                                '尚未到期']}],
     },
     {
         # 预付款项：按账龄列示表（账龄/期末数/期初数，含合计行）
@@ -104,6 +107,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
                                '按账龄', '按组合', '按单项', '坏账准备', '计提方法',
                                '前五名', '前5名', '核销', '转回', '逾期', '款项性质',
                                '应收利息', '应收股利', '其他应收款项',
+                               '按欠款方',
                            ]}],
     },
     {
@@ -119,7 +123,8 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         # 合同资产：合同资产情况表
         'account_keywords': ['合同资产'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['合同资产情况', '合同资产'],
-                           'exclude_keywords': ['减值准备', '坏账准备', '重大变动']}],
+                           'exclude_keywords': ['减值准备', '坏账准备', '重大变动',
+                                                '前五名', '前5名', '按欠款方']}],
     },
     {
         # 持有待售资产
@@ -201,16 +206,18 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
                  '重要在建工程', '本期变动情况', '本期计提',
                  '固定资产情况',
                  '原价', '累计折旧', '账面净值', '减值准备',
+                 '折旧年限', '折旧率', '折旧方法', '计提折旧',
              ]},
             {'type': 'section', 'title_keywords': ['固定资产情况'],
-             'exclude_keywords': ['清理']},
+             'exclude_keywords': ['清理', '暂时闲置', '未办妥']},
         ],
     },
     {
         # 在建工程：汇总表
         'account_keywords': ['在建工程'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['在建工程'],
-                           'exclude_keywords': ['重要在建工程', '本期变动情况', '减值', '本期计提']}],
+                           'exclude_keywords': ['重要在建工程', '本期变动情况', '减值', '本期计提',
+                                                '转固标准', '明细']}],
     },
     {
         'account_keywords': ['生产性生物资产'],
@@ -226,7 +233,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         # 使用权资产：变动表（多段：原值/累计折旧/净值/减值准备/账面价值）
         'account_keywords': ['使用权资产'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['使用权资产'],
-                           'exclude_keywords': ['减值']}],
+                           'exclude_keywords': ['减值', '新增']}],
     },
     {
         # 无形资产：无形资产情况表（多段：原价/累计摊销/减值准备/账面价值）
@@ -244,7 +251,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         # 商誉：账面原值表 + 减值准备表（合计=账面价值）
         'account_keywords': ['商誉'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['商誉账面原值', '商誉'],
-                           'exclude_keywords': ['减值测试', '资产组', '关键假设']}],
+                           'exclude_keywords': ['减值测试', '减值准备', '资产组', '关键假设']}],
     },
     {
         'account_keywords': ['长期待摊费用'],
@@ -299,7 +306,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
     {
         'account_keywords': ['合同负债'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['合同负债'],
-                           'exclude_keywords': ['重大变动']}],
+                           'exclude_keywords': ['重大变动', '账龄超过']}],
     },
     {
         # 应付职工薪酬：应付职工薪酬列示表（汇总：短期薪酬/离职后福利/辞退福利/合计）
@@ -307,7 +314,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         'verify_tables': [{'type': 'summary', 'title_keywords': ['应付职工薪酬列示', '应付职工薪酬'],
                            'exclude_keywords': [
                                '短期薪酬列示', '短期薪酬明细', '设定提存', '设定受益',
-                               '辞退福利', '一年内到期',
+                               '辞退福利', '一年内到期', '长期应付职工薪酬',
                            ]}],
     },
     {
@@ -341,7 +348,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         # 长期借款：长期借款分类表
         'account_keywords': ['长期借款'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['长期借款'],
-                           'exclude_keywords': ['逾期']}],
+                           'exclude_keywords': ['逾期', '一年内到期']}],
     },
     {
         'account_keywords': ['应付债券'],
@@ -350,12 +357,14 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
     },
     {
         'account_keywords': ['租赁负债'],
-        'verify_tables': [{'type': 'summary', 'title_keywords': ['租赁负债']}],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['租赁负债'],
+                           'exclude_keywords': ['利息支出']}],
     },
     {
         'account_keywords': ['长期应付款'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['长期应付款'],
-                           'exclude_keywords': ['专项应付款']}],
+                           'exclude_keywords': ['专项应付款', '前五名', '前5名', '前5项',
+                                                '一年内到期']}],
     },
     {
         'account_keywords': ['长期应付职工薪酬'],
@@ -369,7 +378,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         # 递延收益：变动表（期初/增加/减少/期末）
         'account_keywords': ['递延收益'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['递延收益'],
-                           'exclude_keywords': ['政府补助情况']}],
+                           'exclude_keywords': ['政府补助情况', '政府补助']}],
     },
     {
         'account_keywords': ['其他非流动负债'],
@@ -474,7 +483,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         'account_keywords': ['所得税费用', '所得税'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['所得税费用'],
                            'exclude_keywords': ['调整过程', '适用税率', '递延所得税',
-                                                '其他综合收益']}],
+                                                '其他综合收益', '利润总额的关系']}],
     },
 ]
 
