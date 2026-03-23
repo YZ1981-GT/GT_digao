@@ -100,6 +100,11 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
                            ]}],
     },
     {
+        # 应收资金集中管理款：国企版特有（F7A-1~2）
+        'account_keywords': ['应收资金集中管理款'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['应收资金集中管理款']}],
+    },
+    {
         # 其他应收款：汇总表（项目/期末余额/期初余额，含应收利息/应收股利/其他应收款项）
         'account_keywords': ['其他应收款'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['其他应收款'],
@@ -248,10 +253,11 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
                            'exclude_keywords': ['减值准备', '重要的资本化']}],
     },
     {
-        # 商誉：账面原值表 + 减值准备表（合计=账面价值）
+        # 商誉：报表数为净值（账面原值-减值准备），应匹配商誉汇总表而非"账面原值"表
         'account_keywords': ['商誉'],
-        'verify_tables': [{'type': 'summary', 'title_keywords': ['商誉账面原值', '商誉'],
-                           'exclude_keywords': ['减值测试', '减值准备', '资产组', '关键假设']}],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['商誉'],
+                           'exclude_keywords': ['减值测试', '减值准备', '资产组', '关键假设',
+                                                '账面原值']}],
     },
     {
         'account_keywords': ['长期待摊费用'],
@@ -261,12 +267,22 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         # 递延所得税资产：未经抵销表
         'account_keywords': ['递延所得税资产'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['未经抵销', '递延所得税资产'],
-                           'exclude_keywords': ['未确认', '净额', '可抵扣亏损']}],
+                           'exclude_keywords': ['未确认', '净额', '可抵扣亏损']},
+                          {'type': 'summary', 'title_keywords': ['抵销后', '净额'],
+                           'exclude_keywords': ['未确认']}],
     },
     {
         'account_keywords': ['递延所得税负债'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['未经抵销', '递延所得税负债'],
-                           'exclude_keywords': ['未确认', '净额']}],
+                           'exclude_keywords': ['未确认', '净额']},
+                          {'type': 'summary', 'title_keywords': ['抵销后', '净额'],
+                           'exclude_keywords': ['未确认']}],
+    },
+    {
+        # 设定受益计划净资产：上市版特有（FS-1/FS-2 余额校对）
+        # 国企版无此科目，但 preset 仍可存在（不会匹配到国企版报表行）
+        'account_keywords': ['设定受益计划净资产'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['设定受益计划净资产']}],
     },
     {
         'account_keywords': ['其他非流动资产'],
@@ -400,9 +416,16 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         'verify_tables': [{'type': 'summary', 'title_keywords': ['资本公积']}],
     },
     {
+        # 库存股：上市版特有（FK-1/FK-2 余额校对）
+        # 国企版无此科目，但 preset 仍可存在（不会匹配到国企版报表行）
+        'account_keywords': ['库存股'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['库存股']}],
+    },
+    {
         'account_keywords': ['其他综合收益'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['其他综合收益'],
-                           'exclude_keywords': ['不能重分类', '将重分类']}],
+                           'exclude_keywords': ['不能重分类', '将重分类',
+                                                '所得税影响', '发生额', '转入损益']}],
     },
     {
         'account_keywords': ['专项储备'],
@@ -456,6 +479,11 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         'verify_tables': [{'type': 'summary', 'title_keywords': ['投资收益']}],
     },
     {
+        # 净敞口套期收益：F67-1/F67-2 余额校对
+        'account_keywords': ['净敞口套期收益'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['净敞口套期收益']}],
+    },
+    {
         'account_keywords': ['公允价值变动收益', '公允价值变动损益'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['公允价值变动']}],
     },
@@ -484,6 +512,38 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         'verify_tables': [{'type': 'summary', 'title_keywords': ['所得税费用'],
                            'exclude_keywords': ['调整过程', '适用税率', '递延所得税',
                                                 '其他综合收益', '利润总额的关系']}],
+    },
+
+    # ── 现金流量表 ──
+    {
+        # 收到其他与经营活动有关的现金：F76-1 余额校对
+        'account_keywords': ['收到其他与经营活动有关的现金'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['收到其他与经营活动有关的现金']}],
+    },
+    {
+        # 支付其他与经营活动有关的现金：F77-1 余额校对
+        'account_keywords': ['支付其他与经营活动有关的现金'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['支付其他与经营活动有关的现金']}],
+    },
+    {
+        # 收到其他与投资活动有关的现金：F78-1 余额校对
+        'account_keywords': ['收到其他与投资活动有关的现金'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['收到其他与投资活动有关的现金']}],
+    },
+    {
+        # 支付其他与投资活动有关的现金：F79-1 余额校对
+        'account_keywords': ['支付其他与投资活动有关的现金'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['支付其他与投资活动有关的现金']}],
+    },
+    {
+        # 收到其他与筹资活动有关的现金：F80-1 余额校对
+        'account_keywords': ['收到其他与筹资活动有关的现金'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['收到其他与筹资活动有关的现金']}],
+    },
+    {
+        # 支付其他与筹资活动有关的现金：F81-1 余额校对
+        'account_keywords': ['支付其他与筹资活动有关的现金'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['支付其他与筹资活动有关的现金']}],
     },
 ]
 

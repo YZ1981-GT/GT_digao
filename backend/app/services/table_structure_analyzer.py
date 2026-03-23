@@ -34,6 +34,9 @@ class TableStructureAnalyzer:
     # 其中项关键词
     SUB_ITEM_KEYWORDS = ["其中：", "其中:", "其中"]
 
+    # 社会保险费"其中"子项区域的截断关键词：这些行是独立的薪酬科目，不是社会保险费的子项
+    _SOCIAL_INSURANCE_SUB_ITEM_CUTOFF = ["住房公积金"]
+
     # 列语义关键词
     COLUMN_KEYWORDS = {
         "opening_balance": ["期初余额", "期初", "年初余额", "年初", "上期余额", "上年末"],
@@ -1251,6 +1254,15 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
                             ))
                             if not is_numbered:
                                 break  # 非编号行，结束当前其中区域
+
+                        # 特殊规则：社会保险费的"其中"子项遇到"住房公积金"等独立科目时截断
+                        if parent_idx is not None:
+                            parent_norm = rows[parent_idx].label.replace(" ", "").replace("\u3000", "")
+                            row_norm = rows[k].label.strip().replace(" ", "").replace("\u3000", "")
+                            if "社会保险" in parent_norm and any(
+                                kw in row_norm for kw in self._SOCIAL_INSURANCE_SUB_ITEM_CUTOFF
+                            ):
+                                break
 
                         # 标记为 sub_item
                         rows[k].role = "sub_item"

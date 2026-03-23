@@ -157,7 +157,7 @@ class TestCheckOciVsIncomeStatement:
         )
 
     def test_consistent(self):
-        items = [self._income_item("其他综合收益", 150.0)]
+        items = [self._income_item("其他综合收益的税后净额", 150.0)]
         notes = [_note("其他综合收益", "利润表中归属于母公司的其他综合收益",
                        ["项目", "本期金额"],
                        [["利息收入", 50], ["汇兑差额", 100], ["合计", 150]])]
@@ -165,7 +165,7 @@ class TestCheckOciVsIncomeStatement:
         assert len(findings) == 0
 
     def test_mismatch(self):
-        items = [self._income_item("其他综合收益", 150.0)]
+        items = [self._income_item("其他综合收益的税后净额", 150.0)]
         notes = [_note("其他综合收益", "利润表中归属于母公司的其他综合收益",
                        ["项目", "本期金额"],
                        [["合计", 200]])]
@@ -183,8 +183,38 @@ class TestCheckOciVsIncomeStatement:
 
     def test_no_oci_note(self):
         """没有其他综合收益附注时不校验。"""
-        items = [self._income_item("其他综合收益", 150.0)]
+        items = [self._income_item("其他综合收益的税后净额", 150.0)]
         notes = [_note("应收账款", "应收账款附注", ["项目", "金额"], [["合计", 100]])]
+        findings = engine.check_oci_vs_income_statement(items, notes)
+        assert len(findings) == 0
+
+    def test_prefers_parent_company_row(self):
+        """优先取'归属于母公司所有者的其他综合收益的税后净额'，而非合计行。"""
+        items = [
+            self._income_item("其他综合收益的税后净额", 0.0),
+            self._income_item("归属于母公司所有者的其他综合收益的税后净额", -87984.89),
+            self._income_item("（一）不能重分类进损益的其他综合收益", None),
+            self._income_item("2. 权益法下不能转损益的其他综合收益", 0.0),
+            self._income_item("（二）将重分类进损益的其他综合收益", -87984.89),
+            self._income_item("归属于少数股东的其他综合收益的税后净额", 0.0),
+        ]
+        notes = [_note("其他综合收益", "利润表中归属于母公司的其他综合收益",
+                       ["项目", "本期金额"],
+                       [["合计", -87984.89]])]
+        findings = engine.check_oci_vs_income_statement(items, notes)
+        assert len(findings) == 0, (
+            f"应取归属于母公司行(-87984.89)而非合计行(0.0): "
+            f"{[(f.description,) for f in findings]}"
+        )
+
+    def test_fallback_to_total_when_no_parent_row(self):
+        """没有'归属于母公司'行时，回退到'其他综合收益的税后净额'合计行。"""
+        items = [
+            self._income_item("其他综合收益的税后净额", -87984.89),
+        ]
+        notes = [_note("其他综合收益", "其他综合收益",
+                       ["项目", "本期金额"],
+                       [["合计", -87984.89]])]
         findings = engine.check_oci_vs_income_statement(items, notes)
         assert len(findings) == 0
 
@@ -468,6 +498,48 @@ class TestCheckImpairmentLossConsistency:
                        ["项目", "金额"], [["本期计提", 50]])]
         findings = engine.check_impairment_loss_consistency(items, notes, {})
         assert len(findings) == 0
+
+    def test_x2_classification_table_excluded(self):
+        """分类表（按坏账准备计提方法分类披露）不应被当作变动表。"""
+        items = [self._income_item("信用减值损失", -100)]
+        notes = [
+            # 分类表：标题含"按坏账准备计提方法分类"，不是变动表
+            _note("按坏账准备计提方法分类披露应收账款",
+                  "（2）按坏账准备计提方法分类披露应收账款",
+                  ["类别", "账面余额", "坏账准备", "账面价值"],
+                  [["按单项计提坏账准备", 500, 100, 400],
+                   ["按组合计提坏账准备", 1000, 50, 950],
+                   ["合  计", 1500, 150, 1350]]),
+            # 另一个分类表
+            _note("采用其他组合方法计提坏账准备的应收账款",
+                  "采用其他组合方法计提坏账准备的应收账款",
+                  ["组合名称", "账面余额", "坏账准备"],
+                  [["账龄组合", 1000, 50]]),
+        ]
+        findings = engine.check_impairment_loss_consistency(items, notes, {})
+        # 没有找到真正的变动表，prov_count=0，不应报差异
+        x2 = [f for f in findings if "信用减值损失" in f.account_name]
+        assert len(x2) == 0, (
+            f"分类表不应被当作变动表: {[(f.description,) for f in x2]}"
+        )
+
+    def test_x2_provision_movement_table_matched(self):
+        """坏账准备计提情况表应被正确匹配。"""
+        items = [self._income_item("信用减值损失", -27152.76)]
+        notes = [
+            # 正确的变动表
+            _note("其他应收款项坏账准备计提情况",
+                  "其他应收款项坏账准备计提情况",
+                  ["坏账准备", "第一阶段", "第二阶段", "第三阶段", "合计"],
+                  [["期初余额", 202491.71, None, 162837.88, 365329.59],
+                   ["本期计提", 865.00, 26287.76, None, 27152.76],
+                   ["期末余额", 865.00, 228779.47, 162837.88, 392482.35]]),
+        ]
+        findings = engine.check_impairment_loss_consistency(items, notes, {})
+        x2 = [f for f in findings if "信用减值损失" in f.account_name]
+        assert len(x2) == 0, (
+            f"坏账准备计提情况表应被正确匹配: {[(f.description,) for f in x2]}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════

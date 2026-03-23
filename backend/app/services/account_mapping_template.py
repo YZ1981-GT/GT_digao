@@ -452,7 +452,7 @@ _CONSOLIDATED_ACCOUNTS_SOE: List[Dict[str, object]] = [
         '营业收入和营业成本', '营业收入与营业成本',
         '营业收入、营业成本', '营业收入', '营业成本',
     ], 'order': 60},
-    {'name': '税金及附加', 'keywords': ['税金及附加'], 'order': 61},
+    # 国企版：税金及附加不需要在附注中单独披露
     {'name': '销售费用', 'keywords': ['销售费用'], 'order': 62},
     {'name': '管理费用', 'keywords': ['管理费用'], 'order': 63},
     {'name': '研发费用', 'keywords': ['研发费用'], 'order': 64},

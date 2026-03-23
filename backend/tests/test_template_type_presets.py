@@ -224,3 +224,149 @@ class TestIncomeTaxExpenseFiltering:
         assert should_verify_note_table(
             '所得税费用', '会计利润与所得税费用调整过程', '',
         ) is False
+
+
+class TestOtherComprehensiveIncomeFiltering:
+    """其他综合收益子表过滤测试。
+
+    Problem 3: 其他综合收益各项目及其所得税影响和转入损益情况表
+    该表的列头是"本期发生额/上期发生额"（变动额），不是"期末余额/期初余额"（余额），
+    不应参与报表-附注余额一致性校对。
+    """
+
+    def test_oci_summary_table_matches(self):
+        """其他综合收益汇总表应匹配。"""
+        assert should_verify_note_table('其他综合收益', '其他综合收益', '') is True
+
+    def test_oci_tax_impact_table_excluded(self):
+        """所得税影响和转入损益情况表应被排除（含"发生额"列头，非余额表）。"""
+        assert should_verify_note_table(
+            '其他综合收益',
+            '其他综合收益各项目及其所得税影响和转入损益情况',
+            '其他综合收益各项目及其所得税影响和转入损益情况',
+        ) is False
+
+    def test_oci_reclassification_excluded(self):
+        """不能重分类/将重分类子表应被排除。"""
+        assert should_verify_note_table(
+            '其他综合收益', '以后不能重分类进损益的其他综合收益', ''
+        ) is False
+        assert should_verify_note_table(
+            '其他综合收益', '以后将重分类进损益的其他综合收益', ''
+        ) is False
+
+
+class TestGoodwillFiltering:
+    """商誉子表过滤测试。
+
+    Problem 4: 商誉账面原值表只有原值（gross value），
+    但报表数是净值（原值-减值准备），不应用原值表做余额核对。
+    """
+
+    def test_goodwill_summary_table_matches(self):
+        """商誉汇总表（含净值）应匹配。"""
+        assert should_verify_note_table('商誉', '商誉', '') is True
+
+    def test_goodwill_gross_value_table_excluded(self):
+        """商誉账面原值表应被排除（只有原值，不含减值准备扣减）。"""
+        assert should_verify_note_table(
+            '商誉', '商誉账面原值', '商誉账面原值'
+        ) is False
+
+    def test_goodwill_impairment_provision_excluded(self):
+        """商誉减值准备表应被排除。"""
+        assert should_verify_note_table(
+            '商誉', '商誉减值准备', '商誉减值准备'
+        ) is False
+
+    def test_goodwill_impairment_test_excluded(self):
+        """商誉减值测试表应被排除。"""
+        assert should_verify_note_table(
+            '商誉', '商誉减值测试信息', '商誉减值测试信息'
+        ) is False
+
+    def test_goodwill_asset_group_excluded(self):
+        """资产组信息表应被排除。"""
+        assert should_verify_note_table(
+            '商誉', '包含商誉的资产组或资产组组合', ''
+        ) is False
+
+
+class TestNetHedgeGainPreset:
+    """净敞口套期收益 (F67) 预设测试。"""
+
+    def test_net_hedge_gain_matches(self):
+        assert should_verify_note_table('净敞口套期收益', '净敞口套期收益', '') is True
+
+    def test_net_hedge_gain_found(self):
+        preset = find_amount_check_preset('净敞口套期收益')
+        assert preset is not None
+        assert '净敞口套期收益' in preset['account_keywords']
+
+
+class TestCashFlowPresets:
+    """现金流量表6项科目 (F76~F81) 预设测试。"""
+
+    @pytest.mark.parametrize("account", [
+        '收到其他与经营活动有关的现金',
+        '支付其他与经营活动有关的现金',
+        '收到其他与投资活动有关的现金',
+        '支付其他与投资活动有关的现金',
+        '收到其他与筹资活动有关的现金',
+        '支付其他与筹资活动有关的现金',
+    ])
+    def test_cash_flow_preset_found(self, account):
+        """每个现金流量表科目都应有对应预设。"""
+        preset = find_amount_check_preset(account)
+        assert preset is not None, f"未找到预设: {account}"
+
+    @pytest.mark.parametrize("account", [
+        '收到其他与经营活动有关的现金',
+        '支付其他与经营活动有关的现金',
+        '收到其他与投资活动有关的现金',
+        '支付其他与投资活动有关的现金',
+        '收到其他与筹资活动有关的现金',
+        '支付其他与筹资活动有关的现金',
+    ])
+    def test_cash_flow_table_matches(self, account):
+        """现金流量表科目的明细表应匹配。"""
+        assert should_verify_note_table(account, account, '') is True
+
+
+class TestTreasuryStockPreset:
+    """库存股 (FK-1/FK-2) 预设测试——上市版特有。"""
+
+    def test_treasury_stock_found(self):
+        preset = find_amount_check_preset('库存股')
+        assert preset is not None
+
+    def test_treasury_stock_matches(self):
+        assert should_verify_note_table('库存股', '库存股明细', '') is True
+
+    def test_treasury_stock_generic_title(self):
+        assert should_verify_note_table('库存股', '库存股', '') is True
+
+
+class TestDefinedBenefitPlanPreset:
+    """设定受益计划净资产 (FS-1/FS-2) 预设测试——上市版特有。"""
+
+    def test_defined_benefit_plan_found(self):
+        preset = find_amount_check_preset('设定受益计划净资产')
+        assert preset is not None
+
+    def test_defined_benefit_plan_matches(self):
+        assert should_verify_note_table('设定受益计划净资产', '设定受益计划净资产明细', '') is True
+
+    def test_defined_benefit_plan_generic_title(self):
+        assert should_verify_note_table('设定受益计划净资产', '设定受益计划净资产', '') is True
+
+
+class TestFundCollectionPreset:
+    """应收资金集中管理款 (F7A) 预设测试——TASK 21 第一个已添加的预设。"""
+
+    def test_fund_collection_found(self):
+        preset = find_amount_check_preset('应收资金集中管理款')
+        assert preset is not None
+
+    def test_fund_collection_matches(self):
+        assert should_verify_note_table('应收资金集中管理款', '应收资金集中管理款', '') is True

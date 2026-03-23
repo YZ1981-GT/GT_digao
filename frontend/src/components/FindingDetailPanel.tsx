@@ -354,8 +354,8 @@ const FindingDetailPanel: React.FC<Props> = ({ findingId, finding, sessionId, on
               <div style={{ padding: '4px 8px', backgroundColor: '#f5f0fa', fontSize: 12, fontWeight: 600, color: '#555' }}>
                 {table.section_title}
               </div>
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
+                <table style={{ minWidth: '100%', width: 'max-content', borderCollapse: 'collapse', fontSize: 12 }}>
                   {table.headers && table.headers.length > 0 && (
                     <thead>
                       <tr>

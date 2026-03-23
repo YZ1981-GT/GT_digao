@@ -954,6 +954,7 @@ class ReportReviewEngine:
             # ── 现金流量表补充资料 vs 利润表/现金流量表 跨报表校验 ──
             cashflow_supp_findings = self.reconciliation.check_cashflow_supplement_consistency(
                 session.statement_items, session.note_tables, table_structures,
+                note_sections=session.note_sections,
             )
             cross_table_check_count += len(cashflow_supp_findings)
             all_findings.extend(cashflow_supp_findings)
@@ -975,6 +976,7 @@ class ReportReviewEngine:
             # ── 信用减值损失/资产减值损失 vs 各科目计提合计 (X-2, X-3) ──
             impairment_loss_findings = self.reconciliation.check_impairment_loss_consistency(
                 session.statement_items, session.note_tables, table_structures,
+                note_sections=session.note_sections,
             )
             cross_table_check_count += len(impairment_loss_findings)
             all_findings.extend(impairment_loss_findings)

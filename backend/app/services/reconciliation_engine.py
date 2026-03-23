@@ -2,22 +2,16 @@
 
 
 
-
-
 基于 Table_Structure_Analyzer 输出的结构化信息执行确定性数值校验：
 
 
 - 科目名称模糊匹配构建对照映射
 
-
 - 金额一致性校验（报表 vs 附注合计值）
-
 
 - 附注表格内部勾稽（横纵加总）
 
-
 - 余额变动公式校验（期初+增加-减少=期末）
-
 
 - 其中项校验（子项之和 ≤ 父项）
 
@@ -1562,8 +1556,74 @@ class ReconciliationEngine:
         return (closing_val, opening_val)
 
 
+    # ─── 递延所得税抵销后净额表提取 ───
 
+    @staticmethod
+    def _is_deferred_tax_net_offset_table(note: NoteTable) -> bool:
+        """判断是否为"以抵销后净额列示的递延所得税资产或负债"表。"""
+        combined = ((note.section_title or '') + (note.account_name or '')).replace(' ', '').replace('\u3000', '')
+        return '抵销后' in combined and '净额' in combined
 
+    @staticmethod
+    def _extract_deferred_tax_net_offset(
+        note: NoteTable, account_name: str,
+    ) -> tuple:
+        """从"以抵销后净额列示"表中提取递延所得税资产或负债的抵销后余额。
+
+        表格结构：
+        headers: [项目, 期末-互抵金额, 抵销后余额(期末), 期初-互抵金额, 抵销后余额(期初)]
+        row 0: 一、递延所得税资产  → 净额为正时的值
+        row 1: 二、递延所得税负债  → 净额为负时取绝对值
+
+        Returns: (closing, opening) 或 (None, None)
+        """
+        if not note.rows or not note.headers:
+            return (None, None)
+
+        # 确定目标行关键词
+        if '资产' in account_name:
+            target_kw = '递延所得税资产'
+        elif '负债' in account_name:
+            target_kw = '递延所得税负债'
+        else:
+            return (None, None)
+
+        # 识别"抵销后余额"列（排除"互抵金额"列）
+        headers = note.headers
+        norm_headers = [str(h or '').replace(' ', '').replace('\u3000', '') for h in headers]
+
+        # 找包含"抵销后"的列
+        offset_cols = []
+        for ci, nh in enumerate(norm_headers):
+            if ci == 0:
+                continue
+            if '抵销后' in nh:
+                offset_cols.append(ci)
+
+        # 如果表头没有"抵销后"关键词，用位置推断：
+        # 通常 col 1=期末互抵, col 2=期末抵销后, col 3=期初互抵, col 4=期初抵销后
+        if not offset_cols and len(norm_headers) >= 5:
+            offset_cols = [2, 4]
+        elif not offset_cols and len(norm_headers) >= 3:
+            offset_cols = [2]
+
+        closing_col = offset_cols[0] if len(offset_cols) >= 1 else None
+        opening_col = offset_cols[1] if len(offset_cols) >= 2 else None
+
+        # 找目标行
+        for row in note.rows:
+            label = str(row[0] if row else '').replace(' ', '').replace('\u3000', '').strip()
+            if target_kw not in label:
+                continue
+            closing_val = None
+            opening_val = None
+            if closing_col is not None and closing_col < len(row):
+                closing_val = _safe_float(row[closing_col])
+            if opening_col is not None and opening_col < len(row):
+                opening_val = _safe_float(row[opening_col])
+            return (closing_val, opening_val)
+
+        return (None, None)
 
 
 
@@ -2147,15 +2207,6 @@ class ReconciliationEngine:
         ["未确认", "递延所得税"],
 
 
-        # 递延所得税 — "以抵销后净额列示的递延所得税资产或负债"
-
-
-        # 抵销后净额是展示性表格，不等于报表上的递延所得税资产/负债余额
-
-
-        ["抵销后", "净额"],
-
-
         # 递延所得税 — "可抵扣亏损将于以下年度到期"
 
 
@@ -2618,8 +2669,40 @@ class ReconciliationEngine:
             )
 
 
+        # ── 递延所得税净额列示判断辅助 ──
+        # 当报表上只有递延所得税资产或只有递延所得税负债时（另一方为0/空），
+        # 说明是净额列示，应使用"以抵销后净额列示"表核对。
+        _deferred_tax_balances: Dict[str, Dict[str, Optional[float]]] = {}
+        for _it in items:
+            _n = _it.account_name.replace(' ', '').replace('\u3000', '')
+            if '递延所得税资产' in _n:
+                _deferred_tax_balances['资产'] = {
+                    'closing': _it.closing_balance, 'opening': _it.opening_balance}
+            elif '递延所得税负债' in _n:
+                _deferred_tax_balances['负债'] = {
+                    'closing': _it.closing_balance, 'opening': _it.opening_balance}
 
+        def _is_deferred_tax_net_presentation(account_name: str) -> bool:
+            """判断递延所得税科目是否为净额列示。
 
+            净额列示的特征：资产和负债都在报表中出现，且其中一方的期末和期初余额均为0/空。
+            只要有一方为0，说明报表上已经互抵，两个科目都应使用抵销后净额表核对。
+            注意：如果某一方根本不在报表中（items 中无记录），不能判断为净额列示。
+            """
+            norm = account_name.replace(' ', '').replace('\u3000', '')
+            if '递延所得税资产' not in norm and '递延所得税负债' not in norm:
+                return False
+            # 两方都必须在报表中出现
+            if '资产' not in _deferred_tax_balances or '负债' not in _deferred_tax_balances:
+                return False
+            # 任一方余额全为0/空 → 净额列示
+            for side in ('资产', '负债'):
+                bal = _deferred_tax_balances[side]
+                c = bal.get('closing')
+                o = bal.get('opening')
+                if (c is None or c == 0) and (o is None or o == 0):
+                    return True
+            return False
 
         for entry in matching_map.entries:
 
@@ -3150,6 +3233,10 @@ class ReconciliationEngine:
 
                 if combined_match is not None:
 
+                    # 净额列示时，未经抵销表不应参与核对（由抵销后净额表核对）
+                    if _is_deferred_tax_net_presentation(item.account_name) and not self._is_deferred_tax_net_offset_table(note):
+                        valid_note_ids.pop()
+                        continue
 
                     cfg, sec_kws = combined_match
 
@@ -3170,6 +3257,24 @@ class ReconciliationEngine:
 
 
                         rule_opening = sub_opening
+
+
+                # 递延所得税"以抵销后净额列示"表：
+                # 当报表上只有资产或只有负债时（净额列示），从该表提取对应行的抵销后余额
+                if self._is_deferred_tax_net_offset_table(note):
+                    if _is_deferred_tax_net_presentation(item.account_name):
+                        net_closing, net_opening = self._extract_deferred_tax_net_offset(
+                            note, item.account_name)
+                        # 净额列示时，提取不到值意味着抵销后余额为0
+                        if net_closing is None and net_opening is None:
+                            net_closing = 0.0
+                            net_opening = 0.0
+                        rule_closing = net_closing
+                        rule_opening = net_opening
+                    else:
+                        # 非净额列示时，跳过抵销后净额表（由未经抵销表核对）
+                        valid_note_ids.pop()
+                        continue
 
 
 
@@ -5918,8 +6023,12 @@ class ReconciliationEngine:
 
 
                     continue
-
-
+                # 特殊规则：社会保险费的子项到"住房公积金"为止，住房公积金是独立科目
+                parent_row = next((r for r in table_structure.rows if r.row_index == row.parent_row_index), None)
+                if parent_row:
+                    parent_norm = parent_row.label.replace(" ", "").replace("\u3000", "")
+                    if "社会保险" in parent_norm and "住房公积金" in norm_label:
+                        continue
                 parent_children.setdefault(row.parent_row_index, []).append(row.row_index)
 
 
@@ -10520,6 +10629,9 @@ class ReconciliationEngine:
         table_structures: Dict[str, TableStructure],
 
 
+        note_sections: Optional[List['NoteSection']] = None,
+
+
     ) -> List[ReportReviewFinding]:
 
 
@@ -10589,7 +10701,15 @@ class ReconciliationEngine:
             return findings
 
 
-
+        # 过滤掉母公司附注下的补充资料表格，只保留合并口径
+        if note_sections:
+            ancestor_map = self._build_note_parent_section_map(note_sections)
+            supplement_notes = [
+                n for n in supplement_notes
+                if not self._is_parent_company_note(n, ancestor_map.get(n.id))
+            ]
+        if not supplement_notes:
+            return findings
 
 
         # 2. 构建报表科目索引（按 statement_type + account_name）
@@ -11461,21 +11581,33 @@ class ReconciliationEngine:
     # 变动表中"本期计提"行关键词
 
 
-    PROVISION_INCREASE_ROW_KW = ["计提", "本期增加", "本期计提"]
+    PROVISION_INCREASE_ROW_KW = ["本期计提", "本期增加", "计提"]
 
 
-    # 变动表标题关键词
-
-
+    # 坏账/减值准备变动表的标题关键词（必须是直接反映变动的表，
+    # 排除"按坏账准备计提方法分类披露"、"按组合计提坏账准备"等分类表）
+    # 正确的表标题示例：
+    #   - "坏账准备计提情况" / "其他应收款项坏账准备计提情况"
+    #   - "本期计提、收回或转回的坏账准备情况"
+    #   - "本期计提、收回或转回的减值准备情况"
+    #   - "减值准备变动情况"
     PROVISION_MOVEMENT_TITLE_KW = [
-
-
-        "坏账准备", "减值准备", "跌价准备",
-
-
-        "变动", "计提", "转回",
-
-
+        "计提情况",       # 坏账准备计提情况
+        "计提、收回",     # 本期计提、收回或转回的坏账准备情况
+        "计提,收回",      # 变体
+        "减值准备变动",   # 减值准备变动情况
+        "跌价准备变动",   # 跌价准备变动情况
+        "坏账准备变动",   # 坏账准备变动情况
+    ]
+    # 分类表标题排除关键词（这些表不是变动表）
+    _PROVISION_TITLE_EXCLUDE = [
+        "按坏账准备计提方法分类",
+        "按组合计提坏账准备",
+        "单项计提坏账准备",
+        "其他组合方法计提",
+        "按账龄",
+        "按欠款方",
+        "前五名",
     ]
 
 
@@ -11544,6 +11676,9 @@ class ReconciliationEngine:
 
 
         table_structures: Dict[str, TableStructure],
+
+
+        note_sections: Optional[List['NoteSection']] = None,
 
 
     ) -> List[ReportReviewFinding]:
@@ -11617,63 +11752,77 @@ class ReconciliationEngine:
 
             account_notes.setdefault(n.account_name or "", []).append(n)
 
+        # 构建 note_table_id -> 祖先标题映射（用于定位"本期计提、收回或转回"等表的父科目）
+        _ancestor_map: Dict[str, List[str]] = {}
+        if note_sections:
+            _ancestor_map = self._build_note_parent_section_map(note_sections)
+        _note_by_id: Dict[str, "NoteTable"] = {n.id: n for n in notes}
 
-
-
+        def _is_movement_table(n):
+            """判断是否为坏账/减值准备变动表（非分类表）。"""
+            combined = (n.account_name or "") + (n.section_title or "")
+            if any(ex in combined for ex in self._PROVISION_TITLE_EXCLUDE):
+                return False
+            return any(kw in combined for kw in self.PROVISION_MOVEMENT_TITLE_KW)
 
         def _sum_provision_increase(target_accounts, title_keywords):
+            """从目标科目的坏账/减值准备变动表中汇总本期计提金额。
 
+            只匹配真正的变动表（坏账准备计提情况、本期计提收回或转回等），
+            排除分类表（按坏账准备计提方法分类披露、按组合计提坏账准备等）。
+            如果找不到含"本期计提"行的变动表，则跳过该科目。
 
-            """从目标科目的变动表中汇总本期计提金额。"""
-
-
+            匹配策略：
+            1. 按 account_name 包含目标科目关键词 + 变动表标题关键词
+            2. 按 note_sections 祖先标题包含目标科目关键词
+            """
             total = 0.0
-
-
             count = 0
-
-
             note_ids = []
+            matched_accts = set()
 
-
+            # 策略1：按 account_name 匹配
             for acct, acct_notes_list in account_notes.items():
-
-
-                if not any(kw in acct for kw in target_accounts):
-
-
+                matched_target = None
+                for ta in target_accounts:
+                    if ta in acct:
+                        matched_target = ta
+                        break
+                if not matched_target or matched_target in matched_accts:
                     continue
-
-
                 for n in acct_notes_list:
-
-
-                    title = n.section_title or ""
-
-
-                    if not any(kw in title for kw in title_keywords):
-
-
+                    if not _is_movement_table(n):
                         continue
-
-
                     val = self._extract_provision_increase(n)
-
-
                     if val is not None:
-
-
                         total += val
-
-
                         count += 1
-
-
                         note_ids.append(n.id)
+                        matched_accts.add(matched_target)
+                        break
 
-
-                        break  # 每个科目只取第一个变动表
-
+            # 策略2：按 note_sections 祖先标题匹配
+            if _ancestor_map:
+                for nid, ancestors in _ancestor_map.items():
+                    n = _note_by_id.get(nid)
+                    if not n or not _is_movement_table(n):
+                        continue
+                    matched_target = None
+                    for anc in ancestors:
+                        for ta in target_accounts:
+                            if ta in anc:
+                                matched_target = ta
+                                break
+                        if matched_target:
+                            break
+                    if not matched_target or matched_target in matched_accts:
+                        continue
+                    val = self._extract_provision_increase(n)
+                    if val is not None:
+                        total += val
+                        count += 1
+                        note_ids.append(n.id)
+                        matched_accts.add(matched_target)
 
             return total, count, note_ids
 
@@ -14142,39 +14291,37 @@ class ReconciliationEngine:
 
 
         # 1. 从利润表中找"其他综合收益"行
-
-
+        # 附注表是"归属于母公司所有者的其他综合收益"，应优先匹配该行。
+        # 利润表结构：
+        #   五、其他综合收益的税后净额          ← 合计（含少数股东）
+        #     (一) 归属于母公司所有者的…税后净额 ← 母公司部分（优先）
+        #     (二) 归属于少数股东的…税后净额
+        # 排除子项如"不能重分类进损益的其他综合收益"、"权益法下…的其他综合收益"等。
+        _OCI_SUB_ITEM_EXCLUDE = ["不能重分类", "将重分类", "权益法", "金融资产重分类",
+                                  "结转留存", "结转损益"]
         oci_statement_val = None
-
-
+        _oci_fallback_val = None  # "其他综合收益的税后净额"（合计行）
         for item in items:
-
-
             if not item.account_name:
-
-
                 continue
-
-
             if item.statement_type and item.statement_type.value == "income_statement":
-
-
                 name = item.account_name.strip()
-
-
-                if "其他综合收益" in name and "税后" not in name:
-
-
-                    # 取本期金额（closing_balance 在利润表中对应本期发生额）
-
-
-                    if item.closing_balance is not None:
-
-
-                        oci_statement_val = item.closing_balance
-
-
-                        break
+                if "其他综合收益" not in name:
+                    continue
+                # 排除子项
+                if any(kw in name for kw in _OCI_SUB_ITEM_EXCLUDE):
+                    continue
+                if item.closing_balance is None:
+                    continue
+                # 优先：归属于母公司所有者的其他综合收益的税后净额
+                if "归属于母公司" in name:
+                    oci_statement_val = item.closing_balance
+                    break
+                # 回退：其他综合收益的税后净额（合计行）
+                if _oci_fallback_val is None:
+                    _oci_fallback_val = item.closing_balance
+        if oci_statement_val is None:
+            oci_statement_val = _oci_fallback_val
 
 
 
@@ -14421,21 +14568,16 @@ class ReconciliationEngine:
 
 
     # 权益变动表中"期初余额"行的关键词
-
-
-    _EQUITY_OPENING_ROW_KW = [
-
-
-        "期初余额", "上年年末余额", "年初余额",
-
-
-        "一、上年年末余额", "一、期初余额",
-
-
-        "上年末余额",
-
-
+    # 优先级1：本年年初余额（调整后期初），优先级2：上年年末余额（调整前期初）
+    _EQUITY_OPENING_ROW_KW_PREFERRED = [
+        "本年年初余额", "本年初余额", "二、本年年初余额",
     ]
+    _EQUITY_OPENING_ROW_KW_FALLBACK = [
+        "期初余额", "上年年末余额", "年初余额",
+        "一、上年年末余额", "一、期初余额",
+        "上年末余额",
+    ]
+    _EQUITY_OPENING_ROW_KW = _EQUITY_OPENING_ROW_KW_PREFERRED + _EQUITY_OPENING_ROW_KW_FALLBACK
 
 
 
@@ -14528,9 +14670,9 @@ class ReconciliationEngine:
 
 
 
-        # 1. 找到权益变动表的 ReportSheetData
-
-
+        # 1. 找到权益变动表的 ReportSheetData（仅合并，跳过母公司）
+        # 母公司权益变动表的数据不应与合并附注比对。
+        _parent_kw = ["母公司"]
         equity_sheets = []
 
 
@@ -14541,8 +14683,8 @@ class ReconciliationEngine:
 
 
                 if sd.statement_type and sd.statement_type.value == "equity_change":
-
-
+                    if any(kw in (sd.sheet_name or "") for kw in _parent_kw):
+                        continue
                     equity_sheets.append(sd)
 
 
@@ -14618,9 +14760,12 @@ class ReconciliationEngine:
 
 
 
-        # 识别各列对应的权益科目
-
-
+        # 识别各列对应的权益科目（仅"本年金额"区域，跳过"上年金额"列）
+        # 国企版权益变动表结构：前半部分为"本年金额"列，后半部分为"上年金额"列。
+        # "上年金额"列的列头通常以"上年金额"开头，或位于"上年金额-xxx"列之后。
+        # 只有"本年金额"列才应参与附注核对。
+        _prior_year_kw = ["上年金额", "上年"]
+        _in_prior_year_section = False
         col_account_map = {}  # col_index -> (col_header, note_account_keywords)
 
 
@@ -14641,6 +14786,11 @@ class ReconciliationEngine:
 
                 continue
 
+            # 检测是否进入"上年金额"区域
+            if any(kw in hdr_clean for kw in _prior_year_kw):
+                _in_prior_year_section = True
+            if _in_prior_year_section:
+                continue
 
             for col_kws, note_kws in self._EQUITY_COL_ACCOUNT_MAP:
 
@@ -14667,66 +14817,33 @@ class ReconciliationEngine:
 
 
         # 识别期初/期末行
-
-
+        # 期初行优先取"二、本年年初余额"（调整后），找不到再回退到"一、上年年末余额"
         opening_row_idx = None
-
-
+        _opening_fallback_idx = None
         closing_row_idx = None
-
-
         for ri, row in enumerate(raw_data):
-
-
             if not row:
-
-
                 continue
-
-
             label = str(row[0] or "").strip()
-
-
             if not label:
-
-
                 continue
-
-
-            # 判断是否为期初行
-
-
-            is_opening = any(kw in label for kw in self._EQUITY_OPENING_ROW_KW)
-
-
-            # 判断是否为期末行（排除同时匹配期初的行，如"上年年末余额"）
-
-
-            is_closing = (
-
-
-                any(kw in label for kw in self._EQUITY_CLOSING_ROW_KW)
-
-
-                and not is_opening
-
-
-            )
-
-
-            # 取第一个匹配行（权益变动表先本年后上年，第一段属于本年金额）
-
-
-            if opening_row_idx is None and is_opening:
-
-
+            # 优先级1：本年年初余额
+            if opening_row_idx is None and any(kw in label for kw in self._EQUITY_OPENING_ROW_KW_PREFERRED):
                 opening_row_idx = ri
-
-
+            # 优先级2：上年年末余额等（仅作为回退）
+            elif _opening_fallback_idx is None and any(kw in label for kw in self._EQUITY_OPENING_ROW_KW_FALLBACK):
+                _opening_fallback_idx = ri
+            # 期末行
+            is_opening = any(kw in label for kw in self._EQUITY_OPENING_ROW_KW)
+            is_closing = (
+                any(kw in label for kw in self._EQUITY_CLOSING_ROW_KW)
+                and not is_opening
+            )
             if closing_row_idx is None and is_closing:
-
-
                 closing_row_idx = ri
+        # 如果没有找到优先期初行，使用回退
+        if opening_row_idx is None:
+            opening_row_idx = _opening_fallback_idx
 
 
 
@@ -15055,6 +15172,55 @@ class ReconciliationEngine:
 
         closing = None
 
+        # 方法0: 变动表检测（表头为"本期金额/上期金额"模式）。
+        # 变动表的列代表不同期间，行代表变动项目（期初/增减/期末），
+        # 期初和期末都在同一列（本期金额列）中，不能按列语义分配。
+        # 必须在方法1/2之前执行，否则 LLM 标注的列语义会导致错误提取。
+        _fb_headers = [str(h or "").replace(" ", "").replace("\u3000", "")
+                       for h in (primary_note.headers or [])]
+        _period_kw = ["本期金额", "本年金额", "本期发生额", "本年发生额"]
+        _prior_kw = ["上期金额", "上年金额", "上期发生额", "上年发生额"]
+        _is_movement_table = False
+        _current_period_col = -1
+        for ci, h in enumerate(_fb_headers):
+            if ci == 0:
+                continue
+            if any(kw in h for kw in _period_kw):
+                _current_period_col = ci
+                for ci2, h2 in enumerate(_fb_headers):
+                    if ci2 == 0 or ci2 == ci:
+                        continue
+                    if any(kw in h2 for kw in _prior_kw):
+                        _is_movement_table = True
+                        break
+                break
+
+        if _is_movement_table and _current_period_col > 0:
+            _mv_open_kw = ["期初余额", "上年末余额", "年初余额",
+                           "上年年末余额", "期初", "年初"]
+            _mv_close_kw = ["期末余额", "本年末余额", "年末余额",
+                            "本年年末余额", "期末", "年末"]
+            for row in (primary_note.rows or []):
+                if not row:
+                    continue
+                label = str(row[0] or "").replace(" ", "").replace("\u3000", "").strip()
+                if not label:
+                    continue
+                if _current_period_col >= len(row):
+                    continue
+                v = _safe_float(row[_current_period_col])
+                if opening is None and any(kw in label for kw in _mv_open_kw):
+                    opening = v
+                if closing is None and any(kw in label for kw in _mv_close_kw):
+                    if not any(kw in label for kw in _mv_open_kw):
+                        closing = v
+            # 未分配利润特殊处理：期初取"调整后"行
+            if any("未分配利润" in kw for kw in note_kws):
+                adj_opening = self._find_undist_adjusted_opening(primary_note)
+                if adj_opening is not None:
+                    opening = adj_opening
+            return opening, closing, note_id
+
 
 
 
@@ -15143,9 +15309,6 @@ class ReconciliationEngine:
         # 方法3: 回退 - 在合计行中先按表头关键词定位，再按位置猜测
         if (opening is None or closing is None) and primary_note.rows:
             total_kws = ["合计", "合 计", "总计", "期末", "期末合计"]
-            # 先通过表头关键词确定期末/期初列
-            _fb_headers = [str(h or "").replace(" ", "").replace("\u3000", "")
-                           for h in (primary_note.headers or [])]
             _fb_closing_col = -1
             _fb_opening_col = -1
             _close_kw = ["期末", "年末", "本期"]
@@ -15217,7 +15380,10 @@ class ReconciliationEngine:
     def _find_undist_adjusted_opening(self, note):
 
 
-        """未分配利润明细表：查找'调整后'期初值。"""
+        """未分配利润明细表：查找'调整后'期初值。
+
+        对于"本期金额/上期金额"变动表，只从"本期金额"列取值。
+        """
 
 
         if not note or not note.rows:
@@ -15225,6 +15391,24 @@ class ReconciliationEngine:
 
             return None
 
+        # 确定"本期金额"列索引（变动表场景）
+        _period_col = -1
+        _fb_headers = [str(h or "").replace(" ", "").replace("\u3000", "")
+                       for h in (note.headers or [])]
+        _period_kw = ["本期金额", "本年金额", "本期发生额", "本年发生额"]
+        _prior_kw = ["上期金额", "上年金额", "上期发生额", "上年发生额"]
+        for ci, h in enumerate(_fb_headers):
+            if ci == 0:
+                continue
+            if any(kw in h for kw in _period_kw):
+                # 确认存在对应的上期列
+                for ci2, h2 in enumerate(_fb_headers):
+                    if ci2 == 0 or ci2 == ci:
+                        continue
+                    if any(kw in h2 for kw in _prior_kw):
+                        _period_col = ci
+                        break
+                break
 
         adj_kws = ["调整后", "调整后的期初"]
 
@@ -15242,8 +15426,10 @@ class ReconciliationEngine:
 
 
             if any(kw in label for kw in adj_kws):
-
-
+                # 变动表：只从"本期金额"列取值
+                if _period_col > 0 and _period_col < len(row):
+                    return _safe_float(row[_period_col])
+                # 非变动表：取第一个非空数值列
                 for ci in range(1, len(row)):
 
 
@@ -16129,7 +16315,7 @@ class ReconciliationEngine:
             _first = str(_row[0] if _row else "").replace(" ", "").replace("\u3000", "").strip()
 
 
-            if _first in ("合计", "总计"):
+            if _first in ("合计", "总计") or _first.endswith("净额"):
 
 
                 _total_count += 1
@@ -16186,7 +16372,7 @@ class ReconciliationEngine:
                 first = str(note.rows[ri][0] if note.rows[ri] else "").replace(" ", "").replace("\u3000", "").strip()
 
 
-                if first == "总计" and _last_zongji_ri < 0:
+                if (first == "总计" or first.endswith("净额")) and _last_zongji_ri < 0:
 
 
                     _last_zongji_ri = ri
@@ -18595,6 +18781,9 @@ class ReconciliationEngine:
 
     _ECL_CLOSING_ROW_KW = ["期末余额", "年末余额", "期末"]
 
+    # 排除：虽然包含"期初/期末"但实际是变动行的标签后缀
+    _ECL_BALANCE_ROW_EXCLUDE_SUFFIXES = ["在本期", "在本年", "的变动", "变动额"]
+
 
     # ECL表变动行负号关键词（这些行应从期初中减去）
     _ECL_NEGATIVE_MOVEMENT_KW = ["转回", "转销", "核销", "减少", "冲销"]
@@ -19104,37 +19293,23 @@ class ReconciliationEngine:
 
 
 
-            # 识别期初行
-
-
+            # 识别期初行（排除"期初余额在本期"等信息行，且只取首次匹配）
             if any(kw in label for kw in self._ECL_OPENING_ROW_KW):
-
-
-                if val is not None:
-
-
-                    opening_val = val
-
-
-                continue
+                if not any(suf in label for suf in self._ECL_BALANCE_ROW_EXCLUDE_SUFFIXES):
+                    if val is not None and opening_val is None:
+                        opening_val = val
+                continue  # 无论是否被排除后缀过滤，都跳过（不参与变动计算）
 
 
 
 
 
-            # 识别期末行
-
-
+            # 识别期末行（排除变动行后缀，且只取首次匹配）
             if any(kw in label for kw in self._ECL_CLOSING_ROW_KW):
-
-
-                if val is not None:
-
-
-                    closing_val = val
-
-
-                continue
+                if not any(suf in label for suf in self._ECL_BALANCE_ROW_EXCLUDE_SUFFIXES):
+                    if val is not None and closing_val is None:
+                        closing_val = val
+                continue  # 无论是否被排除后缀过滤，都跳过
 
 
 

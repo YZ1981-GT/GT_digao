@@ -10,6 +10,7 @@ from app.models.audit_schemas import (
     FindingConfirmationStatus,
     MatchingEntry,
     MatchingMap,
+    NoteSection,
     NoteTable,
     ReportReviewFindingCategory,
     RiskLevel,
@@ -1694,6 +1695,41 @@ class TestExtractNoteTotalsByRules:
         )
         result = engine._find_combined_config(note_no, "递延所得税资产")
         assert result is None  # 单独的递延所得税资产表不是合并表
+
+    def test_lease_liability_net_amount_row(self):
+        """租赁负债表：'租赁负债净额'行应被识别为合计行，正确提取期末/期初值。"""
+        note = NoteTable(
+            id="lease-net", account_name="租赁负债", section_title="租赁负债",
+            headers=["项  目", "期末余额", "期初余额"],
+            header_rows=[["项  目", "期末余额", "期初余额"]],
+            rows=[
+                ["租赁付款额", "5,170,541.72", "7,704,452.88"],
+                ["减：未确认的融资费用", "201,614.74", "400,156.28"],
+                ["重分类至一年内到期的非流动负债", "2,504,350.03", "3,092,037.56"],
+                ["租赁负债净额", "2,464,576.95", "4,212,259.04"],
+            ],
+        )
+        closing, opening = engine._extract_note_totals_by_rules(note)
+        assert closing == 2464576.95, f"期末应为2464576.95，实际{closing}"
+        assert opening == 4212259.04, f"期初应为4212259.04，实际{opening}"
+
+    def test_lease_liability_with_subtotal_and_total(self):
+        """租赁负债表（另一种格式）：含'小计'和'合计'行，应取'合计'行。"""
+        note = NoteTable(
+            id="lease-total", account_name="租赁负债", section_title="租赁负债",
+            headers=["项  目", "期末余额", "上年年末余额"],
+            header_rows=[["项  目", "期末余额", "上年年末余额"]],
+            rows=[
+                ["租赁付款额", "6,115,319.30", "15,846,567.66"],
+                ["减：未确认融资费用", "130,502.80", "392,559.23"],
+                ["小  计", "5,984,816.50", "15,454,008.43"],
+                ["减：一年内到期的租赁负债", "4,529,592.72", "12,369,088.08"],
+                ["合  计", "1,455,223.78", "3,084,920.35"],
+            ],
+        )
+        closing, opening = engine._extract_note_totals_by_rules(note)
+        assert closing == 1455223.78, f"期末应为1455223.78，实际{closing}"
+        assert opening == 3084920.35, f"期初应为3084920.35，实际{opening}"
 
 
 # ─── 营业收入/营业成本合并表格提取 ───
@@ -3859,8 +3895,60 @@ class TestCashflowSupplementConsistency:
         )
         assert len(findings) == 1
 
+    def test_parent_company_supplement_filtered_out(self):
+        """母公司附注下的补充资料表格应被过滤，只用合并口径的表格核对。"""
+        # 合并口径补充资料（净利润=5000000，与利润表一致）
+        cons_supp = NoteTable(
+            id="cons-supp-001",
+            account_name="现金流量表补充资料",
+            section_title="现金流量表补充资料",
+            headers=["项目", "本期发生额"],
+            rows=[["净利润", 5000000]],
+        )
+        # 母公司口径补充资料（净利润=-7900437.94，与合并利润表不一致）
+        parent_supp = NoteTable(
+            id="parent-supp-001",
+            account_name="现金流量表补充资料",
+            section_title="现金流量表补充资料",
+            headers=["项目", "本期发生额"],
+            rows=[["净利润", -7900437.94]],
+        )
+        items = [_income_item("净利润", 5000000)]
+        # 构建 note_sections：合并在"财务报表主要项目注释"下，母公司在"母公司财务报表主要项目附注"下
+        note_sections = [
+            NoteSection(
+                id="sec-cons", title="财务报表主要项目注释", level=1,
+                note_table_ids=[cons_supp.id], children=[],
+            ),
+            NoteSection(
+                id="sec-parent", title="母公司财务报表主要项目附注", level=1,
+                note_table_ids=[parent_supp.id], children=[],
+            ),
+        ]
+        # 传入 note_sections 后，母公司的表格应被过滤
+        findings = engine.check_cashflow_supplement_consistency(
+            items, [cons_supp, parent_supp], {},
+            note_sections=note_sections,
+        )
+        # 合并口径一致，无差异
+        assert len(findings) == 0
 
-# ─── 应交所得税本期增加 vs 当期所得税费用 测试 ───
+    def test_parent_company_supplement_without_sections_not_filtered(self):
+        """不传 note_sections 时，所有补充资料表格都参与核对（向后兼容）。"""
+        parent_supp = NoteTable(
+            id="parent-supp-002",
+            account_name="现金流量表补充资料",
+            section_title="现金流量表补充资料",
+            headers=["项目", "本期发生额"],
+            rows=[["净利润", -7900437.94]],
+        )
+        items = [_income_item("净利润", 5000000)]
+        # 不传 note_sections
+        findings = engine.check_cashflow_supplement_consistency(
+            items, [parent_supp], {},
+        )
+        # 无过滤，母公司表格参与核对，会报差异
+        assert len(findings) == 1
 
 
 class TestIncomeTaxConsistency:
@@ -4816,3 +4904,802 @@ class TestCombinedSubtotalTitleRow:
         )
         assert closing == 50.0, f"Expected 50, got {closing}"
         assert opening == 80.0, f"Expected 80, got {opening}"
+
+
+class TestECLColumnMovement:
+    """三阶段ECL表纵向校验：期初 + 变动 = 期末。"""
+
+    def test_opening_balance_not_overwritten_by_movement_row(self):
+        """期初余额在本期行不应覆盖真正的期初余额行，也不应参与变动计算。
+
+        真实场景：其他应收款项坏账准备计提情况表中，
+        "期初余额"行（162,837.88）后面紧跟"期初余额在本期"行（23,746.00），
+        后者是信息性行（表示期初余额中仍留在本阶段的部分），不参与变动加总。
+        """
+        rows = [
+            ["期初余额", "202,491.71", "", "162,837.88", "365,329.59"],
+            ["期初余额在本期", "202,491.71", "", "23,746.00", "226,237.71"],
+            ["—转入第二阶段", "-202,491.71", "202,491.71", "", ""],
+            ["本期计提", "865.00", "26,287.76", "", "27,152.76"],
+            ["本期转回", "", "", "", ""],
+            ["本期核销", "", "", "", ""],
+            ["其他变动", "", "", "", ""],
+            ["期末余额", "865.00", "228,779.47", "162,837.88", "392,482.35"],
+        ]
+        # col_idx=1 第一阶段: 期初202491.71 + 转入第二阶段(-202491.71) + 计提865 = 865 = 期末 ✓
+        findings = engine._check_ecl_column_movement(
+            _note("坏账准备"), rows, col_idx=1, col_name="第一阶段"
+        )
+        assert len(findings) == 0, (
+            f"不应有差异，'期初余额在本期'应被跳过不参与变动计算: "
+            f"{[f.description for f in findings]}"
+        )
+        # col_idx=3 第三阶段: 期初162837.88 + 无变动 = 162837.88 = 期末 ✓
+        findings = engine._check_ecl_column_movement(
+            _note("坏账准备"), rows, col_idx=3, col_name="第三阶段"
+        )
+        assert len(findings) == 0, (
+            f"第三阶段不应有差异: {[f.description for f in findings]}"
+        )
+
+    def test_closing_balance_first_match_only(self):
+        """期末余额只取第一个匹配行，后续含"期末"的行被跳过不参与变动。"""
+        rows = [
+            ["期初余额", "100", "200"],
+            ["本期计提", "50", "30"],
+            ["期末余额", "150", "230"],
+            ["期末余额在本期", "120", "180"],  # 被跳过
+        ]
+        findings = engine._check_ecl_column_movement(
+            _note("坏账准备"), rows, col_idx=1, col_name="第一阶段"
+        )
+        # 100 + 50 = 150 = 期末 ✓（"期末余额在本期"被跳过）
+        assert len(findings) == 0
+
+    def test_normal_ecl_column_no_issue(self):
+        """正常ECL表纵向校验无差异。"""
+        rows = [
+            ["期初余额", "100", "200", "300"],
+            ["本期计提", "20", "30", "50"],
+            ["本期转回", "5", "10", "15"],
+            ["期末余额", "115", "220", "335"],
+        ]
+        findings = engine._check_ecl_column_movement(
+            _note("坏账准备"), rows, col_idx=1, col_name="第一阶段"
+        )
+        # 100 + 20 - 5 = 115 ✓
+        assert len(findings) == 0
+
+
+# ─── 递延所得税抵销后净额表 ───
+
+class TestDeferredTaxNetOffset:
+    """递延所得税"以抵销后净额列示"表的识别、提取和报表核对。"""
+
+    # ── _is_deferred_tax_net_offset_table ──
+
+    def test_offset_table_detected_by_section_title(self):
+        """section_title 含"抵销后"和"净额"时应识别为净额表。"""
+        note = _note("递延所得税资产", title="以抵销后净额列示的递延所得税资产或负债")
+        assert engine._is_deferred_tax_net_offset_table(note) is True
+
+    def test_offset_table_detected_by_account_name(self):
+        """account_name 含"抵销后"和"净额"时应识别为净额表。"""
+        note = NoteTable(
+            id="dt1", account_name="递延所得税资产和负债抵销后净额",
+            section_title="", headers=[], rows=[],
+        )
+        assert engine._is_deferred_tax_net_offset_table(note) is True
+
+    def test_offset_table_not_detected_for_unrelated(self):
+        """未经抵销表不应被识别为净额表。"""
+        note = _note("递延所得税资产", title="未经抵销的递延所得税资产和递延所得税负债")
+        assert engine._is_deferred_tax_net_offset_table(note) is False
+
+    def test_offset_table_not_detected_missing_keyword(self):
+        """只含"抵销"但不含"净额"时不应识别。"""
+        note = _note("递延所得税资产", title="递延所得税资产和负债互相抵销")
+        assert engine._is_deferred_tax_net_offset_table(note) is False
+
+    # ── _extract_deferred_tax_net_offset ──
+
+    def test_extract_asset_from_offset_table(self):
+        """从净额表提取递延所得税资产的抵销后余额。"""
+        note = _note(
+            "递延所得税资产",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=["项目", "递延所得税资产和负债互抵金额",
+                      "抵销后递延所得税资产或负债余额",
+                      "递延所得税资产和负债互抵金额",
+                      "抵销后递延所得税资产或负债余额"],
+            rows=[
+                ["一、递延所得税资产", 100000, 344888.71, 80000, 295576.07],
+                ["二、递延所得税负债", None, None, None, None],
+            ],
+        )
+        closing, opening = engine._extract_deferred_tax_net_offset(note, "递延所得税资产")
+        assert closing == 344888.71
+        assert opening == 295576.07
+
+    def test_extract_liability_from_offset_table(self):
+        """从净额表提取递延所得税负债的抵销后余额。"""
+        note = _note(
+            "递延所得税负债",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=["项目", "互抵金额", "抵销后余额", "互抵金额", "抵销后余额"],
+            rows=[
+                ["一、递延所得税资产", None, None, None, None],
+                ["二、递延所得税负债", 50000, 120000, 40000, 90000],
+            ],
+        )
+        closing, opening = engine._extract_deferred_tax_net_offset(note, "递延所得税负债")
+        assert closing == 120000
+        assert opening == 90000
+
+    def test_extract_returns_none_for_wrong_account(self):
+        """account_name 不含"资产"或"负债"时返回 (None, None)。"""
+        note = _note(
+            "递延所得税",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=["项目", "互抵金额", "抵销后余额", "互抵金额", "抵销后余额"],
+            rows=[["一、递延所得税资产", 100, 200, 80, 150]],
+        )
+        closing, opening = engine._extract_deferred_tax_net_offset(note, "递延所得税")
+        assert closing is None
+        assert opening is None
+
+    def test_extract_returns_none_for_empty_table(self):
+        """空表返回 (None, None)。"""
+        note = _note(
+            "递延所得税资产",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=[], rows=[],
+        )
+        closing, opening = engine._extract_deferred_tax_net_offset(note, "递延所得税资产")
+        assert closing is None
+        assert opening is None
+
+    def test_extract_positional_fallback_no_header_keyword(self):
+        """表头无"抵销后"关键词时，按位置推断（col2=期末抵销后, col4=期初抵销后）。"""
+        note = _note(
+            "递延所得税资产",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=["项  目", "期末", "期末", "期初", "期初"],
+            rows=[
+                ["一、递延所得税资产", 100000, 344888.71, 80000, 295576.07],
+                ["二、递延所得税负债", None, None, None, None],
+            ],
+        )
+        closing, opening = engine._extract_deferred_tax_net_offset(note, "递延所得税资产")
+        assert closing == 344888.71
+        assert opening == 295576.07
+
+    # ── check_amount_consistency 集成测试：净额列示 ──
+
+    def test_net_presentation_uses_offset_table(self):
+        """净额列示（报表DTA有数、DTL=0）时，应从抵销后净额表提取值核对。"""
+        # 未经抵销表（资产段小计=1861632.01，负债段小计=40120854.15）
+        unoff_note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["资产减值准备", 500000, 125000, 400000, 100000],
+                ["小计", 2000000, 500000, 1600000, 400000],
+                ["递延所得税负债:", None, None, None, None],
+                ["资产评估增值", 600000, 150000, 500000, 125000],
+                ["小计", 600000, 150000, 500000, 125000],
+            ],
+        )
+        # 抵销后净额表
+        offset_note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=["项目", "递延所得税资产和负债互抵金额",
+                      "抵销后递延所得税资产或负债余额",
+                      "递延所得税资产和负债互抵金额",
+                      "抵销后递延所得税资产或负债余额"],
+            rows=[
+                ["一、递延所得税资产", 150000, 350000, 125000, 275000],
+                ["二、递延所得税负债", None, None, None, None],
+            ],
+        )
+        ts_unoff = _ts(unoff_note.id, closing_cell=None, opening_cell=None)
+        ts_off = _ts(offset_note.id, closing_cell=None, opening_cell=None)
+
+        # 报表：DTA=350000, DTL=0 → 净额列示
+        item_asset = _item(name="递延所得税资产", closing=350000, opening=275000)
+        item_liab = _item(name="递延所得税负债", closing=0, opening=0)
+
+        mm = MatchingMap(entries=[
+            MatchingEntry(
+                statement_item_id=item_asset.id,
+                note_table_ids=[unoff_note.id, offset_note.id],
+                match_confidence=0.8,
+            ),
+        ])
+        findings = engine.check_amount_consistency(
+            mm, [item_asset, item_liab],
+            [unoff_note, offset_note],
+            {unoff_note.id: ts_unoff, offset_note.id: ts_off},
+        )
+        # 净额列示时，应使用抵销后净额表的值(350000)核对，无差异
+        assert len(findings) == 0, (
+            f"净额列示时应从抵销后净额表提取值，不应有差异: "
+            f"{[f.description for f in findings]}"
+        )
+
+    def test_non_net_presentation_skips_offset_table(self):
+        """非净额列示（报表DTA和DTL都有数）时，应跳过抵销后净额表，用未经抵销表核对。"""
+        unoff_note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["小计", 2000000, 500000, 1600000, 400000],
+                ["递延所得税负债:", None, None, None, None],
+                ["小计", 600000, 150000, 500000, 125000],
+            ],
+        )
+        offset_note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=["项目", "互抵金额", "抵销后余额", "互抵金额", "抵销后余额"],
+            rows=[
+                ["一、递延所得税资产", 150000, 350000, 125000, 275000],
+                ["二、递延所得税负债", None, None, None, None],
+            ],
+        )
+        ts_unoff = _ts(unoff_note.id, closing_cell=None, opening_cell=None)
+        ts_off = _ts(offset_note.id, closing_cell=None, opening_cell=None)
+
+        # 报表：DTA=500000, DTL=150000 → 非净额列示（两者都有数）
+        item_asset = _item(name="递延所得税资产", closing=500000, opening=400000)
+        item_liab = _item(name="递延所得税负债", closing=150000, opening=125000)
+
+        mm = MatchingMap(entries=[
+            MatchingEntry(
+                statement_item_id=item_asset.id,
+                note_table_ids=[unoff_note.id, offset_note.id],
+                match_confidence=0.8,
+            ),
+        ])
+        findings = engine.check_amount_consistency(
+            mm, [item_asset, item_liab],
+            [unoff_note, offset_note],
+            {unoff_note.id: ts_unoff, offset_note.id: ts_off},
+        )
+        # 非净额列示时，应从未经抵销表提取(500000)，无差异
+        assert len(findings) == 0, (
+            f"非净额列示时应从未经抵销表提取值: "
+            f"{[f.description for f in findings]}"
+        )
+
+    def test_net_presentation_mismatch_detected(self):
+        """净额列示时，报表数与抵销后净额表不一致应报差异。"""
+        offset_note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=["项目", "互抵金额", "抵销后余额", "互抵金额", "抵销后余额"],
+            rows=[
+                ["一、递延所得税资产", 150000, 350000, 125000, 275000],
+                ["二、递延所得税负债", None, None, None, None],
+            ],
+        )
+        ts_off = _ts(offset_note.id, closing_cell=None, opening_cell=None)
+
+        # 报表DTA=400000（与净额表350000不一致），DTL=0
+        item_asset = _item(name="递延所得税资产", closing=400000, opening=275000)
+        item_liab = _item(name="递延所得税负债", closing=0, opening=0)
+
+        mm = MatchingMap(entries=[
+            MatchingEntry(
+                statement_item_id=item_asset.id,
+                note_table_ids=[offset_note.id],
+                match_confidence=0.8,
+            ),
+        ])
+        findings = engine.check_amount_consistency(
+            mm, [item_asset, item_liab],
+            [offset_note],
+            {offset_note.id: ts_off},
+        )
+        closing_f = [f for f in findings if "期末" in f.location]
+        assert len(closing_f) == 1, (
+            f"净额列示时报表数与净额表不一致应报差异: "
+            f"{[f.description for f in findings]}"
+        )
+        assert abs(closing_f[0].difference - 50000) < 0.01
+
+    def test_net_presentation_liability_uses_offset_table(self):
+        """净额列示时，递延所得税负债也应从抵销后净额表提取值核对。
+
+        场景：报表DTA=350000, DTL=0 → 净额列示。
+        负债的抵销后余额为空(0)，报表也是0，应无差异。
+        """
+        unoff_note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="未经抵销的递延所得税资产和递延所得税负债",
+            headers=["项目", "期末余额-暂时性差异", "期末余额-递延所得税",
+                      "期初余额-暂时性差异", "期初余额-递延所得税"],
+            rows=[
+                ["递延所得税资产:", None, None, None, None],
+                ["小计", 2000000, 500000, 1600000, 400000],
+                ["递延所得税负债:", None, None, None, None],
+                ["小计", 600000, 150000, 500000, 125000],
+            ],
+        )
+        offset_note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=["项目", "递延所得税资产和负债互抵金额",
+                      "抵销后递延所得税资产或负债余额",
+                      "递延所得税资产和负债互抵金额",
+                      "抵销后递延所得税资产或负债余额"],
+            rows=[
+                ["一、递延所得税资产", 150000, 350000, 125000, 275000],
+                ["二、递延所得税负债", None, None, None, None],
+            ],
+        )
+        ts_unoff = _ts(unoff_note.id, closing_cell=None, opening_cell=None)
+        ts_off = _ts(offset_note.id, closing_cell=None, opening_cell=None)
+
+        # 报表：DTA=350000, DTL=0 → 净额列示
+        item_asset = _item(name="递延所得税资产", closing=350000, opening=275000)
+        item_liab = _item(name="递延所得税负债", closing=0, opening=0)
+
+        mm = MatchingMap(entries=[
+            MatchingEntry(
+                statement_item_id=item_liab.id,
+                note_table_ids=[unoff_note.id, offset_note.id],
+                match_confidence=0.8,
+            ),
+        ])
+        findings = engine.check_amount_consistency(
+            mm, [item_asset, item_liab],
+            [unoff_note, offset_note],
+            {unoff_note.id: ts_unoff, offset_note.id: ts_off},
+        )
+        # 负债净额列示时，应从抵销后净额表提取(None→0)，报表也是0，无差异
+        assert len(findings) == 0, (
+            f"净额列示时递延所得税负债应从抵销后净额表提取值，不应有差异: "
+            f"{[f.description for f in findings]}"
+        )
+
+    def test_net_presentation_liability_nonzero_offset(self):
+        """净额列示（DTA=0, DTL有数）时，负债应从抵销后净额表提取值核对。
+
+        场景：报表DTA=0, DTL=200000 → 净额列示（净额为负债方）。
+        """
+        offset_note = _note(
+            name="递延所得税资产和递延所得税负债",
+            title="以抵销后净额列示的递延所得税资产或负债",
+            headers=["项目", "互抵金额", "抵销后余额", "互抵金额", "抵销后余额"],
+            rows=[
+                ["一、递延所得税资产", None, None, None, None],
+                ["二、递延所得税负债", 100000, 200000, 80000, 150000],
+            ],
+        )
+        ts_off = _ts(offset_note.id, closing_cell=None, opening_cell=None)
+
+        item_asset = _item(name="递延所得税资产", closing=0, opening=0)
+        item_liab = _item(name="递延所得税负债", closing=200000, opening=150000)
+
+        mm = MatchingMap(entries=[
+            MatchingEntry(
+                statement_item_id=item_liab.id,
+                note_table_ids=[offset_note.id],
+                match_confidence=0.8,
+            ),
+        ])
+        findings = engine.check_amount_consistency(
+            mm, [item_asset, item_liab],
+            [offset_note],
+            {offset_note.id: ts_off},
+        )
+        assert len(findings) == 0, (
+            f"净额列示时递延所得税负债应从抵销后净额表提取值: "
+            f"{[f.description for f in findings]}"
+        )
+
+
+# ─── 附注变动表（本期/上期金额列）期初期末提取 ───
+
+class TestMovementTableColumnExtraction:
+    """附注表为变动表（本期金额/上期金额列）时，期初和期末都应从"本期金额"列提取。"""
+
+    def test_undist_profit_movement_table_extracts_from_current_period_col(self):
+        """未分配利润变动表：期初和期末都从"本期金额"列提取，不取"上期金额"列。
+
+        真实场景：未分配利润附注表结构为
+          项目 | 本期金额 | 上期金额
+          上年末余额 | 2,596,798.15 | 1,998,798.17
+          ...
+          期末余额 | -3,436,017.02 | 2,595,815.17
+
+        权益变动表核对时，应取本期金额列的上年末余额(2596798.15)作为期初，
+        本期金额列的期末余额(-3436017.02)作为期末。
+        """
+        note = _note(
+            name="未分配利润",
+            title="未分配利润",
+            headers=["项目", "本期金额", "上期金额"],
+            rows=[
+                ["上年末余额", 2596798.15, 1998798.17],
+                ["本期净利润", -1045122.98, 2810872.75],
+                ["提取盈余公积", None, -211174.60],
+                ["期末余额", -3436017.02, 2595815.17],
+            ],
+        )
+        # 变动表无 LLM 标注的 cell 和列语义
+        ts = _ts(note.id, closing_cell=None, opening_cell=None,
+                 columns=[], total_indices=[])
+        account_notes = {"未分配利润": [note]}
+
+        opening, closing, note_id = engine._find_note_opening_closing(
+            ["未分配利润"], account_notes, {note.id: ts},
+        )
+        # 期初应从"本期金额"列的"上年末余额"行取值
+        assert opening == 2596798.15, (
+            f"期初应为本期金额列的上年末余额2596798.15，实际{opening}"
+        )
+        # 期末应从"本期金额"列的"期末余额"行取值
+        assert closing == -3436017.02, (
+            f"期末应为本期金额列的期末余额-3436017.02，实际{closing}"
+        )
+
+    def test_movement_table_with_adjusted_opening(self):
+        """变动表含"调整后"行时，期初取"调整后"行的本期金额列值。"""
+        note = _note(
+            name="未分配利润",
+            title="未分配利润",
+            headers=["项目", "本期金额", "上期金额"],
+            rows=[
+                ["上年末余额", 2596798.15, 1998798.17],
+                ["会计政策变更", -100000, None],
+                ["调整后", 2496798.15, 1998798.17],
+                ["本期净利润", -1045122.98, 2810872.75],
+                ["期末余额", -3436017.02, 2595815.17],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None,
+                 columns=[], total_indices=[])
+        account_notes = {"未分配利润": [note]}
+
+        opening, closing, note_id = engine._find_note_opening_closing(
+            ["未分配利润"], account_notes, {note.id: ts},
+        )
+        # 未分配利润特殊处理：有"调整后"行时，期初取调整后的本期金额
+        assert opening == 2496798.15, (
+            f"期初应为调整后行的本期金额2496798.15，实际{opening}"
+        )
+        assert closing == -3436017.02
+
+    def test_non_movement_table_still_works(self):
+        """非变动表（期初余额/期末余额列）仍按原逻辑提取。"""
+        note = _note(
+            name="盈余公积",
+            title="盈余公积",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[
+                ["法定盈余公积", 500000, 300000],
+                ["合计", 500000, 300000],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None)
+        account_notes = {"盈余公积": [note]}
+
+        opening, closing, note_id = engine._find_note_opening_closing(
+            ["盈余公积"], account_notes, {note.id: ts},
+        )
+        assert closing == 500000
+        assert opening == 300000
+
+    def test_capital_reserve_movement_table(self):
+        """资本公积变动表：本期金额/上期金额列，期初期末从本期金额列提取。"""
+        note = _note(
+            name="资本公积",
+            title="资本公积",
+            headers=["项目", "本期金额", "上期金额"],
+            rows=[
+                ["期初余额", 8000000, 6000000],
+                ["资本溢价", 500000, 2000000],
+                ["期末余额", 8500000, 8000000],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None,
+                 columns=[], total_indices=[])
+        account_notes = {"资本公积": [note]}
+
+        opening, closing, note_id = engine._find_note_opening_closing(
+            ["资本公积"], account_notes, {note.id: ts},
+        )
+        assert opening == 8000000, (
+            f"期初应为本期金额列的期初余额8000000，实际{opening}"
+        )
+        assert closing == 8500000, (
+            f"期末应为本期金额列的期末余额8500000，实际{closing}"
+        )
+
+    def test_surplus_reserve_movement_table(self):
+        """盈余公积变动表：本年金额/上年金额列。"""
+        note = _note(
+            name="盈余公积",
+            title="盈余公积",
+            headers=["项目", "本年金额", "上年金额"],
+            rows=[
+                ["年初余额", 300000, 200000],
+                ["本年提取", 200000, 100000],
+                ["年末余额", 500000, 300000],
+            ],
+        )
+        ts = _ts(note.id, closing_cell=None, opening_cell=None,
+                 columns=[], total_indices=[])
+        account_notes = {"盈余公积": [note]}
+
+        opening, closing, note_id = engine._find_note_opening_closing(
+            ["盈余公积"], account_notes, {note.id: ts},
+        )
+        assert opening == 300000
+        assert closing == 500000
+
+
+
+# ─── 权益变动表 vs 附注 ───
+
+class TestEquityChangeVsNotes:
+    """权益变动表各列期初/期末 vs 附注科目期初/期末合计。"""
+
+    def _make_sheet(self, headers, raw_data, sheet_name="权益变动表"):
+        from app.models.audit_schemas import ReportSheetData
+        return ReportSheetData(
+            sheet_name=sheet_name,
+            statement_type=StatementType.EQUITY_CHANGE,
+            headers=headers,
+            raw_data=raw_data,
+        )
+
+    def test_prior_year_columns_skipped(self):
+        """上年金额列不应参与附注核对，只取本年金额列。"""
+        headers = [
+            "项目", "行次",
+            "本年金额-实收资本", "资本公积", "盈余公积", "未分配利润", "所有者权益合计",
+            "上年金额-实收资本", "资本公积", "盈余公积", "未分配利润", "所有者权益合计",
+        ]
+        raw_data = [
+            ["一、上年年末余额", 1, 260000000, 0, 211174.60, 2599798.15, None,
+             0, 0, 0, 0, None],
+            ["加：会计政策变更", 2, 0, 0, 0, 0, None, 0, 0, 0, 0, None],
+            ["前期差错更正", 3, 0, 0, 0, 0, None, 0, 0, 0, 0, None],
+            ["其他", 4, 0, 0, 0, 0, None, 0, 0, 0, 0, None],
+            ["二、本年年初余额", 5, 260000000, 0, 211174.60, 2599798.15, None,
+             0, 0, 0, 0, None],
+            ["四、本年年末余额", 33, 260000000, 0, 211174.60, -3436017.02, None,
+             260000000, 0, 211174.60, 2599798.15, None],
+        ]
+        sd = self._make_sheet(headers, raw_data)
+
+        # 附注：实收资本期初=260000000, 期末=260000000
+        note_sc = _note(
+            name="实收资本", title="实收资本",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[["合计", 260000000, 260000000]],
+        )
+        ts_sc = _ts(note_sc.id, closing_cell=None, opening_cell=None)
+
+        # 附注：盈余公积期初=211174.60, 期末=211174.60
+        note_yy = _note(
+            name="盈余公积", title="盈余公积",
+            headers=["项目", "本期金额", "上期金额"],
+            rows=[
+                ["上年末余额", 211174.60, 0],
+                ["期末余额", 211174.60, 211174.60],
+            ],
+        )
+        ts_yy = _ts(note_yy.id, closing_cell=None, opening_cell=None)
+
+        # 附注：未分配利润
+        note_wf = _note(
+            name="未分配利润", title="未分配利润",
+            headers=["项目", "本期金额", "上期金额"],
+            rows=[
+                ["上年末余额", 2599798.15, 0],
+                ["期末余额", -3436017.02, 2599798.15],
+            ],
+        )
+        ts_wf = _ts(note_wf.id, closing_cell=None, opening_cell=None)
+
+        notes = [note_sc, note_yy, note_wf]
+        ts_map = {n.id: _ts(n.id, closing_cell=None, opening_cell=None) for n in notes}
+
+        findings = engine.check_equity_change_vs_notes(
+            {"file1": [sd]}, notes, ts_map,
+        )
+        # 本年金额列与附注一致，上年金额列被跳过，不应有差异
+        assert len(findings) == 0, (
+            f"上年金额列应被跳过，不应有差异: "
+            f"{[(f.account_name, f.location, f.description) for f in findings]}"
+        )
+
+    def test_current_year_mismatch_detected(self):
+        """本年金额列与附注不一致时应报差异。"""
+        headers = [
+            "项目", "行次",
+            "本年金额-实收资本", "盈余公积", "未分配利润",
+        ]
+        raw_data = [
+            ["一、上年年末余额", 1, 100000, 5000, 20000],
+            ["二、本年年初余额", 2, 100000, 5000, 20000],
+            ["四、本年年末余额", 33, 100000, 5000, 30000],
+        ]
+        sd = self._make_sheet(headers, raw_data)
+
+        # 附注：未分配利润期末=25000（与权益变动表30000不一致）
+        note_wf = _note(
+            name="未分配利润", title="未分配利润",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[["合计", 25000, 20000]],
+        )
+        ts_wf = _ts(note_wf.id, closing_cell=None, opening_cell=None)
+
+        findings = engine.check_equity_change_vs_notes(
+            {"file1": [sd]}, [note_wf], {note_wf.id: ts_wf},
+        )
+        closing_f = [f for f in findings if "期末" in f.location and "未分配利润" in f.account_name]
+        assert len(closing_f) == 1
+        assert abs(closing_f[0].difference - 5000) < 0.01
+
+    def test_soe_consolidated_with_prior_year(self):
+        """国企版合并权益变动表：含"归属于母公司所有者权益"前缀的上年列也应被跳过。"""
+        headers = [
+            "项目", "行次",
+            "本年金额-归属于母公司所有者权益-实收资本", "资本公积",
+            "盈余公积", "未分配利润", "小计", "少数股东权益", "所有者权益合计",
+            "上年金额-归属于母公司所有者权益-实收资本", "资本公积",
+            "盈余公积", "未分配利润", "小计", "少数股东权益", "所有者权益合计",
+        ]
+        raw_data = [
+            ["一、上年年末余额", 1, 0, 176420595.41, 211174.60, 2599798.15,
+             None, 0, None,
+             0, 0, 0, 0, None, 0, None],
+            ["二、本年年初余额", 5, 0, 176420595.41, 211174.60, 2599798.15,
+             None, 0, None,
+             0, 0, 0, 0, None, 0, None],
+            ["四、本年年末余额", 33, 260000000, 0, 211174.60, -3436017.02,
+             None, 0, None,
+             0, 0, 0, 0, None, 0, None],
+        ]
+        sd = self._make_sheet(headers, raw_data, "5-所有者权益变动表（企财04表-合并）")
+
+        # 附注：实收资本
+        note_sc = _note(
+            name="实收资本", title="实收资本",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[["合计", 260000000, 0]],
+        )
+
+        findings = engine.check_equity_change_vs_notes(
+            {"file1": [sd]}, [note_sc],
+            {note_sc.id: _ts(note_sc.id, closing_cell=None, opening_cell=None)},
+        )
+        # 本年列实收资本：期初=0, 期末=260000000，与附注一致
+        sc_findings = [f for f in findings if "实收资本" in f.account_name]
+        assert len(sc_findings) == 0, (
+            f"实收资本应一致: {[(f.account_name, f.description) for f in sc_findings]}"
+        )
+
+
+    def test_parent_company_sheet_skipped(self):
+        """母公司权益变动表不应参与附注核对。"""
+        from app.models.audit_schemas import ReportSheetData
+        # 母公司 sheet：未分配利润期初=0, 期末=-7900437.94
+        parent_sd = ReportSheetData(
+            sheet_name="6-所有者权益变动表（企财04表-母公司）",
+            statement_type=StatementType.EQUITY_CHANGE,
+            headers=["项目", "行次", "本年金额-实收资本", "未分配利润"],
+            raw_data=[
+                ["一、上年年末余额", 1, 0, 0],
+                ["二、本年年初余额", 2, 0, 0],
+                ["四、本年年末余额", 33, 260000000, -7900437.94],
+            ],
+        )
+        # 合并 sheet：未分配利润期初=2599798.15, 期末=-3436017.02
+        cons_sd = ReportSheetData(
+            sheet_name="5-所有者权益变动表（企财04表-合并）",
+            statement_type=StatementType.EQUITY_CHANGE,
+            headers=["项目", "行次", "本年金额-实收资本", "未分配利润"],
+            raw_data=[
+                ["一、上年年末余额", 1, 260000000, 2599798.15],
+                ["二、本年年初余额", 2, 260000000, 2599798.15],
+                ["四、本年年末余额", 33, 260000000, -3436017.02],
+            ],
+        )
+        # 附注：未分配利润（合并口径）
+        note_wf = _note(
+            name="未分配利润", title="未分配利润",
+            headers=["项目", "本期金额", "上期金额"],
+            rows=[
+                ["上年年末余额", 2599798.15, 0],
+                ["期末余额", -3436017.02, 2599798.15],
+            ],
+        )
+        ts_wf = _ts(note_wf.id, closing_cell=None, opening_cell=None)
+        # 附注：实收资本
+        note_sc = _note(
+            name="实收资本", title="实收资本",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[["合计", 260000000, 260000000]],
+        )
+        ts_sc = _ts(note_sc.id, closing_cell=None, opening_cell=None)
+
+        notes = [note_wf, note_sc]
+        ts_map = {n.id: _ts(n.id, closing_cell=None, opening_cell=None) for n in notes}
+
+        # 传入两个 sheet（合并+母公司），母公司应被跳过
+        findings = engine.check_equity_change_vs_notes(
+            {"file1": [cons_sd, parent_sd]}, notes, ts_map,
+        )
+        # 合并 sheet 与附注一致，母公司被跳过，不应有差异
+        wf_findings = [f for f in findings if "未分配利润" in f.account_name]
+        assert len(wf_findings) == 0, (
+            f"母公司 sheet 应被跳过，合并数据与附注一致: "
+            f"{[(f.account_name, f.description) for f in wf_findings]}"
+        )
+
+    def test_opening_prefers_adjusted_balance(self):
+        """期初行应优先取"二、本年年初余额"（调整后），而非"一、上年年末余额"（调整前）。"""
+        headers = ["项目", "行次", "本年金额-未分配利润"]
+        raw_data = [
+            ["一、上年年末余额", 1, 10000],   # 调整前
+            ["加：会计政策变更", 2, 500],
+            ["前期差错更正", 3, 300],
+            ["其他", 4, 0],
+            ["二、本年年初余额", 5, 10800],   # 调整后 = 10000+500+300
+            ["四、本年年末余额", 33, 15000],
+        ]
+        sd = self._make_sheet(headers, raw_data)
+
+        # 附注：未分配利润期初=10800（与调整后一致），期末=15000
+        note_wf = _note(
+            name="未分配利润", title="未分配利润",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[["合计", 15000, 10800]],
+        )
+        ts_wf = _ts(note_wf.id, closing_cell=None, opening_cell=None)
+
+        findings = engine.check_equity_change_vs_notes(
+            {"file1": [sd]}, [note_wf], {note_wf.id: ts_wf},
+        )
+        # 应取"二、本年年初余额"=10800，与附注一致，无差异
+        assert len(findings) == 0, (
+            f"应优先取'二、本年年初余额'作为期初: "
+            f"{[(f.account_name, f.location, f.description) for f in findings]}"
+        )
+
+    def test_opening_fallback_when_no_adjusted_row(self):
+        """当没有"二、本年年初余额"行时，回退到"一、上年年末余额"。"""
+        headers = ["项目", "行次", "本年金额-未分配利润"]
+        raw_data = [
+            ["一、上年年末余额", 1, 10000],
+            ["四、本年年末余额", 33, 15000],
+        ]
+        sd = self._make_sheet(headers, raw_data)
+
+        note_wf = _note(
+            name="未分配利润", title="未分配利润",
+            headers=["项目", "期末余额", "期初余额"],
+            rows=[["合计", 15000, 10000]],
+        )
+        ts_wf = _ts(note_wf.id, closing_cell=None, opening_cell=None)
+
+        findings = engine.check_equity_change_vs_notes(
+            {"file1": [sd]}, [note_wf], {note_wf.id: ts_wf},
+        )
+        assert len(findings) == 0, (
+            f"回退到'一、上年年末余额'应与附注一致: "
+            f"{[(f.account_name, f.location, f.description) for f in findings]}"
+        )
