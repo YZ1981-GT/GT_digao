@@ -151,8 +151,12 @@ class TestProvisionIncreaseHeaderCol:
                 ["期末余额", 110, 220, 330, 660],
             ],
         )
-        val = engine._extract_provision_increase(note)
-        assert val == 60, f"Expected 60, got {val}"
+        result = engine._extract_provision_increase(note)
+        assert result is not None
+        net, inc, rev = result
+        assert net == 60, f"Expected net=60, got {net}"
+        assert inc == 60
+        assert rev == 0.0
 
     def test_fallback_last_value(self):
         """无合计列时取最后一个数值。"""
@@ -166,8 +170,10 @@ class TestProvisionIncreaseHeaderCol:
                 ["期末余额", 150],
             ],
         )
-        val = engine._extract_provision_increase(note)
-        assert val == 50
+        result = engine._extract_provision_increase(note)
+        assert result is not None
+        net, inc, rev = result
+        assert net == 50
 
     def test_total_col_empty_falls_back(self):
         """合计列为空时回退取最后一个数值。"""
@@ -181,8 +187,10 @@ class TestProvisionIncreaseHeaderCol:
                 ["期末余额", 110, 220, 330, 660],
             ],
         )
-        val = engine._extract_provision_increase(note)
-        assert val == 30, f"Expected 30 (last non-null), got {val}"
+        result = engine._extract_provision_increase(note)
+        assert result is not None
+        net, inc, rev = result
+        assert net == 30, f"Expected net=30 (last non-null), got {net}"
 
 
 # ═══════════════════════════════════════════════════════════

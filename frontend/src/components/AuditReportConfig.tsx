@@ -112,6 +112,10 @@ const AuditReportConfig: React.FC<Props> = ({ sessionId, templateType, onStart }
               }));
             } else if (parsed.status === 'account_complete') {
               setAccountProgress(`${parsed.account_name || ''} (发现 ${parsed.findings_count ?? 0} 个问题)`);
+            } else if (parsed.status === 'error') {
+              setError(parsed.message || '复核过程出错');
+              setCurrentPhase(null);
+              setStarting(false);
             } else if (parsed.status === 'completed') {
               // Mark last phase as completed
               if (prevPhase) {

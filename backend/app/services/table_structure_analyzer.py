@@ -1304,6 +1304,8 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
         opening_cell = None
 
         # 确定参考行：优先用合计行，若无合计行但只有一行数据，则用该数据行
+        # 扩展：无合计行时，检查最后一行是否为汇总性标签（如"期末公允价值"），
+        # 或所有数据行值完全相同（只有一个明细项）
         ref_row = None
         if total_row_indices:
             ref_row = total_row_indices[-1]
@@ -1311,6 +1313,29 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
             data_rows = [r for r in rows if r.role == "data" and r.label]
             if len(data_rows) == 1:
                 ref_row = data_rows[0].row_index
+            elif len(data_rows) >= 2:
+                # 最后一行标签含汇总性关键词 → 视为合计行
+                last_label = data_rows[-1].label.replace(" ", "").replace("\u3000", "")
+                _summary_kw = ["公允价值", "合计值", "净额", "账面价值"]
+                if any(kw in last_label for kw in _summary_kw):
+                    ref_row = data_rows[-1].row_index
+                else:
+                    # 所有数据行数值列完全相同且表头有可识别的余额列 → 取第一行
+                    _has_balance_col = any(
+                        c.semantic in ("closing_balance", "opening_balance",
+                                       "current_period", "prior_period", "book_value")
+                        for c in columns
+                    )
+                    if _has_balance_col and note_table.rows:
+                        _all_same = True
+                        ref_vals = [str(c) for c in note_table.rows[data_rows[0].row_index][1:]]
+                        for dr in data_rows[1:]:
+                            dr_vals = [str(c) for c in note_table.rows[dr.row_index][1:]]
+                            if dr_vals != ref_vals:
+                                _all_same = False
+                                break
+                        if _all_same:
+                            ref_row = data_rows[0].row_index
 
         if ref_row is not None:
             # 优先使用"账面价值"列作为期末余额（净额 = 账面余额 - 减值准备，

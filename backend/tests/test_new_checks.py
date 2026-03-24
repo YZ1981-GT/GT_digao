@@ -541,6 +541,83 @@ class TestCheckImpairmentLossConsistency:
             f"坏账准备计提情况表应被正确匹配: {[(f.description,) for f in x2]}"
         )
 
+    def test_x2_net_provision_with_reversal(self):
+        """净计提 = 本期计提 - 本期转回，核销不参与。"""
+        # 利润表信用减值损失 = -70（损失70）
+        # 附注：应收账款计提100，转回30 → 净计提70
+        items = [self._income_item("信用减值损失", -70)]
+        notes = [
+            _note("应收账款", "坏账准备变动情况",
+                  ["项目", "金额"],
+                  [["期初余额", 200], ["本期计提", 100],
+                   ["本期转回", 30], ["本期核销", 20], ["期末余额", 250]]),
+        ]
+        findings = engine.check_impairment_loss_consistency(items, notes, {})
+        x2 = [f for f in findings if "信用减值损失" in f.account_name]
+        assert len(x2) == 0, (
+            f"净计提(100-30=70)应与利润表70一致: {[(f.description,) for f in x2]}"
+        )
+
+    def test_x2_net_provision_mismatch_with_reversal(self):
+        """净计提与利润表不一致时应报差异。"""
+        # 利润表信用减值损失 = -50
+        # 附注：计提100，转回30 → 净计提70 ≠ 50
+        items = [self._income_item("信用减值损失", -50)]
+        notes = [
+            _note("应收账款", "坏账准备变动情况",
+                  ["项目", "金额"],
+                  [["期初余额", 200], ["本期计提", 100],
+                   ["本期转回", 30], ["期末余额", 270]]),
+        ]
+        findings = engine.check_impairment_loss_consistency(items, notes, {})
+        x2 = [f for f in findings if "信用减值损失" in f.account_name]
+        assert len(x2) == 1
+
+    def test_x2_balance_fallback(self):
+        """没有变动表时，从减值准备余额表提取期末-期初作为净变动。"""
+        # 利润表信用减值损失 = -120
+        # 应收账款有变动表：计提80，转回0 → 净计提80
+        # 合同资产只有减值准备余额表：期末150-期初110=40
+        # 合计 80+40=120，与利润表一致
+        items = [self._income_item("信用减值损失", -120)]
+        notes = [
+            _note("应收账款", "坏账准备变动情况",
+                  ["项目", "金额"],
+                  [["期初余额", 200], ["本期计提", 80], ["期末余额", 280]]),
+            _note("合同资产", "合同资产减值准备计提情况",
+                  ["类别", "期初余额", "期末余额"],
+                  [["组合计提", 110, 150],
+                   ["合计", 110, 150]]),
+        ]
+        findings = engine.check_impairment_loss_consistency(items, notes, {})
+        x2 = [f for f in findings if "信用减值损失" in f.account_name]
+        assert len(x2) == 0, (
+            f"应收账款计提80+合同资产(期末150-期初110=40)=120: {[(f.description,) for f in x2]}"
+        )
+
+    def test_x2_detail_in_description(self):
+        """差异描述中应包含各科目明细。"""
+        items = [self._income_item("信用减值损失", -200)]
+        notes = [
+            _note("应收账款", "坏账准备变动情况",
+                  ["项目", "金额"],
+                  [["期初余额", 200], ["本期计提", 80],
+                   ["本期转回", 10], ["期末余额", 270]]),
+            _note("其他应收款", "坏账准备变动情况",
+                  ["项目", "金额"],
+                  [["期初余额", 50], ["本期计提", 40], ["期末余额", 90]]),
+        ]
+        # 净计提 = (80-10) + 40 = 110 ≠ 200
+        findings = engine.check_impairment_loss_consistency(items, notes, {})
+        x2 = [f for f in findings if "信用减值损失" in f.account_name]
+        assert len(x2) == 1
+        reasoning = x2[0].analysis_reasoning
+        assert "应收账款" in reasoning
+        assert "其他应收款" in reasoning
+        # 应包含换行分隔的明细
+        assert "\n" in reasoning
+        assert "计提" in reasoning
+
 
 # ═══════════════════════════════════════════════════════════════
 # D-series: check_sub_item_detail
@@ -624,3 +701,30 @@ class TestCheckSubItemDetail:
         assert len(findings) == 1
         assert "原材料" in findings[0].description
         assert findings[0].difference == 50.0
+
+
+# ═══════════════════════════════════════════════════════════════
+class TestExtractFromTotalRowBareBalance:
+    """_extract_from_total_row: 裸"账面余额"列（无期间限定词）应视为期末列。"""
+
+    def test_bare_balance_as_closing(self):
+        """表头 ["项目", "账面余额", "上年年末余额"] → 账面余额=期末, 上年年末余额=期初。"""
+        total_row = ["合计", 500.0, 300.0]
+        norm_headers = ["项目", "账面余额", "上年年末余额"]
+        header_rows: list = []
+        c, o = ReconciliationEngine._extract_from_total_row(
+            total_row, norm_headers, header_rows,
+        )
+        assert c == 500.0
+        assert o == 300.0
+
+    def test_bare_balance_with_period_qualifier_not_affected(self):
+        """表头 ["项目", "期末账面余额", "期初账面余额"] → 正常按期间关键词匹配。"""
+        total_row = ["合计", 500.0, 300.0]
+        norm_headers = ["项目", "期末账面余额", "期初账面余额"]
+        header_rows: list = []
+        c, o = ReconciliationEngine._extract_from_total_row(
+            total_row, norm_headers, header_rows,
+        )
+        assert c == 500.0
+        assert o == 300.0

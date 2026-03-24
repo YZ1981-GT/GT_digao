@@ -2008,7 +2008,7 @@ class TestRevenueCostCombinedTable:
         assert len(findings) == 0
 
     def test_revenue_cost_cross_mismatch(self):
-        """跨表核对：汇总表和明细表收入合计不一致时报告差异。"""
+        """跨表核对：明细表收入合计超过汇总表时报告差异。"""
         summary = self._make_combined_note(title="营业收入、营业成本")
         detail = NoteTable(
             id=str(uuid.uuid4()),
@@ -2020,9 +2020,9 @@ class TestRevenueCostCombinedTable:
                 ["主要产品类型", "收入", "成本", "收入", "成本"],
             ],
             rows=[
-                ["消费品", 40000, 22302, 41052, 22000],
+                ["消费品", 43000, 22302, 41052, 22000],
                 ["能源", 2096, 2096, 2000, 1800],
-                ["合计", 42096, 24398, 43052, 23800],
+                ["合计", 45096, 24398, 43052, 23800],
             ],
         )
         ts_s = _ts(summary.id, total_indices=[2])
@@ -2030,13 +2030,13 @@ class TestRevenueCostCombinedTable:
         findings = engine.check_cross_table_consistency(
             [summary, detail], {summary.id: ts_s, detail.id: ts_d},
         )
-        # 收入不一致：43419 vs 42096 = 1323
+        # 明细表收入45096 > 汇总表收入43419 → 差异1677
         rev_findings = [f for f in findings if "收入" in (f.location or "")]
         assert len(rev_findings) == 1
-        assert rev_findings[0].difference == 1323.0
+        assert rev_findings[0].difference == 1677.0
 
     def test_revenue_cost_cross_cost_mismatch(self):
-        """跨表核对：汇总表和明细表成本合计不一致时报告差异。"""
+        """跨表核对：明细表成本合计超过汇总表时报告差异。"""
         summary = self._make_combined_note(title="营业收入、营业成本")
         detail = NoteTable(
             id=str(uuid.uuid4()),
@@ -2048,8 +2048,8 @@ class TestRevenueCostCombinedTable:
                 ["主要经营地区", "收入", "成本", "收入", "成本"],
             ],
             rows=[
-                ["东北", 43419, 20000, 43052, 23800],
-                ["合计", 43419, 20000, 43052, 23800],
+                ["东北", 43419, 30000, 43052, 23800],
+                ["合计", 43419, 30000, 43052, 23800],
             ],
         )
         ts_s = _ts(summary.id, total_indices=[2])
@@ -2057,10 +2057,38 @@ class TestRevenueCostCombinedTable:
         findings = engine.check_cross_table_consistency(
             [summary, detail], {summary.id: ts_s, detail.id: ts_d},
         )
-        # 成本不一致：24398 vs 20000 = 4398
+        # 明细表成本30000 > 汇总表成本24398 → 差异5602
         cost_findings = [f for f in findings if "成本" in (f.location or "")]
         assert len(cost_findings) == 1
-        assert cost_findings[0].difference == 4398.0
+        assert cost_findings[0].difference == 5602.0
+
+    def test_revenue_cost_cross_detail_less_than_summary_no_finding(self):
+        """跨表核对：明细表合计 < 汇总表合计时不报错（明细可能仅覆盖主营业务）。"""
+        summary = self._make_combined_note(title="营业收入、营业成本")
+        detail = NoteTable(
+            id=str(uuid.uuid4()),
+            account_name="营业收入、营业成本",
+            section_title="按行业（或产品类型）划分",
+            headers=["主要产品类型", "收入", "成本", "收入", "成本"],
+            header_rows=[
+                ["主要产品类型", "本期发生额", "", "上期发生额", ""],
+                ["主要产品类型", "收入", "成本", "收入", "成本"],
+            ],
+            rows=[
+                ["消费品", 30000, 15000, 30000, 15000],
+                ["合计", 30000, 15000, 30000, 15000],
+            ],
+        )
+        ts_s = _ts(summary.id, total_indices=[2])
+        ts_d = _ts(detail.id, total_indices=[1])
+        findings = engine.check_cross_table_consistency(
+            [summary, detail], {summary.id: ts_s, detail.id: ts_d},
+        )
+        # 明细表 < 汇总表 → 正常（部分披露），不报错
+        rev_findings = [f for f in findings if "收入" in (f.location or "") and "跨表核对" in (f.location or "")]
+        cost_findings = [f for f in findings if "成本" in (f.location or "") and "跨表核对" in (f.location or "")]
+        assert len(rev_findings) == 0
+        assert len(cost_findings) == 0
 
     def test_revenue_cost_cross_no_detail_no_finding(self):
         """跨表核对：只有汇总表没有明细表时无 finding。"""

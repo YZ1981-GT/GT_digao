@@ -48,6 +48,8 @@ class ReportParser(WorkpaperParser):
         "custom", "config", "setting", "template",
         "目录", "封面", "说明", "备注",
         "增加额", "调整",
+        # 上市版特有的辅助分析表 — 不是正式报表科目，不应参与科目提取和金额核对
+        "非经常性损益", "利润总额与所得税费用",
     ]
 
     # 文件分类关键词
