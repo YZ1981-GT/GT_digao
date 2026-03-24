@@ -6414,10 +6414,15 @@ class ReconciliationEngine:
                     break
 
 
+            # 表头关键词强制判定为横向计提率（如"预期信用损失率"、"计提比例"）
+            # 这些列的含义是 本行坏账准备/本行余额，不是纵向占比
+            _HORIZONTAL_RATE_KW = ["信用损失率", "计提比例", "计提率", "损失率"]
+            ratio_header = str(note_table.headers[ratio_col_idx]).strip() if ratio_col_idx < len(note_table.headers) else ""
+            force_horizontal = any(kw in ratio_header for kw in _HORIZONTAL_RATE_KW)
 
-
-
-            is_vertical = (total_ratio_val is not None and abs(total_ratio_val - 100.0) < 1.0)
+            is_vertical = (not force_horizontal
+                           and total_ratio_val is not None
+                           and abs(total_ratio_val - 100.0) < 1.0)
 
 
 
@@ -6459,7 +6464,7 @@ class ReconciliationEngine:
                 for row_s in table_structure.rows:
 
 
-                    if row_s.role not in ("data", "sub_item"):
+                    if row_s.role not in ("data",):
 
 
                         continue
@@ -6648,7 +6653,7 @@ class ReconciliationEngine:
                 for row_s in table_structure.rows:
 
 
-                    if row_s.role not in ("data", "sub_item", "total"):
+                    if row_s.role not in ("data", "total"):
 
 
                         continue
@@ -10570,19 +10575,46 @@ class ReconciliationEngine:
                         return val
 
 
+        # 回退：优先通过表头关键词定位"期末余额"列，从合计行或最后一行取值
+        headers = note.headers or []
+        end_col = None
+        for ci, h in enumerate(headers):
+            hs = str(h).replace(" ", "").replace("\u3000", "").strip() if h else ""
+            if "期末" in hs and ("余额" in hs or "金额" in hs or "数" in hs or ci == len(headers) - 1):
+                end_col = ci
+                break
+        # 如果没有精确匹配，取最后一个含"期末"的列
+        if end_col is None:
+            for ci, h in enumerate(headers):
+                hs = str(h).replace(" ", "").replace("\u3000", "").strip() if h else ""
+                if "期末" in hs:
+                    end_col = ci
 
+        if end_col is not None:
+            # 优先从合计行取
+            ts = table_structures.get(note.id)
+            if ts and ts.total_row_indices:
+                for ti in ts.total_row_indices:
+                    if ti < len(note.rows) and end_col < len(note.rows[ti]):
+                        val = _safe_float(note.rows[ti][end_col])
+                        if val is not None:
+                            return val
+            # 从最后一行取
+            if note.rows:
+                last_row = note.rows[-1]
+                if end_col < len(last_row):
+                    val = _safe_float(last_row[end_col])
+                    if val is not None:
+                        return val
 
-
-        # 回退：取最后一行的金额
-
-
+        # 最终回退：取最后一行的最后一个数值列
         if note.rows:
 
 
             last_row = note.rows[-1]
 
 
-            for ci in range(1, len(last_row)):
+            for ci in range(len(last_row) - 1, 0, -1):
 
 
                 val = _safe_float(last_row[ci])
