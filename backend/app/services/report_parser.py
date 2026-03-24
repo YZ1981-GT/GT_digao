@@ -229,6 +229,158 @@ class ReportParser(WorkpaperParser):
         # Word/PDF 默认归类为附注
         return ReportFileType.NOTES_TO_STATEMENTS
 
+    # ── 附注起始位置检测关键词 ──
+    _NOTES_START_KW = ["财务报表附注", "报表附注", "财务报表注释"]
+    _NOTES_FIRST_HEADING_KW = [
+        "公司基本情况", "企业基本情况", "公司概况",
+        "重要会计政策", "主要会计政策",
+    ]
+
+    # ── 审计报告正文标准章节模板 ──
+    # 审计报告正文的章节结构由审计准则规定，高度标准化。
+    # 用模板匹配可以精确定位正文范围，避免被目录条目干扰。
+    _AUDIT_BODY_SECTION_KW = [
+        '审计意见', '形成审计意见的基础', '关键审计事项',
+        '其他信息', '管理层和治理层对财务报表的责任',
+        '注册会计师对财务报表审计的责任',
+        '对其他法律法规要求的报告',
+        # 变体
+        '管理层对财务报表的责任', '治理层对财务报表的责任',
+        '形成审计意见', '保留意见', '无法表示意见', '否定意见',
+    ]
+
+    @staticmethod
+    def _is_toc_entry(text: str) -> bool:
+        """判断文本是否为目录条目（包含页码模式）。"""
+        if re.search(r'\d+\s*[-–—]\s*\d+', text):
+            return True
+        if re.search(r'[\u4e00-\u9fff]\s*\d{2,}\s*$', text):
+            return True
+        if re.search(r'[\u4e00-\u9fff][.·…]{2,}\s*\d+', text):
+            return True
+        return False
+
+    @classmethod
+    def _detect_audit_body_range(cls, paragraphs: List[Dict]) -> Tuple[int, int]:
+        """检测审计报告正文在段落列表中的起止范围。
+
+        通过匹配审计报告正文的标准章节标题来定位。
+        审计报告正文通常以"致xxx董事会"或报告文号开头，
+        以"注册会计师对财务报表审计的责任"章节结束。
+
+        Returns:
+            (body_start, body_end) 段落索引范围，均为 -1 表示未找到。
+            body_start: 正文起始段落索引（含）
+            body_end: 正文结束段落索引（不含，即附注起始位置）
+        """
+        # 第一步：找到审计报告正文的第一个标准章节标题
+        first_section_idx = -1
+        last_section_idx = -1
+        section_count = 0
+
+        for pi, para in enumerate(paragraphs):
+            t = para.get('text', '').strip().replace(' ', '').replace('\u3000', '')
+            if not t:
+                continue
+            # 跳过目录条目
+            if cls._is_toc_entry(t):
+                continue
+            # 匹配审计报告正文章节标题
+            # 去掉编号前缀（"一、""二、"等）后匹配
+            t_no_num = re.sub(r'^[一二三四五六七八九十]+\s*[、．.]?\s*', '', t)
+            for kw in cls._AUDIT_BODY_SECTION_KW:
+                if kw in t_no_num or kw in t:
+                    if first_section_idx == -1:
+                        first_section_idx = pi
+                    last_section_idx = pi
+                    section_count += 1
+                    break
+
+        if first_section_idx == -1 or section_count < 2:
+            return (-1, -1)
+
+        # 第二步：向上扩展 body_start（包含报告文号、致辞等）
+        body_start = first_section_idx
+        for pi in range(first_section_idx - 1, -1, -1):
+            t = paragraphs[pi].get('text', '').strip().replace(' ', '').replace('\u3000', '')
+            if not t:
+                continue
+            # 目录条目 → 停止回溯
+            if cls._is_toc_entry(t):
+                break
+            # 附注起始关键词 → 停止回溯（不应跨过附注标题）
+            if any(kw in t for kw in cls._NOTES_START_KW):
+                break
+            # 报告文号（如"致同审字（2025）第110ASXXXX号"）
+            if re.search(r'[（(]\s*\d{4}\s*[）)]\s*第?\s*\d+', t):
+                body_start = pi
+                continue
+            # 致辞（如"致xxx董事会："）
+            if '董事会' in t or '股东' in t or '全体合伙人' in t:
+                body_start = pi
+                continue
+            # 报告标题（如"独立审计报告"、"审计报告"）
+            if re.match(r'^(独立)?审计报告$', t):
+                body_start = pi
+                continue
+            # 如果距离第一个章节太远（超过20段），停止回溯
+            if first_section_idx - pi > 20:
+                break
+            # 其他非空段落也包含进来（可能是报告正文的引言段落）
+            body_start = pi
+
+        # 第三步：向下扩展 body_end（包含最后一个章节的正文内容）
+        body_end = last_section_idx + 1
+        for pi in range(last_section_idx + 1, len(paragraphs)):
+            t = paragraphs[pi].get('text', '').strip().replace(' ', '').replace('\u3000', '')
+            # 遇到附注起始关键词 → 正文结束
+            if t and any(kw in t for kw in cls._NOTES_START_KW):
+                if not cls._is_toc_entry(t):
+                    body_end = pi
+                    break
+            # 遇到附注第一个章节标题 → 正文结束
+            if t and any(kw in t for kw in cls._NOTES_FIRST_HEADING_KW):
+                if not cls._is_toc_entry(t):
+                    body_end = pi
+                    break
+            # 签字区域特征（"中国注册会计师""签字日期"等）→ 继续包含
+            # 超过最后章节标题 80 段 → 停止
+            if pi - last_section_idx > 80:
+                body_end = pi
+                break
+            body_end = pi + 1
+
+        return (body_start, body_end)
+
+    @staticmethod
+    def detect_notes_start_index(paragraphs: List[Dict]) -> int:
+        """检测段落列表中附注正文的起始索引。
+
+        策略：优先用审计报告正文模板定位正文范围，附注起始 = 正文结束之后。
+        如果模板匹配失败，回退到关键词匹配（跳过目录条目和审计报告区域）。
+
+        Returns:
+            附注起始段落索引，0 表示从头开始（无需跳过）。
+        """
+        # 策略1：用审计报告正文模板精确定位
+        body_start, body_end = ReportParser._detect_audit_body_range(paragraphs)
+        if body_start >= 0 and body_end > body_start:
+            logger.info(f"[detect_notes_start] 模板定位: 正文段落 {body_start}-{body_end}, 附注从 {body_end} 开始")
+            return body_end
+
+        # 策略2：回退到关键词匹配
+        for pi, para in enumerate(paragraphs):
+            t = para.get('text', '').strip().replace(' ', '').replace('\u3000', '')
+            if any(kw in t for kw in ReportParser._NOTES_START_KW):
+                if ReportParser._is_toc_entry(t):
+                    continue
+                return pi
+            if any(kw in t for kw in ReportParser._NOTES_FIRST_HEADING_KW):
+                if ReportParser._is_toc_entry(t):
+                    continue
+                return pi
+        return 0
+
     # 合并/公司列关键词
     CONSOLIDATED_KW = ['合并', '合并数']
     COMPANY_KW = ['公司', '母公司', '公司数']
@@ -600,17 +752,23 @@ class ReportParser(WorkpaperParser):
 
             # 找到表头行中跨2列的合并单元格组
             span2_groups: List[Tuple[int, int, str]] = []
+            # 构建父行列标签映射：利用合并单元格信息，将每列映射到其所属的父标签
+            # 解决合并单元格值只在左上角、右侧列为空的问题
+            parent_col_label: Dict[int, str] = {}
             for mr in parsed_merges:
-                if mr['col_span'] == 2:
-                    if parent_excel_row is not None:
-                        if not (mr['min_row'] <= parent_excel_row <= mr['max_row']):
-                            continue
-                    col_0 = mr['min_col'] - 1
-                    col_1 = mr['max_col'] - 1
-                    if col_0 < len(parent_row):
-                        text = parent_row[col_0].strip()
-                        if text:
-                            span2_groups.append((col_0, col_1, text))
+                if parent_excel_row is not None:
+                    if not (mr['min_row'] <= parent_excel_row <= mr['max_row']):
+                        continue
+                col_0 = mr['min_col'] - 1
+                col_end = mr['max_col'] - 1
+                if col_0 < len(parent_row):
+                    text = parent_row[col_0].strip()
+                    if text:
+                        # 将合并范围内的所有列都映射到该标签
+                        for ci in range(col_0, col_end + 1):
+                            parent_col_label[ci] = text
+                        if mr['col_span'] == 2:
+                            span2_groups.append((col_0, col_end, text))
 
             if len(span2_groups) >= 2:
                 # 有2组以上跨2列的合并单元格，推断为合并报表
@@ -670,7 +828,14 @@ class ReportParser(WorkpaperParser):
 
             # 根据第一行表头的期末/期初关键词判断每组合并/公司列的归属
             def _parent_label_of(col_idx: int) -> str:
-                """回溯第一行表头，找到 col_idx 所属的父列标签。"""
+                """找到 col_idx 所属的父列标签。
+
+                优先使用合并单元格映射（精确），回退到向左回溯（兼容）。
+                """
+                # 优先：合并单元格映射
+                if col_idx in parent_col_label:
+                    return parent_col_label[col_idx]
+                # 回退：向左回溯（仅在无合并单元格信息时）
                 for ci in range(col_idx, -1, -1):
                     if ci < len(parent_row):
                         h = parent_row[ci].strip()
@@ -871,6 +1036,26 @@ class ReportParser(WorkpaperParser):
             if not is_sub:
                 current_parent_id = item_id
 
+        # ── 零列检测：当某个余额列的所有值都是 0（无任何非零值）时，
+        # 说明该列在 Excel 模板中未填数据（默认值为 0），应视为无数据（None）。
+        # 这避免了"报表期初余额 0 vs 附注合计 xxx"的大量虚假差异。
+        if items:
+            balance_fields = [
+                'opening_balance', 'closing_balance',
+                'company_opening_balance', 'company_closing_balance',
+            ]
+            for field in balance_fields:
+                values = [getattr(it, field) for it in items]
+                non_none = [v for v in values if v is not None]
+                # 全列为 0（有值但全是 0）→ 视为未填数据
+                if non_none and all(v == 0 for v in non_none):
+                    logger.info(
+                        "[extract_statement_items] Sheet '%s': %s 全列为0，视为未填数据，置为None",
+                        sheet_data.sheet_name, field,
+                    )
+                    for it in items:
+                        setattr(it, field, None)
+
         return items
 
     def extract_note_tables(self, word_result) -> List[NoteTable]:
@@ -886,6 +1071,9 @@ class ReportParser(WorkpaperParser):
             List[NoteTable]
         """
         note_tables: List[NoteTable] = []
+
+        # ── 定位附注正文起始段落索引 ──
+        _notes_start_pi = self.detect_notes_start_index(word_result.paragraphs)
 
         # 从段落中构建科目标题索引
         # 匹配 "1、货币资金" "2、应收票据" "(1) 应收票据分类" 等格式
@@ -979,6 +1167,17 @@ class ReportParser(WorkpaperParser):
             if not table_data:
                 continue
 
+            # 跳过附注起始位置之前的表格（如目录表、审计报告中的表格）
+            if _notes_start_pi > 0:
+                _tpi = -1
+                if (hasattr(word_result, 'table_after_para_idx') and
+                        word_result.table_after_para_idx and
+                        table_idx < len(word_result.table_after_para_idx)):
+                    _tpi = word_result.table_after_para_idx[table_idx]
+                if 0 <= _tpi < _notes_start_pi:
+                    logger.debug(f"[extract_note_tables] skip table {table_idx} (para {_tpi} < notes start {_notes_start_pi})")
+                    continue
+
             account_name, section_title, sub_title = _find_account_title(table_idx)
 
             # section_title 优先用紧邻段落，如果紧邻段落为空则用科目名
@@ -1060,7 +1259,14 @@ class ReportParser(WorkpaperParser):
                 flat_style_mode=flat_style_mode,
             )
 
+        # ── 预扫描：定位附注正文起始位置 ──
+        _notes_start_idx = self.detect_notes_start_index(paragraphs)
+        if _notes_start_idx > 0:
+            paragraphs = paragraphs[_notes_start_idx:]
+            logger.info(f"[extract_note_sections] skipped {_notes_start_idx} paragraphs before notes")
+
         # ── 预扫描：检测 Word 样式 level 是否全部相同（flat mode） ──
+        # 在定位附注起始位置之后检测，避免非附注段落干扰
         flat_style_mode = detect_flat_style_mode(paragraphs)
         if flat_style_mode:
             logger.info(f"[extract_note_sections] flat_style_mode detected")
@@ -1070,10 +1276,11 @@ class ReportParser(WorkpaperParser):
         used_tables: set = set()
 
         if hasattr(word_result, 'table_after_para_idx') and word_result.table_after_para_idx:
-            # 新方式：直接使用段落索引
+            # 新方式：直接使用段落索引（需减去偏移量）
             for ti, pi in enumerate(word_result.table_after_para_idx):
-                if pi >= 0:
-                    table_after_para.setdefault(pi, []).append(ti)
+                adjusted_pi = pi - _notes_start_idx
+                if pi >= 0 and adjusted_pi >= 0:
+                    table_after_para.setdefault(adjusted_pi, []).append(ti)
                     used_tables.add(ti)
         else:
             # 旧方式兼容：通过 table_contexts 文本匹配

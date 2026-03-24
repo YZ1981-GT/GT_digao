@@ -229,12 +229,40 @@ async def upload_files(
                         session.note_tables.extend(note_tables)
                         note_sections = report_parser.extract_note_sections(word_result, note_tables)
                         session.note_sections.extend(note_sections)
+
+                        # ── 单文件包含审计报告正文+附注时，用模板精确提取正文 ──
+                        if not session.audit_report_content:
+                            body_start, body_end = report_parser._detect_audit_body_range(word_result.paragraphs)
+                            if body_start >= 0 and body_end > body_start:
+                                logger.info(f"从附注文件 {filename} 模板提取审计报告正文（段落 {body_start}-{body_end}）")
+                                for para in word_result.paragraphs[body_start:body_end]:
+                                    text = para.get('text', '').strip()
+                                    session.audit_report_content.append({
+                                        'text': text,
+                                        'level': para.get('level'),
+                                        'style': para.get('style', ''),
+                                    })
+                            else:
+                                # 回退：用 detect_notes_start_index 提取正文
+                                notes_start = report_parser.detect_notes_start_index(word_result.paragraphs)
+                                if notes_start > 0:
+                                    logger.info(f"从附注文件 {filename} 提取审计报告正文（前 {notes_start} 段）")
+                                    for para in word_result.paragraphs[:notes_start]:
+                                        text = para.get('text', '').strip()
+                                        session.audit_report_content.append({
+                                            'text': text,
+                                            'level': para.get('level'),
+                                            'style': para.get('style', ''),
+                                        })
+
                     elif file_type == ReportFileType.AUDIT_REPORT_BODY:
                         # 审计报告正文：提取段落内容
-                        for para in word_result.paragraphs:
+                        # 检测是否同时包含附注（单文件打包场景）
+                        notes_start = report_parser.detect_notes_start_index(word_result.paragraphs)
+                        body_end = notes_start if notes_start > 0 else len(word_result.paragraphs)
+                        for para in word_result.paragraphs[:body_end]:
                             text = para.get('text', '').strip()
                             if not text:
-                                # 保留空行用于段落分隔
                                 session.audit_report_content.append({
                                     'text': '', 'level': None, 'style': '',
                                 })
@@ -244,6 +272,14 @@ async def upload_files(
                                 'level': para.get('level'),
                                 'style': para.get('style', ''),
                             })
+                        # 如果文件同时包含附注，也提取附注
+                        if notes_start > 0 and word_result.tables:
+                            logger.info(f"审计报告文件 {filename} 同时包含附注（从段落 {notes_start} 开始），提取附注表格")
+                            note_tables = report_parser.extract_note_tables(word_result)
+                            if note_tables:
+                                session.note_tables.extend(note_tables)
+                                note_sections = report_parser.extract_note_sections(word_result, note_tables)
+                                session.note_sections.extend(note_sections)
                     else:
                         # 分类为 FINANCIAL_STATEMENT 或其他类型的 Word 文件
                         # 仍然尝试提取附注表格，避免内容丢失
@@ -517,44 +553,51 @@ async def start_review(req: StartReviewRequest):
     )
 
     async def event_stream():
-        async for event in report_review_engine.review_stream(session, config):
-            yield f"data: {event}\n\n"
-            await asyncio.sleep(0)  # 强制 flush，确保 SSE 事件立即发送到客户端
-            # 收集 findings
-            try:
-                data = json.loads(event)
-                if data.get("status") == "completed" and "result" in data:
-                    result = data["result"]
-                    # 本地复核完成后标记 session
-                    if req.review_mode in ("local", "full"):
-                        session.local_review_done = True
-                        session_store.save_session(req.session_id, session)
-                    if "findings" in result:
-                        new_findings = [
-                            ReportReviewFinding(**f) for f in result["findings"]
-                        ]
-                        if req.review_mode == "llm":
-                            # LLM 模式：合并到已有 findings（保留本地复核结果 + 手动批注）
-                            existing = _findings.get(req.session_id, [])
-                            # 已有的本地复核 finding IDs
-                            existing_ids = {f.id for f in existing}
-                            # 只追加新的 LLM findings
-                            merged = list(existing)
-                            for f in new_findings:
-                                if f.id not in existing_ids:
-                                    merged.append(f)
-                            _findings[req.session_id] = merged
-                        else:
-                            # local / full 模式：保留手动批注，替换其他
-                            existing = _findings.get(req.session_id, [])
-                            annotations = [
-                                f for f in existing
-                                if f.category == ReportReviewFindingCategory.MANUAL_ANNOTATION
+        try:
+            async for event in report_review_engine.review_stream(session, config):
+                yield f"data: {event}\n\n"
+                await asyncio.sleep(0)  # 强制 flush，确保 SSE 事件立即发送到客户端
+                # 收集 findings
+                try:
+                    data = json.loads(event)
+                    if data.get("status") == "completed" and "result" in data:
+                        result = data["result"]
+                        # 本地复核完成后标记 session
+                        if req.review_mode in ("local", "full"):
+                            session.local_review_done = True
+                            session_store.save_session(req.session_id, session)
+                        if "findings" in result:
+                            new_findings = [
+                                ReportReviewFinding(**f) for f in result["findings"]
                             ]
-                            _findings[req.session_id] = annotations + new_findings
-                        session_store.save_findings(req.session_id, _findings[req.session_id])
-            except Exception:
-                pass
+                            if req.review_mode == "llm":
+                                # LLM 模式：合并到已有 findings（保留本地复核结果 + 手动批注）
+                                existing = _findings.get(req.session_id, [])
+                                # 已有的本地复核 finding IDs
+                                existing_ids = {f.id for f in existing}
+                                # 只追加新的 LLM findings
+                                merged = list(existing)
+                                for f in new_findings:
+                                    if f.id not in existing_ids:
+                                        merged.append(f)
+                                _findings[req.session_id] = merged
+                            else:
+                                # local / full 模式：保留手动批注，替换其他
+                                existing = _findings.get(req.session_id, [])
+                                annotations = [
+                                    f for f in existing
+                                    if f.category == ReportReviewFindingCategory.MANUAL_ANNOTATION
+                                ]
+                                _findings[req.session_id] = annotations + new_findings
+                            session_store.save_findings(req.session_id, _findings[req.session_id])
+                except Exception:
+                    pass
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            logger.error("复核流异常: %s\n%s", exc, tb)
+            err_msg = json.dumps({"status": "error", "message": f"复核过程出错: {exc}"}, ensure_ascii=False)
+            yield f"data: {err_msg}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
