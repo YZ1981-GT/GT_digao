@@ -1674,6 +1674,37 @@ class ReportReviewEngine:
             logger.info("去重：%d 个 finding 去重后剩余 %d 个", len(all_findings), len(deduped_findings))
         all_findings = deduped_findings
 
+        # ── 跨类别去重：纵向加总不平 vs 金额不一致 ──
+        # 当同一科目同时存在纵向加总不平(RECONCILIATION_ERROR)和金额不一致(AMOUNT_INCONSISTENCY)，
+        # 且差异金额近似相等时，保留更具体的纵向加总不平，移除金额不一致。
+        integrity_diffs: Dict[str, float] = {}
+        for f in all_findings:
+            if (f.category == ReportReviewFindingCategory.RECONCILIATION_ERROR
+                    and f.account_name
+                    and "纵向加总不平" in (f.description or "")):
+                prev = integrity_diffs.get(f.account_name)
+                if prev is None or abs(f.difference or 0) > abs(prev):
+                    integrity_diffs[f.account_name] = abs(f.difference or 0)
+        if integrity_diffs:
+            cross_cat_removed = 0
+            cross_cat_filtered: List[ReportReviewFinding] = []
+            for f in all_findings:
+                if (f.category == ReportReviewFindingCategory.AMOUNT_INCONSISTENCY
+                        and f.account_name in integrity_diffs):
+                    amt_diff = abs(f.difference or 0)
+                    integ_diff = integrity_diffs[f.account_name]
+                    if integ_diff > 0 and (abs(amt_diff - integ_diff) / integ_diff) < 0.01:
+                        cross_cat_removed += 1
+                        logger.info(
+                            "跨类别去重：移除 %s 的金额不一致 finding（与纵向加总不平重叠，差异 %.2f ≈ %.2f）",
+                            f.account_name, amt_diff, integ_diff,
+                        )
+                        continue
+                cross_cat_filtered.append(f)
+            if cross_cat_removed > 0:
+                logger.info("跨类别去重：移除 %d 个与纵向加总不平重叠的金额不一致 finding", cross_cat_removed)
+            all_findings = cross_cat_filtered
+
         # 确保所有 Finding 为 pending_confirmation
         for f in all_findings:
             f.confirmation_status = FindingConfirmationStatus.PENDING_CONFIRMATION
