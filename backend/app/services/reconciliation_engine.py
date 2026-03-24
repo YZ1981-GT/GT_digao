@@ -14980,31 +14980,31 @@ class ReconciliationEngine:
     _EQUITY_COL_ACCOUNT_MAP = [
 
 
-        # (列名关键词列表, 附注科目名关键词列表)
+        # (列名关键词列表, 附注科目名关键词列表, 排除关键词列表)
 
 
-        (["实收资本", "股本"], ["实收资本", "股本"]),
+        (["实收资本", "股本"], ["实收资本", "股本"], []),
 
 
-        (["资本公积"], ["资本公积"]),
+        (["资本公积"], ["资本公积"], []),
 
 
-        (["专项储备"], ["专项储备"]),
+        (["专项储备"], ["专项储备"], []),
 
 
-        (["盈余公积"], ["盈余公积"]),
+        (["盈余公积"], ["盈余公积"], []),
 
 
-        (["未分配利润"], ["未分配利润"]),
+        (["未分配利润"], ["未分配利润"], []),
 
 
-        (["其他权益工具"], ["其他权益工具"]),
+        (["其他权益工具"], ["其他权益工具"], ["投资"]),  # 排除"其他权益工具投资"（资产科目）
 
 
-        (["其他综合收益"], ["其他综合收益"]),
+        (["其他综合收益"], ["其他综合收益"], []),
 
 
-        (["库存股"], ["库存股"]),
+        (["库存股"], ["库存股"], []),
 
 
     ]
@@ -15269,14 +15269,14 @@ class ReconciliationEngine:
             if ci in _col_is_prior:
                 continue
 
-            for map_idx, (col_kws, note_kws) in enumerate(self._EQUITY_COL_ACCOUNT_MAP):
+            for map_idx, (col_kws, note_kws, exclude_kws) in enumerate(self._EQUITY_COL_ACCOUNT_MAP):
 
 
                 if any(kw in hdr_clean for kw in col_kws):
 
                     # 每个科目只取第一个匹配列（防止上年金额列重复匹配）
                     if map_idx not in _matched_account_keys:
-                        col_account_map[ci] = (hdr_clean, note_kws)
+                        col_account_map[ci] = (hdr_clean, note_kws, exclude_kws)
                         _matched_account_keys.add(map_idx)
 
                     break
@@ -15339,7 +15339,7 @@ class ReconciliationEngine:
         # 对每个识别到的列/科目进行校验
 
 
-        for ci, (col_header, note_kws) in col_account_map.items():
+        for ci, (col_header, note_kws, exclude_kws) in col_account_map.items():
 
 
             # 提取权益变动表中该列的期初/期末值
@@ -15394,6 +15394,9 @@ class ReconciliationEngine:
 
 
                 note_kws, account_notes, table_structures,
+
+
+                exclude_kws=exclude_kws,
 
 
             )
@@ -15552,7 +15555,7 @@ class ReconciliationEngine:
 
 
 
-    def _find_note_opening_closing(self, note_kws, account_notes, table_structures):
+    def _find_note_opening_closing(self, note_kws, account_notes, table_structures, exclude_kws=None):
 
 
         """从附注表格中查找指定科目的期初/期末合计值。
@@ -15589,6 +15592,15 @@ class ReconciliationEngine:
 
 
             if any(kw in acct for kw in note_kws):
+
+
+                # 排除含排除关键词的科目（如"其他权益工具投资"不是权益科目）
+
+
+                if exclude_kws and any(ek in acct for ek in exclude_kws):
+
+
+                    continue
 
 
                 matched_notes.extend(ns)
