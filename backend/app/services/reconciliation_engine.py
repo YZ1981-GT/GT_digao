@@ -4074,6 +4074,15 @@ class ReconciliationEngine:
         "作为承租人",  # 上市版：短期/低价值租赁费用 + 现金流出总额，总额含未列示项目
 
 
+        "处于第",  # 期末/上年年末处于第X阶段的坏账准备：按单项/按组合 含子项层级，无"其中"标记
+
+
+        "分部利润",  # 分部利润或亏损、资产及负债：分部间抵销等特殊结构
+
+
+        "政府补助",  # 计入递延收益的政府补助：明细项目多、跨页续表
+
+
     ]
 
 
@@ -19202,13 +19211,22 @@ class ReconciliationEngine:
         策略：
 
 
-        - 如果 total 行与前一个 total/subtotal 之间存在 subtotal 行，
+        1. 找到当前 total 行之前最近的 total 行作为起始边界（prev_boundary）。
 
 
-          说明该 total 是对 subtotal 行的汇总，此时只收集 subtotal 行。
+        2. 如果 prev_boundary 存在且 prev_boundary 与 total_idx 之间只有 data 行
 
 
-        - 否则只收集 data 行（排除 sub_item，避免重复计算）。
+           （无 subtotal），说明 total = prev_total ± 减项，
+
+
+           将 prev_boundary 也作为数据行纳入求和。
+
+
+        3. 如果区间内有 subtotal 行，收集 subtotal 行 + 不被任何 subtotal 覆盖的 data 行。
+
+
+        4. 否则只收集 data 行（排除 sub_item，避免重复计算）。
 
 
         """
@@ -19238,7 +19256,7 @@ class ReconciliationEngine:
 
 
 
-        # 检查区间内是否有 subtotal 行
+        # 收集区间内的 subtotal 和 data 行
 
 
         subtotal_rows = []
@@ -19277,13 +19295,145 @@ class ReconciliationEngine:
 
 
 
-        # 如果有 subtotal 行，total 应该是对 subtotal 的汇总
-
-
         if subtotal_rows:
 
 
-            return subtotal_rows
+            # 有 subtotal 行时，判断每个 subtotal 覆盖哪些 data 行。
+
+
+            # 两种模式：
+
+
+            #   标准模式：subtotal 在 data 行之后（如"1年以内小计"），覆盖其前面的 data 行
+
+
+            #   段落标题模式：subtotal 在 data 行之前（如"一、不能重分类"），覆盖其后面的 data 行
+
+
+            covered_data = set()
+
+
+            # 构建分段边界：prev_boundary, subtotal_0, subtotal_1, ..., total_idx
+
+
+            seg_boundaries = [prev_boundary] + subtotal_rows + [total_idx]
+
+
+            for si_pos, si in enumerate(subtotal_rows):
+
+
+                # 检查 subtotal 前面（到上一个边界）是否有未被覆盖的 data 行
+
+
+                lower = seg_boundaries[si_pos]
+
+
+                before_data = []
+
+
+                for r in ts.rows:
+
+
+                    if r.row_index >= si:
+
+
+                        break
+
+
+                    if r.row_index <= lower:
+
+
+                        continue
+
+
+                    if r.role == "data" and r.row_index not in covered_data:
+
+
+                        before_data.append(r.row_index)
+
+
+                if before_data:
+
+
+                    # 标准模式：subtotal 覆盖其前面的未覆盖 data 行
+
+
+                    covered_data.update(before_data)
+
+
+                else:
+
+
+                    # 段落标题模式：subtotal 覆盖其后面的 data 行（到下一个边界）
+
+
+                    upper = seg_boundaries[si_pos + 2] if si_pos + 2 < len(seg_boundaries) else total_idx
+
+
+                    for r in ts.rows:
+
+
+                        if r.row_index >= upper:
+
+
+                            break
+
+
+                        if r.row_index <= si:
+
+
+                            continue
+
+
+                        if r.role == "data":
+
+
+                            covered_data.add(r.row_index)
+
+
+            uncovered_data = [d for d in data_rows if d not in covered_data]
+
+
+            return subtotal_rows + uncovered_data
+
+
+        elif prev_boundary >= 0 and data_rows:
+
+
+            # 无 subtotal，但有前一个 total 行。
+
+
+            # 仅当区间内只有"减："行（全部 sign=-1）且无正向 data 行时，
+
+
+            # 才认为是 合计 = 小计 ± 减项 模式（如长期借款、租赁负债），
+
+
+            # 将 prev_boundary（前一个 total）也纳入求和。
+
+
+            # 如果有正向 data 行（如财务费用的"利息费用净额"），
+
+
+            # 说明结构更复杂，不应包含 prev_boundary。
+
+
+            all_deductions = all(
+
+
+                r.sign == -1 for r in ts.rows
+
+
+                if r.row_index in set(data_rows)
+
+
+            )
+
+
+            if all_deductions:
+
+
+                return [prev_boundary] + data_rows
 
 
         return data_rows
