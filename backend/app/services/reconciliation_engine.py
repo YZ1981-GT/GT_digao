@@ -2685,8 +2685,10 @@ class ReconciliationEngine:
         def _is_deferred_tax_net_presentation(account_name: str) -> bool:
             """判断递延所得税科目是否为净额列示。
 
-            净额列示的特征：资产和负债都在报表中出现，且其中一方的期末和期初余额均为0/空。
-            只要有一方为0，说明报表上已经互抵，两个科目都应使用抵销后净额表核对。
+            净额列示的特征：
+            1. 经典判断：资产和负债都在报表中出现，且其中一方的期末和期初余额均为0/空。
+            2. 扩展判断：两方都有非零余额，但报表金额与"以抵销后净额列示"表的值一致
+               （即报表金额 = 未经抵销金额 - 互抵金额），说明报表已做了互抵。
             注意：如果某一方根本不在报表中（items 中无记录），不能判断为净额列示。
             """
             norm = account_name.replace(' ', '').replace('\u3000', '')
@@ -2695,13 +2697,28 @@ class ReconciliationEngine:
             # 两方都必须在报表中出现
             if '资产' not in _deferred_tax_balances or '负债' not in _deferred_tax_balances:
                 return False
-            # 任一方余额全为0/空 → 净额列示
+            # 经典判断：任一方余额全为0/空 → 净额列示
             for side in ('资产', '负债'):
                 bal = _deferred_tax_balances[side]
                 c = bal.get('closing')
                 o = bal.get('opening')
                 if (c is None or c == 0) and (o is None or o == 0):
                     return True
+            # 扩展判断：检查是否存在"以抵销后净额列示"表，
+            # 且报表金额与抵销后值一致（说明报表已做互抵）
+            for _nt in notes:
+                if _nt and ReconciliationEngine._is_deferred_tax_net_offset_table(_nt):
+                    # 找到抵销后净额表，检查报表金额是否与抵销后值匹配
+                    for side_name, side_key in [('资产', '资产'), ('负债', '负债')]:
+                        bal = _deferred_tax_balances.get(side_key, {})
+                        stmt_c = bal.get('closing')
+                        if stmt_c is None:
+                            continue
+                        net_c, _ = ReconciliationEngine._extract_deferred_tax_net_offset(
+                            _nt, f'递延所得税{side_name}')
+                        if net_c is not None and _amounts_equal(stmt_c, net_c):
+                            return True
+                    break
             return False
 
         for entry in matching_map.entries:
@@ -3187,6 +3204,12 @@ class ReconciliationEngine:
 
 
                 rule_closing, rule_opening = self._extract_note_totals_by_rules(note)
+
+                # 未分配利润特殊处理：期初取"调整后 期初未分配利润"行的"本期金额"列
+                if "未分配利润" in (note.account_name or "") or "未分配利润" in (note.section_title or ""):
+                    adj_opening = self._find_undist_adjusted_opening(note)
+                    if adj_opening is not None:
+                        rule_opening = adj_opening
 
 
 
@@ -4048,6 +4071,9 @@ class ReconciliationEngine:
         "不重要的联营企业",
 
 
+        "作为承租人",  # 上市版：短期/低价值租赁费用 + 现金流出总额，总额含未列示项目
+
+
     ]
 
 
@@ -4238,9 +4264,11 @@ class ReconciliationEngine:
 
 
             # 上市格式
-
-
-            if ("期初未分配利润" in label or "期初未分配" in label) and opening_row_idx is None:
+            # 优先匹配"调整后 期初未分配利润"（真正的期初值），
+            # 其次匹配"期初未分配利润"（可能是"调整前"或"调整"行）
+            if "调整后" in label and ("期初未分配利润" in label or "期初未分配" in label):
+                opening_row_idx = ri  # 覆盖之前的匹配
+            elif ("期初未分配利润" in label or "期初未分配" in label) and opening_row_idx is None:
 
 
                 opening_row_idx = ri
@@ -16993,9 +17021,6 @@ class ReconciliationEngine:
 
 
     @staticmethod
-
-
-    @staticmethod
     def _extract_from_balance_label_rows(
         note: NoteTable,
         norm_headers: List[str],
@@ -17070,8 +17095,11 @@ class ReconciliationEngine:
                 if is_closing_row:
                     # 取最后一个匹配的期末行（"期末未分配利润"通常在表格末尾）
                     closing_val = val
-                elif is_opening_row and opening_val is None:
-                    opening_val = val
+                elif is_opening_row:
+                    # 优先取"调整后"行的值（如"调整后 期初未分配利润"），
+                    # 覆盖之前匹配的"调整"行或"调整前"行
+                    if opening_val is None or "调整后" in first:
+                        opening_val = val
 
         return (closing_val, opening_val)
     @staticmethod

@@ -23,6 +23,8 @@ from .openai_service import OpenAIService, estimate_token_count, truncate_to_tok
 
 logger = logging.getLogger(__name__)
 
+# 中文序号段落标题模式（如"一、账面原值"、"二、累计折旧"）
+_SECTION_PATTERN = re.compile(r'^[一二三四五六七八九十]+[、.]')
 
 class TableStructureAnalyzer:
     """表格结构识别服务，调用 LLM 分析附注表格语义结构。"""
@@ -82,15 +84,15 @@ class TableStructureAnalyzer:
         避免误匹配"按组合计提"这类包含"合计"子串的科目名。"""
         if not label:
             return False
-        for kw in self.TOTAL_KEYWORDS:
-            if label == kw:
-                return True
-            # label 以关键词结尾，如"应收账款合计"、"  合计"
-            if label.endswith(kw):
-                return True
-            # label 以关键词开头，如"合计数"、"总计"
-            if label.startswith(kw):
-                return True
+        # 先用原始 label 匹配，再用去空格版本匹配（兼容"合  计"、"小  计"等 OCR 多空格）
+        for raw in (label, label.replace(" ", "").replace("\u3000", "")):
+            for kw in self.TOTAL_KEYWORDS:
+                if raw == kw:
+                    return True
+                if raw.endswith(kw):
+                    return True
+                if raw.startswith(kw):
+                    return True
         return False
 
     # ─── Public API ───
@@ -1236,6 +1238,21 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
                     if rows[k].role in ("total", "subtotal", "sub_item_header"):
                         break
                     if rows[k].role == "data" and rows[k].label:
+                        row_norm = rows[k].label.strip().replace(" ", "").replace("\u3000", "")
+
+                        # 中文序号开头的行（一、二、三、或(一)(二)(三)）是独立的段落标题，
+                        # 不是"其中"的子项，应终止当前其中区域
+                        if _SECTION_PATTERN.match(row_norm) or re.match(
+                            r'^[（(][一二三四五六七八九十]+[）)]', row_norm
+                        ):
+                            break
+
+                        # 含汇总性关键词的行（如"取得子公司支付的现金净额"、
+                        # "与租赁相关的现金流出总额"）不是"其中"的子项
+                        _summary_end_kw = ["净额", "总额", "合计", "小计"]
+                        if any(row_norm.endswith(kw) for kw in _summary_end_kw):
+                            break
+
                         # 检查后面是否紧跟"其中"行 → 说明这是新的顶层 data，不是明细
                         next_is_sub_header = False
                         for m in range(k + 1, len(rows)):
@@ -1258,7 +1275,6 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
                         # 特殊规则：社会保险费的"其中"子项遇到"住房公积金"等独立科目时截断
                         if parent_idx is not None:
                             parent_norm = rows[parent_idx].label.replace(" ", "").replace("\u3000", "")
-                            row_norm = rows[k].label.strip().replace(" ", "").replace("\u3000", "")
                             if "社会保险" in parent_norm and any(
                                 kw in row_norm for kw in self._SOCIAL_INSURANCE_SUB_ITEM_CUTOFF
                             ):
@@ -1272,6 +1288,29 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
                 i = k  # 跳过已处理的明细行
             else:
                 i += 1
+
+        # ── 第三遍：检测中文序号段落结构（一、二、三 + 1. 2. 3.）──
+        # 如果表格有中文序号段落标题（一、二、三）且段落内有编号子项（1. 2. 3.），
+        # 则段落标题行应标记为 subtotal（它们是子项的汇总），
+        # 编号子项保持 data 角色。这样 _get_data_rows_for_total 会正确地
+        # 只对 subtotal 行求和，避免 subtotal + data 双重计算。
+        _section_header_indices: List[int] = []
+        _has_numbered_children = False
+        for r in rows:
+            norm_lbl = r.label.replace(" ", "").replace("\u3000", "")
+            if _SECTION_PATTERN.match(norm_lbl) or re.match(
+                r'^[（(][一二三四五六七八九十]+[）)]', norm_lbl
+            ):
+                _section_header_indices.append(r.row_index)
+            elif r.role == "data" and re.match(r'^[\d]+[.、．]', norm_lbl):
+                _has_numbered_children = True
+
+        if _section_header_indices and _has_numbered_children and total_row_indices:
+            for si in _section_header_indices:
+                r = rows[si]
+                if r.role == "data":
+                    r.role = "subtotal"
+                    subtotal_row_indices.append(si)
 
         # ── 更新 current_parent_idx 用于后续（兼容性） ──
 
