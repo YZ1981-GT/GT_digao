@@ -1434,6 +1434,9 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
     # 百分比/比例列关键词 — 这类列不参与金额校验
     PERCENTAGE_KEYWORDS = ["比例", "%", "比率", "占比", "百分比"]
 
+    # 非金额列关键词 — 含这些关键词的列即使包含"期末"/"期初"也不应识别为余额列
+    NON_AMOUNT_KEYWORDS = ["折现率", "利率", "税率", "汇率"]
+
     # "上年"前缀 → opening_balance（仅当表头含"余额"时，如"上年年末余额"）
     # 不匹配"上期发生额"、"上期金额"等期间金额类表头
     PRIOR_YEAR_BALANCE_KEYWORDS = ["上年年末余额", "上年末余额", "上年余额", "上期余额", "上年度余额"]
@@ -1450,10 +1453,17 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
 
         for i, header in enumerate(headers):
             header_str = str(header).strip() if header else ""
+            # 去除换行符，使"账面\n价值"能匹配"账面价值"等关键词
+            header_str = header_str.replace("\n", "").replace("\r", "")
             semantic = "other"
 
             # 规则 1：百分比/比例列 → other（最高优先级）
             if any(kw in header_str for kw in self.PERCENTAGE_KEYWORDS):
+                columns.append(TableStructureColumn(col_index=i, semantic="other", period=None))
+                continue
+
+            # 规则 1b：非金额列（折现率/利率等）→ other
+            if any(kw in header_str for kw in self.NON_AMOUNT_KEYWORDS):
                 columns.append(TableStructureColumn(col_index=i, semantic="other", period=None))
                 continue
 
