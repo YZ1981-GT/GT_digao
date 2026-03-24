@@ -19249,6 +19249,96 @@ class ReconciliationEngine:
 
 
 
+    def _is_section_header_table(self, ts: TableStructure) -> bool:
+
+
+        """判断是否为"段首合计"表格（每段以合计行开头，明细行跟在后面）。
+
+
+        
+
+
+        检测条件：
+
+
+        1. 至少有 2 个 total 行（多段表格）。
+
+
+        2. 第一个 total 行是表格的第一行（或之前无 data 行）。
+
+
+        3. 第一个 total 紧跟其后有 data 行。
+
+
+        典型如投资性房地产多段表格。
+
+
+        """
+
+
+        totals = [r for r in ts.rows if r.role == "total"]
+
+
+        if len(totals) < 2:
+
+
+            return False
+
+
+        first_total = totals[0]
+
+
+        # 第一个 total 前面不能有 data 行
+
+
+        for r in ts.rows:
+
+
+            if r.row_index >= first_total.row_index:
+
+
+                break
+
+
+            if r.role == "data":
+
+
+                return False
+
+
+        # 第一个 total 后面（到第二个 total 或表尾）必须有 data 行
+
+
+        second_boundary = totals[1].row_index
+
+
+        for r in ts.rows:
+
+
+            if r.row_index <= first_total.row_index:
+
+
+                continue
+
+
+            if r.row_index >= second_boundary:
+
+
+                break
+
+
+            if r.role == "data":
+
+
+                return True
+
+
+        return False
+
+
+
+
+
     def _get_data_rows_for_total(
 
 
@@ -19285,7 +19375,70 @@ class ReconciliationEngine:
         4. 否则只收集 data 行（排除 sub_item，避免重复计算）。
 
 
+        5. 段首合计模式：当表格为 section-header-first 结构时，取 total 行后面
+
+
+           到下一个 total 之间的数据行。
+
+
         """
+
+
+        # ── 段首合计模式（section-header-first）──
+
+
+        # 多段表格（如投资性房地产），每段以合计行开头，明细行跟在后面。
+
+
+        # 此时每个 total 的数据行在其后面，而非前面。
+
+
+        if self._is_section_header_table(ts):
+
+
+            next_boundary = None
+
+
+            for r in ts.rows:
+
+
+                if r.row_index > total_idx and r.role == "total":
+
+
+                    next_boundary = r.row_index
+
+
+                    break
+
+
+            after_data = []
+
+
+            for r in ts.rows:
+
+
+                if r.row_index <= total_idx:
+
+
+                    continue
+
+
+                if next_boundary is not None and r.row_index >= next_boundary:
+
+
+                    break
+
+
+                if r.role == "data":
+
+
+                    after_data.append(r.row_index)
+
+
+            return after_data
+
+
+
 
 
         # 找到当前 total 行之前最近的 total 行索引作为起始边界
@@ -19312,7 +19465,7 @@ class ReconciliationEngine:
 
 
 
-        # 收集区间内的 subtotal 和 data 行
+        # 收集 total 行前面区间 (prev_boundary, total_idx) 的 subtotal 和 data 行
 
 
         subtotal_rows = []
