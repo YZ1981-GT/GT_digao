@@ -15296,6 +15296,9 @@ class ReconciliationEngine:
                            "上年年末余额", "期初", "年初"]
             _mv_close_kw = ["期末余额", "本年末余额", "年末余额",
                             "本年年末余额", "期末", "年末"]
+            # 排除词：标签含这些词时不视为期末行
+            _mv_close_excl_prefix = ["调整前", "调整后"]
+            _mv_close_excl_kw = ["上期末", "上年末", "上年年末"]
             for row in (primary_note.rows or []):
                 if not row:
                     continue
@@ -15305,11 +15308,17 @@ class ReconciliationEngine:
                 if _current_period_col >= len(row):
                     continue
                 v = _safe_float(row[_current_period_col])
-                if opening is None and any(kw in label for kw in _mv_open_kw):
+                is_open_label = any(kw in label for kw in _mv_open_kw)
+                if opening is None and is_open_label:
                     opening = v
-                if closing is None and any(kw in label for kw in _mv_close_kw):
-                    if not any(kw in label for kw in _mv_open_kw):
-                        closing = v
+                # 期末行：排除调整前/上期末等行，取最后一个匹配行
+                _excl = (
+                    is_open_label
+                    or any(label.startswith(p) for p in _mv_close_excl_prefix)
+                    or any(ek in label for ek in _mv_close_excl_kw)
+                )
+                if not _excl and any(kw in label for kw in _mv_close_kw):
+                    closing = v
             # 未分配利润特殊处理：期初取"调整后"行
             if any("未分配利润" in kw for kw in note_kws):
                 adj_opening = self._find_undist_adjusted_opening(primary_note)
