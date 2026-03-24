@@ -12898,6 +12898,102 @@ class ReconciliationEngine:
                     opening_col = opening_bv_col
 
 
+                # 回退：ts.columns未标注账面价值列时，直接从表头查找
+
+
+                if closing_bv_col is None and closing_col is not None:
+
+
+                    _close_kw = self._CLOSING_COL_KW
+
+
+                    _open_kw = self._OPENING_COL_KW
+
+
+                    for ci, h in enumerate(_hdrs):
+
+
+                        h_clean = str(h or "").replace(" ", "")
+
+
+                        h2 = str(_last_hdr_row[ci] or "").replace(" ", "") if ci < len(_last_hdr_row) else ""
+
+
+                        if not any(kw in h_clean for kw in _bv_kw) and not any(kw in h2 for kw in _bv_kw):
+
+
+                            continue
+
+
+                        # 判断期间归属
+
+
+                        combined_h = h_clean + h2
+
+
+                        # 构建父组标签
+
+
+                        _pg = ""
+
+
+                        if note.header_rows and len(note.header_rows) >= 2:
+
+
+                            _fr = note.header_rows[0]
+
+
+                            _last = ""
+
+
+                            for _ci2 in range(ci + 1):
+
+
+                                _fh = str(_fr[_ci2] if _ci2 < len(_fr) else "").replace(" ", "")
+
+
+                                if _fh:
+
+
+                                    _last = _fh
+
+
+                            _pg = _last
+
+
+                        combined_h += _pg
+
+
+                        has_close = any(kw in combined_h for kw in _close_kw)
+
+
+                        has_open = any(kw in combined_h for kw in _open_kw)
+
+
+                        if has_close and not has_open and closing_bv_col is None:
+
+
+                            closing_bv_col = ci
+
+
+                        elif has_open and opening_bv_col is None:
+
+
+                            opening_bv_col = ci
+
+
+                    if closing_bv_col is not None:
+
+
+                        closing_col = closing_bv_col
+
+
+                    if opening_bv_col is not None:
+
+
+                        opening_col = opening_bv_col
+
+
 
 
 
