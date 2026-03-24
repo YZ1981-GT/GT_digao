@@ -19584,22 +19584,77 @@ class ReconciliationEngine:
 
 
 
+        _opening_excl = ["上年", "上期", "期初", "年初"]  # 期末列排除词
+
+
+        _closing_excl = ["期末", "年末"]  # 期初列排除词（不含上年/上期的纯期末）
+
+
+
         def _col_matches_period(ci: int, period_kw: list) -> bool:
 
 
-            """判断列是否属于指定期间：先查最后一行表头，再查父组标签。"""
+            """判断列是否属于指定期间：先查最后一行表头，再查父组标签。
+
+
+            增加排除逻辑：期末列排除含"上年/上期/期初"的，期初列排除纯"期末"的。
+
+
+            """
 
 
             h = norm_h[ci] if ci < len(norm_h) else ""
+
+
+            pg = parent_group[ci] if ci < len(parent_group) else ""
+
+
+            combined = h + pg
+
+
+            # 判断是否为期末组还是期初组
+
+
+            is_close_group = (period_kw is self._BV_PERIOD_CLOSE)
+
+
+            if is_close_group:
+
+
+                # 期末组：排除含"上年/上期/期初"的列（如"上年末余额"）
+
+
+                if any(ek in combined for ek in _opening_excl):
+
+
+                    return False
+
+
+            else:
+
+
+                # 期初组：排除纯"期末"列（不含上年/上期的）
+
+
+                has_close = any(ek in combined for ek in _closing_excl)
+
+
+                has_open_ctx = any(ek in combined for ek in _opening_excl)
+
+
+                if has_close and not has_open_ctx:
+
+
+                    return False
+
+
+            # 正常匹配
 
 
             if any(pk in h for pk in period_kw):
 
 
                 return True
-
-
-            pg = parent_group[ci] if ci < len(parent_group) else ""
 
 
             if pg and any(pk in pg for pk in period_kw):
