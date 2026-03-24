@@ -20394,10 +20394,25 @@ class ReconciliationEngine:
         empty_cells = []  # [(row_index, label, col_index, col_name)]
 
 
+        _total_label_kw = ["合计", "合 计", "小计", "小 计", "总计", "总 计"]
+
+
         for row_s in table_structure.rows:
 
 
             if row_s.role in ("total", "subtotal", "header"):
+
+
+                continue
+
+
+            label = (row_s.label or "").strip()
+
+
+            # 回退：通过行标签排除合计行（LLM可能未正确标注role）
+
+
+            if any(kw in label for kw in _total_label_kw):
 
 
                 continue
@@ -20410,9 +20425,6 @@ class ReconciliationEngine:
 
 
                 continue
-
-
-            label = (row_s.label or "").strip()
 
 
             for tc_idx, tc_name in text_cols:
