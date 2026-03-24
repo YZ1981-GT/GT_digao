@@ -4283,21 +4283,22 @@ class ReconciliationEngine:
             label = str(row[0] if row else "").replace(" ", "").replace("\u3000", "").strip()
 
 
-            # 上市格式
-            # 优先匹配"调整后 期初未分配利润"（真正的期初值），
-            # 其次匹配"期初未分配利润"（可能是"调整前"或"调整"行）
-            if "调整后" in label and ("期初未分配利润" in label or "期初未分配" in label):
-                opening_row_idx = ri  # 覆盖之前的匹配
-            elif ("期初未分配利润" in label or "期初未分配" in label) and opening_row_idx is None:
+            # ── 上市格式：期初行 ──
+            # 优先匹配"调整后 期初未分配利润"（真正的期初值）
+            # 如果没有"调整后"行，则取最后一个"期初未分配利润"行
+            # （排除"调整前"行，因为调整前不是真正的期初）
+            if "期初未分配利润" in label or "期初未分配" in label:
+                if "调整后" in label:
+                    opening_row_idx = ri  # 最高优先级，直接覆盖
+                elif "调整前" not in label and opening_row_idx is None:
+                    opening_row_idx = ri  # 兜底：取第一个非"调整前"的期初行
 
 
-                opening_row_idx = ri
-
-
-            if ("期末未分配利润" in label or "期末未分配" in label) and closing_row_idx is None:
-
-
-                closing_row_idx = ri
+            # ── 上市格式：期末行 ──
+            # 取最后一个匹配的"期末未分配利润"行
+            # 这样即使第一行是"调整前上期末未分配利润"，也会被后面真正的期末行覆盖
+            if "期末未分配利润" in label or "期末未分配" in label:
+                closing_row_idx = ri  # 始终取最后一个匹配
 
 
             # 国企格式
