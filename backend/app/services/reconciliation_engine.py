@@ -680,6 +680,17 @@ class ReconciliationEngine:
             return True
 
 
+        # 利润表中的其他综合收益子项（不能重分类/将重分类/权益法下等）：
+        # 这些子项的 closing/opening 是发生额，不是余额，
+        # 不应与资产负债表附注（余额表）做金额核对。
+        # 合计级别的核对由 check_oci_vs_income_statement 负责。
+        if item.statement_type == StatementType.INCOME_STATEMENT:
+            _OCI_SUB_KW = ["不能重分类", "将重分类", "权益法", "金融资产重分类",
+                           "结转留存", "结转损益"]
+            if "其他综合收益" in name and any(kw in name for kw in _OCI_SUB_KW):
+                return True
+
+
         return False
 
 
