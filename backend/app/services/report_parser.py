@@ -1125,11 +1125,11 @@ class ReportParser(WorkpaperParser):
             # 紧邻表格的段落文本（用作 section_title）
             immediate_text = word_result.paragraphs[start_pi].get('text', '').strip() if start_pi < len(word_result.paragraphs) else ""
 
-            # 向上回溯，找到最近的有编号的科目标题
-            # 优先找 level=3 的标题（如 "1、货币资金"），其次 level=2（如 "（一）流动资产"）
+            # 向上回溯，找到最近的科目标题
+            # 策略：编号标题（如 "1、货币资金"）是最可靠的信号
+            # 无编号但有 Word 样式 level 的短标题作为补充
             account_name = ""
             sub_title = ""
-            found_level3 = False
 
             for pi in range(start_pi, -1, -1):
                 text = word_result.paragraphs[pi].get('text', '').strip()
@@ -1137,31 +1137,43 @@ class ReportParser(WorkpaperParser):
                     continue
                 level = para_levels[pi]
 
-                # 如果没有 level 字段，通过编号模式推断
+                # 通过编号模式推断层级（如果 Word 样式没给 level）
                 if level is None:
                     level = infer_numbering_level(text)
 
                 # 检查是否是编号标题
                 m = note_item_pattern.match(text)
-                if m and level is not None:
+
+                if m:
                     extracted = self._extract_account_from_heading(text)
-                    if level <= 3 and not found_level3:
-                        # 这是科目级标题（如 "1、货币资金"）
+                    # 有编号 + 有层级 → 按层级判断
+                    if level is not None and level <= 3:
                         account_name = extracted
-                        found_level3 = True
+                        break
+                    elif level is not None and level >= 4:
+                        if not sub_title:
+                            sub_title = extracted
+                    else:
+                        # 有编号但无法推断层级 → 作为科目名候选（短文本优先）
+                        if not account_name and len(extracted) <= 30:
+                            account_name = extracted
+                            break
+                        elif not sub_title:
+                            sub_title = extracted
+                elif level is not None and len(text) <= 40:
+                    # 无编号但有 Word 样式 level 且文本较短 → 视为标题
+                    extracted = self._extract_account_from_heading(text)
+                    if level <= 3 and not account_name:
+                        account_name = extracted
                         break
                     elif level >= 4 and not sub_title:
-                        # 这是子标题（如 "(1) 按坏账计提方法分类"）
-                        sub_title = extracted
-                elif m and not account_name:
-                    # 有编号但无法推断层级，保守处理：继续向上找
-                    extracted = self._extract_account_from_heading(text)
-                    if not sub_title:
                         sub_title = extracted
 
-            # 如果没找到编号标题，用紧邻段落文本
+            # 兜底：从紧邻段落提取科目关键词
             if not account_name:
-                account_name = self._extract_account_from_heading(immediate_text) or immediate_text
+                account_name = self._extract_short_account_hint(immediate_text)
+                logger.info("[_find_account_title] table %d: fallback to hint='%s', immediate='%s'",
+                            table_idx, account_name, immediate_text[:80])
 
             return (account_name, immediate_text, sub_title)
 
@@ -1930,17 +1942,39 @@ class ReportParser(WorkpaperParser):
 
     @staticmethod
     def _merge_note_header_rows(header_rows: List[List[str]]) -> List[str]:
-        """将附注表格的多行表头合并为单行语义表头。"""
+        """将附注表格的多行表头合并为单行语义表头。
+
+        处理合并单元格：第一行中的空列继承左边最近的非空值
+        （Word 合并单元格解析后，跨列的标题只出现在第一列，后续列为空）。
+        """
         if not header_rows:
             return []
         if len(header_rows) == 1:
             return header_rows[0]
 
         col_count = max(len(row) for row in header_rows)
+
+        # 预处理：对第一行（通常是合并单元格行）做空列继承
+        # 例如 ["项目", "期末数", "", "", "期初数", "", ""]
+        # → ["项目", "期末数", "期末数", "期末数", "期初数", "期初数", "期初数"]
+        filled_first_row: List[str] = []
+        if header_rows:
+            last_val = ""
+            for ci in range(col_count):
+                val = header_rows[0][ci].strip() if ci < len(header_rows[0]) else ""
+                if val:
+                    last_val = val
+                filled_first_row.append(last_val)
+
         merged = []
         for ci in range(col_count):
             parts = []
-            for row in header_rows:
+            # 第一行用继承后的值
+            first_val = filled_first_row[ci] if ci < len(filled_first_row) else ""
+            if first_val:
+                parts.append(first_val)
+            # 后续行直接取值
+            for row in header_rows[1:]:
                 val = row[ci].strip() if ci < len(row) else ''
                 if val and val not in parts:
                     parts.append(val)
@@ -1957,6 +1991,48 @@ class ReportParser(WorkpaperParser):
         # 去除常见后缀
         cleaned = re.sub(r'[（(]续[）)]$', '', cleaned)
         return cleaned.strip()
+
+    @staticmethod
+    def _extract_short_account_hint(long_text: str) -> str:
+        """从过长的叙述性段落中尝试提取科目关键词作为 account_name。
+
+        当紧邻表格的段落是一段很长的叙述性文本时，尝试从中提取
+        常见的会计科目关键词（如"投资性房地产"、"长期股权投资"等）。
+        如果提取不到，返回截断后的文本。
+        """
+        if not long_text:
+            return ""
+
+        # 常见会计科目关键词（按长度降序，优先匹配更具体的）
+        ACCOUNT_KEYWORDS = [
+            "以公允价值计量且其变动计入当期损益的金融资产",
+            "以公允价值计量且其变动计入其他综合收益的金融资产",
+            "长期股权投资", "投资性房地产", "固定资产", "无形资产",
+            "在建工程", "使用权资产", "开发支出", "商誉",
+            "长期待摊费用", "递延所得税资产", "递延所得税负债",
+            "交易性金融资产", "衍生金融资产", "应收票据", "应收账款",
+            "应收款项融资", "预付款项", "其他应收款", "存货",
+            "合同资产", "合同负债", "持有待售资产",
+            "一年内到期的非流动资产", "其他流动资产",
+            "债权投资", "其他债权投资", "长期应收款",
+            "其他权益工具投资", "其他非流动金融资产",
+            "短期借款", "应付票据", "应付账款", "预收款项",
+            "应付职工薪酬", "应交税费", "其他应付款",
+            "长期借款", "应付债券", "租赁负债", "长期应付款",
+            "预计负债", "递延收益", "其他非流动负债",
+            "实收资本", "资本公积", "其他综合收益",
+            "盈余公积", "未分配利润", "专项储备",
+            "营业收入", "营业成本", "管理费用", "销售费用",
+            "财务费用", "研发费用", "投资收益",
+            "货币资金", "生产性生物资产", "油气资产",
+        ]
+
+        for kw in ACCOUNT_KEYWORDS:
+            if kw in long_text:
+                return kw
+
+        # 没匹配到科目关键词，截断返回
+        return long_text[:30] + "…"
 
     @staticmethod
     def _extract_pdf_table_titles(pdf_text: str) -> List[str]:

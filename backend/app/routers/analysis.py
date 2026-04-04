@@ -538,3 +538,42 @@ async def get_project(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     return {"success": True, "project": project.model_dump()}
+
+
+@router.post("/export-word/{project_id}")
+async def export_word(project_id: str):
+    """将文档分析项目导出为 Word 文档"""
+    project = _analysis_projects.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    if not project.outline:
+        raise HTTPException(status_code=400, detail="章节框架为空，请先生成内容")
+
+    # 检查是否有任何章节已生成内容
+    def _has_content(chapters):
+        for ch in chapters:
+            if ch.content:
+                return True
+            if ch.children and _has_content(ch.children):
+                return True
+        return False
+
+    if not _has_content(project.outline):
+        raise HTTPException(status_code=400, detail="尚未生成任何章节内容，请先生成内容后再导出")
+
+    try:
+        word_bytes = analysis_service.export_to_word(project)
+
+        mode_label = ANALYSIS_MODE_CONFIG.get(project.mode.value, {}).get("label", "文档分析")
+        filename = f"文档分析报告_{mode_label}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.docx"
+
+        from urllib.parse import quote
+        return Response(
+            content=word_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        )
+    except Exception as e:
+        logger.error("Word 导出失败: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Word 导出失败: {str(e)}")

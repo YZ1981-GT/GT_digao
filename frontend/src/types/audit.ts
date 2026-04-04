@@ -152,6 +152,7 @@ export interface ReviewReport {
   conclusion: string;
   reviewed_at: string;
   project_id?: string;
+  entity_name?: string;
 }
 
 /** 问题状态更新请求 */

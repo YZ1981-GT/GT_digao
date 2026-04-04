@@ -6,7 +6,9 @@
 3. LLM 根据文档内容自动生成章节框架（带注释）
 4. 用户确认框架后，逐章节生成内容（引用原文并标注出处）
 5. 每个章节支持手动编辑和AI修改
+6. 导出为 Word 文档（排版格式同审计报告复核导出）
 """
+import io
 import json
 import logging
 import re
@@ -963,6 +965,248 @@ class AnalysisService:
         if m:
             return AnalysisService._find_excerpt_at(doc_text, generated_text, m.start())
         return doc_text[:150] + "..."
+
+    # ─── Word 导出 ───
+
+    def export_to_word(
+        self,
+        project: AnalysisProject,
+    ) -> bytes:
+        """将文档分析项目导出为 Word 文档。
+
+        排版格式同审计报告复核的 Word 导出：
+        - 统一字体（宋体）
+        - 居中标题 → 概要表格 → 章节正文 → 引用来源附录
+        """
+        import docx
+        from docx.shared import Pt
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+        from .word_service import set_run_font, set_paragraph_font, DEFAULT_FONT_NAME
+
+        doc = docx.Document()
+
+        # ── 标题 ──
+        mode_label = ANALYSIS_MODE_CONFIG.get(project.mode.value, {}).get("label", "文档分析")
+        title_para = doc.add_paragraph()
+        title_run = title_para.add_run(f"文档分析报告 — {mode_label}")
+        title_run.bold = True
+        title_run.font.size = Pt(18)
+        set_run_font(title_run, DEFAULT_FONT_NAME)
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        # ── 概要信息表格 ──
+        heading_summary = doc.add_heading("一、分析概要", level=1)
+        set_paragraph_font(heading_summary, DEFAULT_FONT_NAME)
+
+        doc_names = "、".join(d.filename for d in project.documents[:10])
+        if len(project.documents) > 10:
+            doc_names += f" 等 {len(project.documents)} 个文档"
+
+        summary_rows = [
+            ("分析模式", mode_label),
+            ("文档数量", str(len(project.documents))),
+            ("文档列表", doc_names),
+            ("目标字数", f"{project.target_word_count} 字"),
+            ("生成时间", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")),
+        ]
+        if project.custom_instruction:
+            summary_rows.append(("自定义要求", project.custom_instruction))
+
+        summary_table = doc.add_table(rows=len(summary_rows), cols=2, style="Table Grid")
+        summary_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for i, (label, value) in enumerate(summary_rows):
+            cell_label = summary_table.cell(i, 0)
+            cell_value = summary_table.cell(i, 1)
+            cell_label.text = label
+            cell_value.text = value
+            for cell in (cell_label, cell_value):
+                for para in cell.paragraphs:
+                    set_paragraph_font(para, DEFAULT_FONT_NAME)
+
+        # ── 正文章节 ──
+        heading_body = doc.add_heading("二、分析内容", level=1)
+        set_paragraph_font(heading_body, DEFAULT_FONT_NAME)
+
+        all_sources: List[AnalysisSourceRef] = []
+        self._render_chapters_to_word(doc, project.outline, level=2, all_sources=all_sources)
+
+        # ── 引用来源附录 ──
+        if all_sources:
+            heading_ref = doc.add_heading("三、引用来源", level=1)
+            set_paragraph_font(heading_ref, DEFAULT_FONT_NAME)
+
+            # 去重
+            seen = set()
+            unique_sources: List[AnalysisSourceRef] = []
+            for src in all_sources:
+                key = (src.doc_name, src.excerpt[:80])
+                if key not in seen:
+                    seen.add(key)
+                    unique_sources.append(src)
+
+            for idx, src in enumerate(unique_sources, 1):
+                p = doc.add_paragraph()
+                run_idx = p.add_run(f"[{idx}] ")
+                run_idx.bold = True
+                set_run_font(run_idx, DEFAULT_FONT_NAME)
+                run_name = p.add_run(f"《{src.doc_name}》")
+                run_name.bold = True
+                set_run_font(run_name, DEFAULT_FONT_NAME)
+                if src.location:
+                    run_loc = p.add_run(f"（{src.location}）")
+                    set_run_font(run_loc, DEFAULT_FONT_NAME)
+                if src.excerpt:
+                    excerpt = src.excerpt if len(src.excerpt) <= 200 else src.excerpt[:200] + "..."
+                    run_excerpt = p.add_run(f"\n  「{excerpt}」")
+                    run_excerpt.font.size = Pt(9)
+                    set_run_font(run_excerpt, DEFAULT_FONT_NAME)
+
+        # 输出字节
+        buffer = io.BytesIO()
+        doc.save(buffer)
+        buffer.seek(0)
+        return buffer.read()
+
+    def _render_chapters_to_word(
+        self,
+        doc,
+        chapters: List[AnalysisChapter],
+        level: int,
+        all_sources: List[AnalysisSourceRef],
+    ) -> None:
+        """递归渲染章节到 Word 文档。"""
+        from .word_service import set_run_font, set_paragraph_font, DEFAULT_FONT_NAME
+        from docx.shared import Pt
+
+        for chapter in chapters:
+            # 章节标题（level 限制在 1-4，python-docx 最大支持 9）
+            heading_level = min(level, 4)
+            heading = doc.add_heading(chapter.title, level=heading_level)
+            set_paragraph_font(heading, DEFAULT_FONT_NAME)
+
+            # 章节正文
+            if chapter.content:
+                self._render_markdown_to_word(doc, chapter.content)
+
+            # 收集引用来源
+            if chapter.sources:
+                all_sources.extend(chapter.sources)
+
+            # 递归子章节
+            if chapter.children:
+                self._render_chapters_to_word(doc, chapter.children, level + 1, all_sources)
+
+    def _render_markdown_to_word(self, doc, content: str) -> None:
+        """将 Markdown 格式的章节内容渲染到 Word 文档。
+
+        支持：段落、加粗、Markdown 标题、Markdown 表格、有序/无序列表。
+        """
+        from .word_service import set_run_font, set_paragraph_font, DEFAULT_FONT_NAME
+        from docx.shared import Pt
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        lines = content.split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
+            # ── Markdown 表格 ──
+            if '|' in line and line.strip().startswith('|'):
+                table_lines = []
+                while i < len(lines) and '|' in lines[i] and lines[i].strip().startswith('|'):
+                    stripped = lines[i].strip()
+                    # 跳过分隔行（如 |---|---|）
+                    if not re.match(r'^\|[\s\-:|]+\|$', stripped):
+                        table_lines.append(stripped)
+                    i += 1
+                if table_lines:
+                    self._add_md_table_to_word(doc, table_lines)
+                    # 表格后加空段落做间距
+                    doc.add_paragraph()
+                continue
+
+            # ── 空行 ──
+            if not line.strip():
+                i += 1
+                continue
+
+            # ── Markdown 标题（### 小标题） ──
+            heading_match = re.match(r'^(#{1,4})\s+(.+)', line.strip())
+            if heading_match:
+                md_level = len(heading_match.group(1))
+                md_title = heading_match.group(2).strip()
+                # Markdown # 映射为 Word heading level 2-4（level 1 留给大纲一级标题）
+                word_level = min(md_level + 1, 4)
+                heading = doc.add_heading(md_title, level=word_level)
+                heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                set_paragraph_font(heading, DEFAULT_FONT_NAME)
+                i += 1
+                continue
+
+            # ── 列表项 ──
+            list_match = re.match(r'^(\s*)([-*]|\d+[.、])\s+(.+)', line)
+            if list_match:
+                marker = list_match.group(2)
+                text = list_match.group(3)
+                is_ordered = bool(re.match(r'\d+[.、]', marker))
+                p = doc.add_paragraph(style='List Number' if is_ordered else 'List Bullet')
+                self._add_markdown_runs(p, text)
+                set_paragraph_font(p, DEFAULT_FONT_NAME)
+                i += 1
+                continue
+
+            # ── 普通段落 ──
+            p = doc.add_paragraph()
+            self._add_markdown_runs(p, line)
+            set_paragraph_font(p, DEFAULT_FONT_NAME)
+            i += 1
+
+    def _add_markdown_runs(self, paragraph, text: str) -> None:
+        """解析 Markdown 行内格式（**加粗**）并添加 runs。"""
+        from .word_service import set_run_font, DEFAULT_FONT_NAME
+
+        parts = re.split(r'(\*\*[^*]+\*\*)', text)
+        for part in parts:
+            if part.startswith('**') and part.endswith('**'):
+                run = paragraph.add_run(part[2:-2])
+                run.bold = True
+            else:
+                run = paragraph.add_run(part)
+            set_run_font(run, DEFAULT_FONT_NAME)
+
+    def _add_md_table_to_word(self, doc, table_lines: List[str]) -> None:
+        """将 Markdown 表格行转为 Word 表格。"""
+        from .word_service import set_paragraph_font, DEFAULT_FONT_NAME
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+
+        rows_data = []
+        for line in table_lines:
+            cells = [c.strip() for c in line.strip('|').split('|')]
+            rows_data.append(cells)
+
+        if not rows_data:
+            return
+
+        num_cols = max(len(r) for r in rows_data)
+        table = doc.add_table(rows=len(rows_data), cols=num_cols, style="Table Grid")
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+        for r_idx, row in enumerate(rows_data):
+            for c_idx, cell_text in enumerate(row):
+                if c_idx < num_cols:
+                    cell = table.cell(r_idx, c_idx)
+                    cell.text = cell_text
+                    for para in cell.paragraphs:
+                        set_paragraph_font(para, DEFAULT_FONT_NAME)
+
+        # 表头行加粗
+        if rows_data:
+            for c_idx in range(min(num_cols, len(rows_data[0]))):
+                cell = table.cell(0, c_idx)
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        run.bold = True
 
 
 # 单例

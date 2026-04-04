@@ -218,11 +218,14 @@ class NoteContentReviewer:
                         location = raw_loc if raw_loc.startswith("附注") else f"附注-{raw_loc}"
                     else:
                         location = "附注"
+                    acct = item.get("account_name", section_title or check_type)
+                    if isinstance(acct, str) and len(acct) > 40:
+                        acct = acct[:38] + "…"
                     findings.append(ReportReviewFinding(
                         id=str(uuid.uuid4())[:8],
                         category=ReportReviewFindingCategory.NOTE_CONTENT,
                         risk_level=RiskLevel(item.get("risk_level", "low")),
-                        account_name=item.get("account_name", section_title or check_type),
+                        account_name=acct,
                         location=location,
                         description=desc,
                         template_reference=item.get("template_reference"),

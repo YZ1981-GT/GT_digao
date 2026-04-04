@@ -207,11 +207,14 @@ class ReportBodyReviewer:
                     # 确保 location 有"正文"前缀
                     if location and not location.startswith("正文"):
                         location = f"正文-{location}"
+                    acct = item.get("account_name", check_type)
+                    if isinstance(acct, str) and len(acct) > 40:
+                        acct = acct[:38] + "…"
                     findings.append(ReportReviewFinding(
                         id=str(uuid.uuid4())[:8],
                         category=category,
                         risk_level=RiskLevel(item.get("risk_level", "low")),
-                        account_name=item.get("account_name", check_type),
+                        account_name=acct,
                         location=location or "正文",
                         description=desc,
                         template_reference=item.get("template_reference"),

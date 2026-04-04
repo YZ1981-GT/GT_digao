@@ -55,6 +55,42 @@ _conversations.update(_restored[2])
 del _restored
 
 
+# ─── 辅助函数 ───
+
+def _fix_note_table_account_names(
+    note_tables: list,
+    note_sections: list,
+) -> None:
+    """用层级树修正附注表格的 account_name。
+
+    当 extract_note_tables 的回溯逻辑未能找到正确的科目标题时，
+    利用 extract_note_sections 构建的层级树来修正：
+    遍历层级树，找到每个表格所属的最近祖先科目节点（level ≤ 3），
+    用其标题覆盖表格的 account_name。
+    """
+    # 构建 note_table_id → NoteTable 映射
+    table_map = {t.id: t for t in note_tables}
+
+    def _walk(sections, ancestor_title: str = ""):
+        for sec in sections:
+            # level ≤ 3 的节点视为科目级标题
+            current_title = sec.title if sec.level <= 3 else ancestor_title
+            # 修正该节点下直接关联的表格
+            for tid in sec.note_table_ids:
+                tbl = table_map.get(tid)
+                if tbl and current_title:
+                    old = tbl.account_name
+                    # 只在旧名称过长或明显不是科目名时才修正
+                    if len(old) > 30 or old.startswith("附注表格"):
+                        tbl.account_name = current_title
+                        logger.debug("修正表格 account_name: '%s' → '%s'", old[:40], current_title)
+            # 递归子节点
+            if sec.children:
+                _walk(sec.children, current_title)
+
+    _walk(note_sections)
+
+
 # ─── Request/Response Models ───
 
 class UploadRequest(BaseModel):
@@ -229,6 +265,8 @@ async def upload_files(
                         session.note_tables.extend(note_tables)
                         note_sections = report_parser.extract_note_sections(word_result, note_tables)
                         session.note_sections.extend(note_sections)
+                        # 用层级树修正表格的 account_name（回溯可能失败的情况）
+                        _fix_note_table_account_names(note_tables, note_sections)
 
                         # ── 单文件包含审计报告正文+附注时，用模板精确提取正文 ──
                         if not session.audit_report_content:
@@ -290,6 +328,7 @@ async def upload_files(
                                 session.note_tables.extend(note_tables)
                                 note_sections = report_parser.extract_note_sections(word_result, note_tables)
                                 session.note_sections.extend(note_sections)
+                                _fix_note_table_account_names(note_tables, note_sections)
                                 logger.info(f"从 {filename} 提取到 {len(note_tables)} 个附注表格")
 
                 elif ext == '.pdf':

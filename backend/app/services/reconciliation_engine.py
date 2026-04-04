@@ -17236,7 +17236,34 @@ class ReconciliationEngine:
             last_row_h = [str(h or "").replace(" ", "").replace("\u3000", "") for h in header_rows[-1]]
 
 
-            first_row_h = [str(h or "").replace(" ", "").replace("\u3000", "") for h in header_rows[0]]
+            # 对第一行做合并单元格空列继承（"期末数"跨3列 → 后面空列继承"期末数"）
+
+
+            raw_first = [str(h or "").replace(" ", "").replace("\u3000", "") for h in header_rows[0]]
+
+
+            first_row_h = []
+
+
+            last_val = ""
+
+
+            for h in raw_first:
+
+
+                if h:
+
+
+                    last_val = h
+
+
+                first_row_h.append(last_val)
+
+
+            logger.debug("[_extract_from_total_row] first_row_h=%s", first_row_h)
+
+
+            logger.debug("[_extract_from_total_row] last_row_h=%s", last_row_h)
 
 
 
@@ -17321,6 +17348,12 @@ class ReconciliationEngine:
 
 
                        if any(kw in h for kw in ReconciliationEngine._BOOK_VALUE_KW)]
+
+
+            logger.debug("[_extract_from_total_row] bv_cols=%s, parents=%s",
+
+
+                         bv_cols, [_parent_group_of(ci) for ci in bv_cols])
 
 
             if len(bv_cols) >= 2:
@@ -25281,6 +25314,11 @@ class ReconciliationEngine:
 
 
     ) -> ReportReviewFinding:
+
+
+        # 防止 account_name 过长（叙述性内容被误填为科目名）
+        if len(account_name) > 40:
+            account_name = account_name[:38] + "…"
 
 
         return ReportReviewFinding(

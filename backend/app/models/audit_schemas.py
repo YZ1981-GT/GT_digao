@@ -183,6 +183,7 @@ class ReviewReport(BaseModel):
     conclusion: str = Field(..., description="复核结论")
     reviewed_at: str = Field(..., description="复核时间")
     project_id: Optional[str] = Field(None, description="所属项目ID")
+    entity_name: Optional[str] = Field(None, description="编制单位名称")
 
 
 class FindingStatusUpdate(BaseModel):

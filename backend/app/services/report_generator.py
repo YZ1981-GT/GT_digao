@@ -2,7 +2,13 @@
 
 将 ReviewEngine 的复核结果整合为结构化复核报告，
 支持导出为 Word（.docx）和 PDF 格式。
-Word 导出复用现有 word_service.py 的文档生成能力，
+Word 导出排版规范参照审计报告复核导出：
+  - 页边距：左3cm、右3.18cm、上3.2cm、下2.54cm
+  - 中文字体：仿宋_GB2312，小四号(12pt)；表格内五号(10.5pt)
+  - 英文/数字字体：Arial Narrow
+  - 段落间距：段前0行、段后0.9行，单倍行距
+  - 表格：上下边框1磅，内部0.5磅，左右无，标题行加粗，高风险行标红
+  - 页脚页码
 PDF 导出使用 weasyprint 将 HTML 渲染为 PDF。
 """
 import io
@@ -14,17 +20,14 @@ from typing import List, Optional, Dict
 import docx
 from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+from docx.oxml.ns import qn, nsdecls
+from docx.oxml import parse_xml
 
 from ..models.audit_schemas import (
     ReviewReport,
     ReviewFinding,
     RiskLevel,
-)
-from .word_service import (
-    set_run_font,
-    set_paragraph_font,
-    DEFAULT_FONT_NAME,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,7 @@ class ReportGenerator:
         findings: List[ReviewFinding],
         conclusion: str,
         project_id: Optional[str] = None,
+        entity_name: Optional[str] = None,
     ) -> ReviewReport:
         """将复核结果整合为结构化复核报告。
 
@@ -86,57 +90,85 @@ class ReportGenerator:
             conclusion=conclusion,
             reviewed_at=datetime.now().isoformat(),
             project_id=project_id,
+            entity_name=entity_name,
         )
+
+    # ── 排版常量（与审计报告复核导出一致） ──
+    CN_FONT = "仿宋_GB2312"
+    EN_FONT = "Arial Narrow"
+    BODY_SIZE = Pt(12)       # 小四号
+    TABLE_SIZE = Pt(10.5)    # 五号
+    SMALL_SIZE = Pt(9)       # 小五号
 
     # ── Word 导出 ──
 
     def export_to_word(self, report: ReviewReport) -> bytes:
         """导出复核报告为 Word 格式（.docx）。
 
-        报告结构：标题 → 概要表格 → 按风险等级分组的问题清单 → 结论。
-        复用 word_service.py 的字体设置工具函数。
+        排版规范与审计报告复核导出一致：
+        - 页边距：左3cm、右3.18cm、上3.2cm、下2.54cm
+        - 字体：仿宋_GB2312 + Arial Narrow
+        - 表格：上下1磅边框、内部0.5磅、左右无、标题行加粗
+        - 高风险行标红
+        - 页脚页码
         """
         doc = docx.Document()
 
+        # ── 页面设置 ──
+        for section in doc.sections:
+            section.left_margin = Cm(3)
+            section.right_margin = Cm(3.18)
+            section.top_margin = Cm(3.2)
+            section.bottom_margin = Cm(2.54)
+            section.header_distance = Cm(1.3)
+            section.footer_distance = Cm(1.3)
+
+        # ── 默认样式字体 ──
+        style = doc.styles["Normal"]
+        style.font.name = self.EN_FONT
+        style.font.size = self.BODY_SIZE
+        style._element.rPr.rFonts.set(qn("w:eastAsia"), self.CN_FONT)
+
         # ── 标题 ──
         title_para = doc.add_paragraph()
-        title_run = title_para.add_run("审计底稿复核报告")
-        title_run.bold = True
-        title_run.font.size = Pt(18)
-        set_run_font(title_run, DEFAULT_FONT_NAME)
         title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        self._set_para_spacing(title_para, before=1.0, after=0.5)
+        title_run = title_para.add_run("审计底稿复核报告")
+        self._set_run_font(title_run, size=Pt(18), bold=True)
 
-        # ── 概要信息表格 ──
-        heading_summary = doc.add_heading("一、复核概要", level=1)
-        set_paragraph_font(heading_summary, DEFAULT_FONT_NAME)
+        # ── 编制单位 ──
+        if report.entity_name:
+            self._add_body_para(doc, f"编制单位：{report.entity_name}",
+                                before=0.3, after=0.3)
 
-        summary_table = doc.add_table(rows=4, cols=2, style="Table Grid")
-        summary_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        # ── 基本信息 ──
+        self._add_body_para(doc, f"复核时间：{report.reviewed_at}", before=0.5, after=0.3)
+        self._add_body_para(doc, f"复核维度：{'、'.join(report.dimensions)}", after=0.3)
+        self._add_body_para(doc, f"底稿数量：{len(report.workpaper_ids)}", after=0.3)
 
-        summary_rows = [
-            ("复核时间", report.reviewed_at),
-            ("复核维度", "、".join(report.dimensions)),
-            ("底稿数量", str(len(report.workpaper_ids))),
-            (
-                "风险统计",
-                f"高风险 {report.summary.get('high', 0)} 项 / "
-                f"中风险 {report.summary.get('medium', 0)} 项 / "
-                f"低风险 {report.summary.get('low', 0)} 项",
-            ),
-        ]
-        for i, (label, value) in enumerate(summary_rows):
-            cell_label = summary_table.cell(i, 0)
-            cell_value = summary_table.cell(i, 1)
-            cell_label.text = label
-            cell_value.text = value
-            for cell in (cell_label, cell_value):
-                for para in cell.paragraphs:
-                    set_paragraph_font(para, DEFAULT_FONT_NAME)
+        # ── 一、风险汇总 ──
+        self._add_body_para(doc, "一、风险汇总", bold=True, before=0.5, after=0.5)
 
-        # ── 问题清单（按风险等级分组） ──
-        heading_findings = doc.add_heading("二、问题清单", level=1)
-        set_paragraph_font(heading_findings, DEFAULT_FONT_NAME)
+        summary_tbl = doc.add_table(rows=2, cols=4)
+        summary_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+        self._set_table_borders(summary_tbl)
 
+        for ci, hdr_text in enumerate(["风险等级", "高风险", "中风险", "低风险"]):
+            self._format_table_cell(summary_tbl.rows[0].cells[ci], hdr_text, bold=True)
+        self._set_header_bottom_border(summary_tbl.rows[0])
+
+        self._format_table_cell(summary_tbl.rows[1].cells[0], "数量")
+        for j, rk in enumerate(["high", "medium", "low"]):
+            self._format_table_cell(summary_tbl.rows[1].cells[j + 1],
+                                    str(report.summary.get(rk, 0)))
+
+        # 表格后间距
+        self._add_body_para(doc, "", before=0.5, after=0.3)
+
+        # ── 二、问题清单（按风险等级分组） ──
+        self._add_body_para(doc, "二、问题清单", bold=True, before=0.5, after=0.5)
+
+        group_idx = 0
         for risk_level in (RiskLevel.HIGH, RiskLevel.MEDIUM, RiskLevel.LOW):
             level_findings = [
                 f for f in report.findings if f.risk_level == risk_level
@@ -144,48 +176,182 @@ class ReportGenerator:
             if not level_findings:
                 continue
 
-            level_heading = doc.add_heading(
-                f"{_RISK_LABELS[risk_level]}（{len(level_findings)} 项）",
-                level=2,
+            group_idx += 1
+            self._add_body_para(
+                doc,
+                f"（{group_idx}）{_RISK_LABELS[risk_level]}（{len(level_findings)} 项）",
+                bold=True, before=0.5, after=0.3,
             )
-            set_paragraph_font(level_heading, DEFAULT_FONT_NAME)
 
-            for idx, finding in enumerate(level_findings, 1):
-                # 问题标题
-                p_title = doc.add_paragraph()
-                run_title = p_title.add_run(f"{idx}. [{finding.dimension}] {finding.description}")
-                run_title.bold = True
-                set_run_font(run_title, DEFAULT_FONT_NAME)
+            # 问题表格：5列（序号、维度、风险、位置、描述/建议）
+            tbl = doc.add_table(rows=1, cols=5)
+            tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+            self._set_table_borders(tbl)
 
-                # 问题详情
-                details = [
-                    ("位置", finding.location),
-                    ("参考依据", finding.reference),
-                    ("修改建议", finding.suggestion),
-                    ("状态", finding.status.value),
+            col_widths = [Cm(0.8), Cm(2.2), Cm(0.8), Cm(3.0), Cm(8.3)]
+            for ci, w in enumerate(col_widths):
+                tbl.columns[ci].width = w
+
+            for ci, ht in enumerate(["序号", "维度", "风险", "位置", "描述及建议"]):
+                self._format_table_cell(tbl.rows[0].cells[ci], ht, bold=True)
+            self._set_header_bottom_border(tbl.rows[0])
+
+            for fi, finding in enumerate(level_findings, 1):
+                row = tbl.add_row()
+
+                desc_parts = []
+                if finding.description:
+                    desc_parts.append(finding.description)
+                if finding.reference:
+                    desc_parts.append(f"依据：{finding.reference}")
+                if finding.suggestion:
+                    desc_parts.append(f"建议：{finding.suggestion}")
+                desc_text = "\n".join(desc_parts)
+
+                cell_data = [
+                    (str(fi), WD_ALIGN_PARAGRAPH.CENTER),
+                    (finding.dimension, WD_ALIGN_PARAGRAPH.CENTER),
+                    (_RISK_LABELS[finding.risk_level][:1], WD_ALIGN_PARAGRAPH.CENTER),
+                    (finding.location or "", WD_ALIGN_PARAGRAPH.LEFT),
+                    (desc_text, WD_ALIGN_PARAGRAPH.LEFT),
                 ]
-                for label, value in details:
-                    if value:
-                        p_detail = doc.add_paragraph()
-                        run_label = p_detail.add_run(f"  {label}：")
-                        run_label.bold = True
-                        set_run_font(run_label, DEFAULT_FONT_NAME)
-                        run_value = p_detail.add_run(value)
-                        set_run_font(run_value, DEFAULT_FONT_NAME)
+                for ci, (text, align) in enumerate(cell_data):
+                    self._format_table_cell(row.cells[ci], text, align=align)
 
-        # ── 结论 ──
-        heading_conclusion = doc.add_heading("三、复核结论", level=1)
-        set_paragraph_font(heading_conclusion, DEFAULT_FONT_NAME)
+                # 高风险行标红
+                if finding.risk_level == RiskLevel.HIGH:
+                    for ci in range(5):
+                        for p in row.cells[ci].paragraphs:
+                            for run in p.runs:
+                                run.font.color.rgb = RGBColor(0xCC, 0x00, 0x00)
 
+            # 表格后空行
+            self._add_body_para(doc, "", before=0.5, after=0.3)
+
+        # ── 三、复核结论 ──
+        self._add_body_para(doc, "三、复核结论", bold=True, before=0.5, after=0.5)
         if report.conclusion:
-            p_conclusion = doc.add_paragraph(report.conclusion)
-            set_paragraph_font(p_conclusion, DEFAULT_FONT_NAME)
+            self._add_body_para(doc, report.conclusion)
+
+        # ── 页脚页码 ──
+        self._add_page_number_footer(doc)
 
         # 输出字节
         buffer = io.BytesIO()
         doc.save(buffer)
         buffer.seek(0)
         return buffer.read()
+
+    # ── Word 排版工具方法 ──
+
+    def _set_run_font(self, run, size=None, bold=False, color=None):
+        """统一设置 run 的中英文字体、字号、加粗、颜色。"""
+        if size is None:
+            size = self.BODY_SIZE
+        run.font.name = self.EN_FONT
+        run.font.size = size
+        run.bold = bold
+        r = run._element
+        rpr = r.find(qn("w:rPr"))
+        if rpr is None:
+            rpr = parse_xml(f'<w:rPr {nsdecls("w")}></w:rPr>')
+            r.insert(0, rpr)
+        rfonts = rpr.find(qn("w:rFonts"))
+        if rfonts is None:
+            rfonts = parse_xml(f'<w:rFonts {nsdecls("w")}/>')
+            rpr.insert(0, rfonts)
+        rfonts.set(qn("w:eastAsia"), self.CN_FONT)
+        rfonts.set(qn("w:ascii"), self.EN_FONT)
+        rfonts.set(qn("w:hAnsi"), self.EN_FONT)
+        if color:
+            run.font.color.rgb = color
+
+    @staticmethod
+    def _set_para_spacing(para, before=0, after=0.9, line=1.0):
+        """设置段落间距（单位：行）。"""
+        fmt = para.paragraph_format
+        fmt.space_before = Pt(before * 12)
+        fmt.space_after = Pt(after * 12)
+        fmt.line_spacing = line
+
+    def _add_body_para(self, doc, text, bold=False,
+                       align=WD_ALIGN_PARAGRAPH.LEFT,
+                       before=0, after=0.9):
+        """添加正文段落，自动应用字体和间距。"""
+        p = doc.add_paragraph()
+        p.alignment = align
+        self._set_para_spacing(p, before=before, after=after)
+        run = p.add_run(text)
+        self._set_run_font(run, size=self.BODY_SIZE, bold=bold)
+        return p
+
+    @staticmethod
+    def _set_table_borders(table):
+        """设置表格边框：上下1磅，内部0.5磅，左右无。"""
+        tbl = table._tbl
+        tblPr = tbl.tblPr if tbl.tblPr is not None else parse_xml(
+            f'<w:tblPr {nsdecls("w")}></w:tblPr>')
+        borders = parse_xml(
+            f'<w:tblBorders {nsdecls("w")}>'
+            '  <w:top w:val="single" w:sz="8" w:space="0" w:color="000000"/>'
+            '  <w:bottom w:val="single" w:sz="8" w:space="0" w:color="000000"/>'
+            '  <w:insideH w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+            '  <w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+            '  <w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+            '  <w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+            '</w:tblBorders>'
+        )
+        for old in tblPr.findall(qn("w:tblBorders")):
+            tblPr.remove(old)
+        tblPr.append(borders)
+
+    @staticmethod
+    def _set_header_bottom_border(row):
+        """给表头行下方设置 0.5 磅边框。"""
+        for cell in row.cells:
+            tc = cell._tc
+            tcPr = tc.tcPr if tc.tcPr is not None else parse_xml(
+                f'<w:tcPr {nsdecls("w")}></w:tcPr>')
+            borders = parse_xml(
+                f'<w:tcBorders {nsdecls("w")}>'
+                '  <w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+                '</w:tcBorders>'
+            )
+            for old in tcPr.findall(qn("w:tcBorders")):
+                tcPr.remove(old)
+            tcPr.append(borders)
+            if tc.tcPr is None:
+                tc.append(tcPr)
+
+    def _format_table_cell(self, cell, text, bold=False,
+                           align=WD_ALIGN_PARAGRAPH.CENTER):
+        """格式化表格单元格：设置文本、字体、对齐、垂直居中。"""
+        cell.text = ""
+        p = cell.paragraphs[0]
+        p.alignment = align
+        self._set_para_spacing(p, before=0, after=0, line=1.0)
+        run = p.add_run(text)
+        self._set_run_font(run, size=self.TABLE_SIZE, bold=bold)
+        cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+    @staticmethod
+    def _add_page_number_footer(doc):
+        """添加页脚页码。"""
+        for section in doc.sections:
+            footer = section.footer
+            footer.is_linked_to_previous = False
+            fp = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+            fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            ReportGenerator._set_para_spacing(fp, before=0, after=0)
+            run = fp.add_run()
+            fld_begin = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="begin"/>')
+            run._element.append(fld_begin)
+            run2 = fp.add_run()
+            instr = parse_xml(f'<w:instrText {nsdecls("w")} xml:space="preserve"> PAGE </w:instrText>')
+            run2._element.append(instr)
+            run3 = fp.add_run()
+            fld_end = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="end"/>')
+            run3._element.append(fld_end)
 
     # ── PDF 导出 ──
 
@@ -293,6 +459,7 @@ tr {{
 <body>
 <h1>审计底稿复核报告</h1>
 
+{"<p><strong>编制单位：</strong>" + _escape_html(report.entity_name) + "</p>" if report.entity_name else ""}
 <h2>一、复核概要</h2>
 <table class="summary-table">
 <tr><td>复核时间</td><td>{_escape_html(report.reviewed_at)}</td></tr>

@@ -82,6 +82,11 @@ class ReviewEngine:
     _MEDIUM_RISK_KEYWORDS = ["偏差", "不一致", "缺失", "遗漏", "不完整", "差异"]
     _LOW_RISK_KEYWORDS = ["建议", "优化", "改进", "完善", "规范", "提升"]
 
+    # 编制单位提取正则
+    _ENTITY_NAME_PATTERN = re.compile(
+        r'(?:编制单位|被审计单位|单位名称|公司名称|企业名称)\s*[：:]\s*(.+)'
+    )
+
     def __init__(self) -> None:
         self.knowledge_service = knowledge_service
         self.prompt_library = PromptLibrary()
@@ -196,6 +201,9 @@ class ReviewEngine:
 
         conclusion = self._generate_conclusion(all_findings, summary)
 
+        # 从底稿内容中提取编制单位
+        entity_name = self._extract_entity_name(workpaper)
+
         report = ReviewReport(
             id=review_id,
             workpaper_ids=[workpaper.id],
@@ -205,6 +213,7 @@ class ReviewEngine:
             conclusion=conclusion,
             reviewed_at=datetime.now().isoformat(),
             project_id=(project_context or {}).get("project_id"),
+            entity_name=entity_name,
         )
 
         yield json.dumps(
@@ -484,6 +493,26 @@ class ReviewEngine:
     # ------------------------------------------------------------------
     # Risk classification
     # ------------------------------------------------------------------
+
+    def _extract_entity_name(self, workpaper: WorkpaperParseResult) -> Optional[str]:
+        """从底稿内容中提取编制单位名称。
+
+        扫描 content_text 的前 2000 字符，逐行匹配常见的编制单位标识模式。
+        贪婪匹配整行后，用管道符/制表符截断并清理噪声。
+        """
+        text = (workpaper.content_text or "")[:2000]
+        if not text:
+            return None
+
+        for line in text.split('\n'):
+            m = self._ENTITY_NAME_PATTERN.search(line)
+            if m:
+                name = m.group(1).strip()
+                # 截断管道符/制表符后的内容（Excel content_text 用 | 分隔列）
+                name = re.split(r'\s*[|\t]\s*', name)[0].strip()
+                if name and len(name) >= 2:
+                    return name
+        return None
 
     def classify_risk_level(self, finding: dict) -> RiskLevel:
         """Classify a review finding by risk level using keyword matching.
