@@ -261,6 +261,22 @@ def create_tray_icon(port):
 def main():
     global _port
 
+    # ── 使用期限检查 ──
+    import datetime as _dt
+    _expire = _dt.date(2026, 9, 30)
+    if _dt.date.today() > _expire:
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"本程序授权已于 {_expire.strftime('%Y年%m月%d日')} 到期，请联系致同研究院获取新版本。",
+                APP_NAME + " - 授权到期",
+                0x10,  # MB_ICONERROR
+            )
+        except Exception:
+            pass
+        sys.exit(1)
+
     # --noconsole 模式下 sys.stdout/stderr 为 None，
     # uvicorn logging 初始化会调用 sys.stderr.isatty() 导致崩溃，
     # 必须在任何 import 之前重定向到 devnull。
@@ -271,6 +287,8 @@ def main():
 
     base_path = get_base_path()
     os.environ['APP_ENV'] = 'production'
+    # 抑制 gitpython 在找不到 git 时的崩溃（客户机器可能没装 git）
+    os.environ.setdefault('GIT_PYTHON_REFRESH', 'quiet')
 
     if base_path not in sys.path:
         sys.path.insert(0, base_path)

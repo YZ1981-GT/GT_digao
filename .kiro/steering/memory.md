@@ -243,6 +243,8 @@ inclusion: always
 - 预付账款等无"账面价值"列的科目：_extract_from_total_row 的 closing_cols 分支和 _pick_from_range 分支增加"账面余额 - 坏账准备 = 净值"计算逻辑，优先取账面价值列→次选计算净值→回退第一列
 - 财务费用F64-4增强：无净额时利息资本化作为减项；增加银行手续费/贴现利息/融资费用/租赁负债利息行识别；兜底策略把所有未识别行加入求和（识别"减："前缀作为减项），全量一致则不报错
 - _extract_from_total_row 优先列扩展：bv_cols/_pick_from_range/_pick_net_or_first/单行表头 closing_bv_idx 均增加"税后净额"/"税后"关键词与"账面价值"同等优先，解决其他综合收益明细表取到税前金额而非税后净额的问题（国企版）
+- gitpython 崩溃防御：prompt_git_service.py 在 import git 前设置 GIT_PYTHON_REFRESH=quiet，__init__ 中用 shutil.which("git") 检测可用性，_ensure_configured 返回友好提示；build_exe.py launcher 中同样设置该环境变量
+- EXE 打包使用期限：build_exe.py launcher main() 最前面加过期检查，当前设为 2026-09-30，过期后弹 MessageBoxW 提示联系致同研究院获取新版本后 sys.exit(1)
 
 ## 待办 / 进行中
 - 项目文件清理（2026-04）：已删除根目录 `__pycache__/`、`frontend/README.md`；`GT_底稿/审计实务操作手册-框架.md` 和 `致同GT审计手册设计规范.md` 待用户确认是否删除

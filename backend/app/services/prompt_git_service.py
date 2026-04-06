@@ -15,6 +15,10 @@ import shutil
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+# 设置环境变量抑制 gitpython 在找不到 git 时的崩溃
+# 必须在 import git 之前设置
+os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
+
 import git
 from git.exc import GitCommandError, InvalidGitRepositoryError
 
@@ -54,6 +58,10 @@ class PromptGitService:
     def __init__(self) -> None:
         self._repo: Optional[git.Repo] = None
         self._config: Optional[GitConfig] = None
+        self._git_available = shutil.which("git") is not None
+        if not self._git_available:
+            logger.warning("Git 可执行文件未找到，Git 版本管理功能不可用")
+            return
         # Attempt to load persisted config on init
         self._load_config()
         # Attempt to open existing repo
@@ -89,6 +97,8 @@ class PromptGitService:
 
     def _ensure_configured(self) -> Optional[str]:
         """Return an error message if Git is not configured, else None."""
+        if not self._git_available:
+            return "Git 可执行文件未找到，请先安装 Git"
         if self._config is None:
             return "Git仓库尚未配置，请先调用 configure() 配置仓库信息"
         return None
