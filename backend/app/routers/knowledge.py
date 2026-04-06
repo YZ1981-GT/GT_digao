@@ -387,6 +387,45 @@ async def ai_format_document(library_id: str, doc_id: str, request: FormatDocume
     return sse_response(sse_with_heartbeat(stream()))
 
 
+from ..models.chat_schemas import KnowledgeMoveRequest
+
+
+@router.post("/move")
+async def move_documents(req: KnowledgeMoveRequest):
+    """跨知识库移动文档"""
+    try:
+        result = knowledge_service.move_documents(
+            doc_ids=req.doc_ids,
+            source_lib=req.source_library_id,
+            target_lib=req.target_library_id,
+            target_date_folder=req.target_date_folder,
+        )
+        return {"success": True, **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("文档移动失败: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"文档移动失败: {str(e)}")
+
+
+@router.post("/copy")
+async def copy_documents(req: KnowledgeMoveRequest):
+    """跨知识库复制文档"""
+    try:
+        result = knowledge_service.copy_documents(
+            doc_ids=req.doc_ids,
+            source_lib=req.source_library_id,
+            target_lib=req.target_library_id,
+            target_date_folder=req.target_date_folder,
+        )
+        return {"success": True, **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("文档复制失败: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"文档复制失败: {str(e)}")
+
+
 @router.post("/search")
 async def search_knowledge(req: SearchRequest):
     """搜索知识库内容"""

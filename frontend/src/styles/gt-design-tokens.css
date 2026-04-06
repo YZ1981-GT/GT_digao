@@ -511,3 +511,160 @@
     break-after: avoid;
   }
 }
+
+
+/* ═══════════════════════════════════════════════════════════
+   13. 聊天 Markdown 渲染样式
+   ═══════════════════════════════════════════════════════════ */
+
+.chat-markdown {
+  word-break: break-word;
+}
+
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4,
+.chat-markdown h5,
+.chat-markdown h6 {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--gt-text-primary);
+}
+
+.chat-markdown h1 { font-size: 18px; border-bottom: 1px solid #e8e8e8; padding-bottom: 6px; }
+.chat-markdown h2 { font-size: 16px; border-bottom: 1px solid #f0f0f0; padding-bottom: 4px; }
+.chat-markdown h3 { font-size: 15px; }
+.chat-markdown h4,
+.chat-markdown h5,
+.chat-markdown h6 { font-size: 14px; }
+
+.chat-markdown h1:first-child,
+.chat-markdown h2:first-child,
+.chat-markdown h3:first-child {
+  margin-top: 0;
+}
+
+.chat-markdown p {
+  margin: 10px 0;
+  line-height: 1.75;
+}
+
+.chat-markdown p:first-child {
+  margin-top: 0;
+}
+
+.chat-markdown p:last-child {
+  margin-bottom: 0;
+}
+
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 10px 0;
+  padding-left: 22px;
+}
+
+.chat-markdown li {
+  margin: 6px 0;
+  line-height: 1.7;
+}
+
+.chat-markdown li > ul,
+.chat-markdown li > ol {
+  margin: 2px 0;
+}
+
+.chat-markdown blockquote {
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-left: 3px solid var(--gt-primary-light);
+  background-color: rgba(75, 45, 119, 0.04);
+  color: var(--gt-text-secondary);
+  border-radius: 0 var(--gt-radius-sm) var(--gt-radius-sm) 0;
+}
+
+.chat-markdown blockquote p {
+  margin: 4px 0;
+}
+
+.chat-markdown code {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  background-color: #f5f5f5;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: #c7254e;
+}
+
+.chat-markdown pre {
+  margin: 10px 0;
+  padding: 12px 14px;
+  background-color: #f8f8f8;
+  border: 1px solid #e8e8e8;
+  border-radius: var(--gt-radius-md);
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+.chat-markdown pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+  font-size: 13px;
+}
+
+.chat-markdown table {
+  margin: 10px 0;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+.chat-markdown th,
+.chat-markdown td {
+  border: 1px solid #ddd;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.chat-markdown th {
+  background-color: rgba(75, 45, 119, 0.06);
+  font-weight: 600;
+  color: var(--gt-primary);
+}
+
+.chat-markdown tr:nth-child(even) {
+  background-color: #fafafa;
+}
+
+.chat-markdown hr {
+  margin: 14px 0;
+  border: none;
+  border-top: 1px solid #e8e8e8;
+}
+
+.chat-markdown a {
+  color: var(--gt-primary);
+  text-decoration: none;
+}
+
+.chat-markdown a:hover {
+  text-decoration: underline;
+}
+
+.chat-markdown strong {
+  font-weight: 600;
+  color: var(--gt-text-primary);
+}
+
+.chat-markdown em {
+  font-style: italic;
+}
+
+.chat-markdown img {
+  max-width: 100%;
+  border-radius: var(--gt-radius-sm);
+}

@@ -95,3 +95,6 @@ export interface WebReference {
   url: string;
   content: string;
 }
+
+// 聊天相关类型
+export * from './chat';

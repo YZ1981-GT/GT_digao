@@ -14,7 +14,7 @@ MAX_CACHE_DOCS = 300
 
 
 class KnowledgeService:
-    """知识库管理服务 - 管理8个审计专用知识库，缓存与文件完全同步"""
+    """知识库管理服务 - 管理9个审计专用知识库（含笔记库），缓存与文件完全同步"""
 
     # 知识库定义（审计底稿复核专用）
     LIBRARIES = {
@@ -26,6 +26,7 @@ class KnowledgeService:
         'industry_guidelines': {'name': '行业指引库', 'desc': '各行业审计特殊考虑事项、行业风险提示和审计关注要点'},
         'prompt_library': {'name': '提示词库', 'desc': '审计复核提示词模板，按会计科目分类管理预置和自定义提示词'},
         'report_templates': {'name': '报告模板库', 'desc': '审计报告标准模板（国企版/上市版），用于报告正文和附注的模板比对复核'},
+        'notes': {'name': '笔记库', 'desc': '聊天中保存的对话记录、文档摘要和用户笔记，可被 RAG 检索并联动其他工作模块'},
     }
 
     def __init__(self):
@@ -516,6 +517,248 @@ class KnowledgeService:
         
         logger.info(f"[知识库] 已读取选中内容: {total_docs}个文档, {total_chars}字符, 来自{len([c for c in all_content if c])}个知识库")
         return '\n\n'.join(all_content)
+
+    # ─── 笔记库专用方法 ───
+
+    @staticmethod
+    def _sanitize_filename(title: str) -> str:
+        """将标题转为安全的文件名（去除非法字符，截断长度）"""
+        # 替换文件系统不允许的字符
+        safe = re.sub(r'[\\/:*?"<>|\r\n]', '_', title).strip()
+        # 截断到 80 字符
+        if len(safe) > 80:
+            safe = safe[:80]
+        return safe or 'untitled'
+
+    def add_note(self, title: str, content: str, date: str = None) -> Dict:
+        """保存笔记到日期子文件夹。
+
+        - date 默认今天 (YYYY-MM-DD)
+        - 存储路径: ~/.gt_audit_helper/knowledge/notes/{date}/{doc_id}.txt
+        - index.json 中增加 date_folder 字段
+        - Returns: {"doc_id": "uuid", "message": "已保存到笔记库"}
+        """
+        if date is None:
+            date = datetime.now().strftime('%Y-%m-%d')
+
+        # 确保日期子文件夹存在
+        date_dir = os.path.join(self.base_dir, 'notes', date)
+        os.makedirs(date_dir, exist_ok=True)
+
+        doc_id = str(uuid.uuid4())[:8]
+        safe_title = self._sanitize_filename(title)
+        filename = f"{safe_title}.md"
+
+        doc = {
+            'id': doc_id,
+            'filename': filename,
+            'title': title,
+            'size': len(content.encode('utf-8')),
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'date_folder': date,
+        }
+
+        # 保存文档内容到日期子文件夹
+        content_file = os.path.join(date_dir, f"{doc_id}.txt")
+        with open(content_file, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        # 更新索引
+        docs = self._load_index('notes')
+        docs.append(doc)
+        self._save_index('notes', docs)
+
+        # 更新缓存
+        if 'notes' in self._content_cache:
+            self._content_cache['notes'][doc_id] = content
+
+        logger.info("[笔记库] 保存笔记: %s → %s/%s", title, date, doc_id)
+        return {"doc_id": doc_id, "message": "已保存到笔记库"}
+
+    def get_notes_grouped(self) -> List[Dict]:
+        """获取笔记列表，按日期分组返回。
+
+        Returns list of {"date": "2026-04-06", "notes": [{"id": ..., "title": ..., "created_at": ..., "size": ...}]}
+        Sorted by date descending (newest first).
+        """
+        docs = self._load_index('notes')
+        groups: Dict[str, List[Dict]] = {}
+
+        for doc in docs:
+            date_folder = doc.get('date_folder', 'unknown')
+            if date_folder not in groups:
+                groups[date_folder] = []
+            groups[date_folder].append({
+                'id': doc['id'],
+                'title': doc.get('title', doc.get('filename', '')),
+                'created_at': doc.get('created_at', ''),
+                'size': doc.get('size', 0),
+            })
+
+        # 按日期降序排列
+        result = []
+        for date_key in sorted(groups.keys(), reverse=True):
+            result.append({
+                'date': date_key,
+                'notes': groups[date_key],
+            })
+
+        return result
+
+    def delete_note(self, doc_id: str) -> bool:
+        """删除笔记（同时清理日期子文件夹中的文件）"""
+        doc_id = self._validate_doc_id(doc_id)
+        docs = self._load_index('notes')
+
+        # 找到要删除的文档，获取 date_folder
+        target_doc = None
+        for d in docs:
+            if d['id'] == doc_id:
+                target_doc = d
+                break
+
+        if not target_doc:
+            return False
+
+        # 从索引中移除
+        docs = [d for d in docs if d['id'] != doc_id]
+        self._save_index('notes', docs)
+
+        # 删除日期子文件夹中的文件
+        date_folder = target_doc.get('date_folder')
+        if date_folder:
+            content_file = os.path.join(self.base_dir, 'notes', date_folder, f"{doc_id}.txt")
+            if os.path.exists(content_file):
+                os.remove(content_file)
+        
+        # 也尝试删除根目录下的文件（兼容旧数据）
+        root_file = os.path.join(self.base_dir, 'notes', f"{doc_id}.txt")
+        if os.path.exists(root_file):
+            os.remove(root_file)
+
+        # 从缓存中删除
+        if 'notes' in self._content_cache and doc_id in self._content_cache['notes']:
+            del self._content_cache['notes'][doc_id]
+
+        logger.info("[笔记库] 删除笔记: %s", doc_id)
+        return True
+
+    # ─── 跨库移动 / 复制 ───
+
+    def _resolve_unique_filename(self, library_id: str, filename: str) -> str:
+        """在目标库中解决文件名冲突，同名时追加 _1, _2 等序号。"""
+        docs = self._load_index(library_id)
+        existing_names = {d.get('filename', '') for d in docs}
+        if filename not in existing_names:
+            return filename
+
+        # 拆分文件名和扩展名
+        base, ext = os.path.splitext(filename)
+        counter = 1
+        while True:
+            candidate = f"{base}_{counter}{ext}"
+            if candidate not in existing_names:
+                return candidate
+            counter += 1
+
+    def move_documents(self, doc_ids: List[str], source_lib: str, target_lib: str,
+                       target_date_folder: str = None) -> Dict:
+        """移动文档：从源库删除，添加到目标库。
+
+        - 目标为笔记库时放入 target_date_folder 子文件夹
+        - 目标为非笔记库时平铺（忽略 target_date_folder）
+        - 同名文档自动追加序号（如"文档名_1"）
+        - Returns: {"moved": count, "message": "已移动 N 个文档到 XX库"}
+        """
+        if source_lib not in self.LIBRARIES:
+            raise ValueError(f"未知的源知识库: {source_lib}")
+        if target_lib not in self.LIBRARIES:
+            raise ValueError(f"未知的目标知识库: {target_lib}")
+
+        moved = 0
+        for doc_id in doc_ids:
+            doc_id = self._validate_doc_id(doc_id)
+            # 读取源文档内容
+            content = self._get_cached_content(source_lib, doc_id)
+            if content is None:
+                logger.warning("[知识库] 移动跳过：文档 %s 在 %s 中不存在", doc_id, source_lib)
+                continue
+
+            # 获取源文档元信息
+            src_docs = self._load_index(source_lib)
+            src_doc = next((d for d in src_docs if d['id'] == doc_id), None)
+            if src_doc is None:
+                continue
+
+            filename = src_doc.get('filename', 'untitled.md')
+            title = src_doc.get('title', filename)
+
+            # 解决目标库同名冲突
+            unique_filename = self._resolve_unique_filename(target_lib, filename)
+
+            # 添加到目标库
+            if target_lib == 'notes':
+                date = target_date_folder or datetime.now().strftime('%Y-%m-%d')
+                self.add_note(title=title, content=content, date=date)
+            else:
+                self.add_document(target_lib, unique_filename, content)
+
+            # 从源库删除
+            if source_lib == 'notes':
+                self.delete_note(doc_id)
+            else:
+                self.delete_document(source_lib, doc_id)
+
+            moved += 1
+
+        target_name = self.LIBRARIES[target_lib]['name']
+        logger.info("[知识库] 移动完成: %d 个文档 → %s", moved, target_name)
+        return {"moved": moved, "message": f"已移动 {moved} 个文档到{target_name}"}
+
+    def copy_documents(self, doc_ids: List[str], source_lib: str, target_lib: str,
+                       target_date_folder: str = None) -> Dict:
+        """复制文档：保留源库，在目标库创建副本，规则同 move_documents。
+
+        Returns: {"copied": count, "message": "已复制 N 个文档到 XX库"}
+        """
+        if source_lib not in self.LIBRARIES:
+            raise ValueError(f"未知的源知识库: {source_lib}")
+        if target_lib not in self.LIBRARIES:
+            raise ValueError(f"未知的目标知识库: {target_lib}")
+
+        copied = 0
+        for doc_id in doc_ids:
+            doc_id = self._validate_doc_id(doc_id)
+            # 读取源文档内容
+            content = self._get_cached_content(source_lib, doc_id)
+            if content is None:
+                logger.warning("[知识库] 复制跳过：文档 %s 在 %s 中不存在", doc_id, source_lib)
+                continue
+
+            # 获取源文档元信息
+            src_docs = self._load_index(source_lib)
+            src_doc = next((d for d in src_docs if d['id'] == doc_id), None)
+            if src_doc is None:
+                continue
+
+            filename = src_doc.get('filename', 'untitled.md')
+            title = src_doc.get('title', filename)
+
+            # 解决目标库同名冲突
+            unique_filename = self._resolve_unique_filename(target_lib, filename)
+
+            # 添加到目标库（不删除源库）
+            if target_lib == 'notes':
+                date = target_date_folder or datetime.now().strftime('%Y-%m-%d')
+                self.add_note(title=title, content=content, date=date)
+            else:
+                self.add_document(target_lib, unique_filename, content)
+
+            copied += 1
+
+        target_name = self.LIBRARIES[target_lib]['name']
+        logger.info("[知识库] 复制完成: %d 个文档 → %s", copied, target_name)
+        return {"copied": copied, "message": f"已复制 {copied} 个文档到{target_name}"}
 
     def _load_index(self, library_id: str) -> List[Dict]:
         index_file = os.path.join(self.base_dir, library_id, "index.json")

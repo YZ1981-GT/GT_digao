@@ -13,6 +13,7 @@ import ReviewWorkflow from './components/ReviewWorkflow';
 import GenerateWorkflow from './components/GenerateWorkflow';
 import AnalysisWorkflow from './components/AnalysisWorkflow';
 import AuditReportWorkflow from './components/AuditReportWorkflow';
+import ChatPanel from './components/ChatPanel';
 import './App.css';
 import './styles/gt-design-tokens.css';
 
@@ -459,6 +460,7 @@ function App() {
       <>
         {renderSelectMode()}
         {scrollTopButton}
+        <ChatPanel onSelectMode={handleSelectMode} />
       </>
     );
   }
@@ -468,6 +470,7 @@ function App() {
       <>
         {renderAuditMode()}
         {scrollTopButton}
+        <ChatPanel onSelectMode={handleSelectMode} />
       </>
     );
   }
@@ -476,6 +479,7 @@ function App() {
     <>
       {renderBidMode()}
       {scrollTopButton}
+      <ChatPanel onSelectMode={handleSelectMode} />
     </>
   );
 }

@@ -14,6 +14,11 @@ inclusion: always
 - PPT 内容密度偏好：每页内容不要太少，要充实
 - 审计报告复核 UI 偏好：问题列表需要按附注表格+问题类别两级折叠分组，支持组头 checkbox 批量操作，避免逐条勾选
 - 附注表格标题识别偏好：紧邻表格的上一行段落就是表格标题（section_title），account_name 必须通过向上回溯编号标题确定，紧邻段落不能直接当 account_name，关键词提取只作兜底
+- 聊天面板尺寸偏好：默认宽度页面1/4、高度页面4/5（最小380×450），支持拖动标题栏移动位置、右下角手柄缩放大小、最大化/还原切换；输入框默认3行（minHeight 64px）
+- 聊天面板全局可见偏好：💬按钮需要在所有页面（首页+四大工作模块）都显示，不能只在首页；ChatPanel 已从 renderSelectMode 提升到 App.tsx 顶层所有 return 分支
+- 聊天消息操作按钮布局偏好：📋📄✏️📌等按钮不能叠在气泡内右上角（会被文字遮挡看不清），必须放在气泡外下方显示
+- 聊天面板窗口控制偏好：需要支持最大化/还原切换（⊞/⊡按钮），已实现 520×720 小窗 ↔ 全屏切换
+- 聊天 AI 回复排版偏好：Markdown 渲染必须有清晰层次，不能一大段纯文本；system prompt 用「## 【重要】回复格式强制要求」+禁止性措辞+示例模板强制 LLM 分段输出（温和措辞会被忽略）；CSS 中 h1/h2 加底部分隔线、段落间距 10px、列表项间距 6px
 
 ## 项目上下文
 
@@ -46,8 +51,9 @@ inclusion: always
 - `schemas.py` — 通用数据模型（ChapterContentRequest、ChapterRevisionRequest 等）
 - `audit_schemas.py` — 审计相关数据模型（ReviewReport、ReviewFinding、StatementItem、NoteTable、NoteSection、ReportReviewFinding、ReportReviewSession 等 50+ 个 Pydantic 模型）
 - `analysis_schemas.py` — 文档分析数据模型（AnalysisDocumentInfo、AnalysisProject、AnalysisChapter、AnalysisMode 等）
+- `chat_schemas.py` — 聊天功能数据模型（ChatMessage、ChatStreamRequest、ChatUploadResponse、SpeechToTextResponse、ExportWordRequest、NoteCreateRequest、NoteItem、NoteGroup、NotesListResponse、CleanupSuggestion、CleanupSuggestResponse、PolishRequest、KnowledgeMoveRequest）
 
-#### 路由层 (backend/app/routers/) — 15 个路由模块
+#### 路由层 (backend/app/routers/) — 16 个路由模块
 - `review.py` — 底稿复核 API（/api/review，上传/批量上传/引用检查/补充材料/SSE复核/报告导出/状态更新/交叉引用）
 - `generate.py` — 文档生成 API（/api/generate，大纲提取/确认/SSE逐章节生成/单章节生成/章节修改/Word导出）
 - `analysis.py` — 文档分析 API（/api/analysis，上传解析含智能OCR/格式化/项目管理/大纲生成/章节生成/Word导出）
@@ -62,8 +68,9 @@ inclusion: always
 - `content.py` — 内容生成 API（/api/content，知识库预加载/SSE章节生成/SSE章节修改）
 - `search.py` — 搜索 API（/api/search，网络搜索辅助）
 - `expand.py` — 扩展 API（文件上传）
+- `chat.py` — 聊天 API（/api/chat，流式聊天/文档上传/语音识别/Word导出/笔记CRUD/AI润色）
 
-#### 服务层 (backend/app/services/) — 28 个服务模块
+#### 服务层 (backend/app/services/) — 29 个服务模块
 
 **底稿智能复核相关：**
 - `workpaper_parser.py` — 底稿解析器（支持 xlsx/xls/docx/doc/pdf，Excel 合并单元格处理，Word 标题样式解析，.doc 用 pywin32 COM，PDF 多引擎，自动识别底稿编号 B/C/D-M 类）
@@ -93,12 +100,13 @@ inclusion: always
 
 **共享服务：**
 - `openai_service.py` — LLM 服务（多供应商适配 OpenAI 兼容 API，支持 DeepSeek/通义千问/Kimi/MiniMax/智谱GLM/Ollama，stream_chat_completion SSE 流式，模型上下文限制管理 data/model_context_limits.json）
-- `knowledge_service.py` — 知识库服务（7个审计专用分类：底稿模板库/监管规定库/会计准则库/质控标准库/审计程序库/行业指引库/提示词库，LRU 缓存上限300文档，文件存储 ~/.gt_audit_helper/knowledge/）
+- `knowledge_service.py` — 知识库服务（9个审计专用分类：底稿模板库/监管规定库/会计准则库/质控标准库/审计程序库/行业指引库/提示词库/报告模板库/笔记库，LRU 缓存上限300文档，文件存储 ~/.gt_audit_helper/knowledge/）
 - `knowledge_retriever.py` — 知识库智能检索（按章节标题关键词匹配，分批加载，token 预算控制，configure_for_model 按模型调整预算，get_formatted_for_chapter 格式化注入 prompt）
 - `knowledge_vector_service.py` — 知识库向量服务
 - `search_service.py` — 网络搜索服务
 - `project_service.py` — 项目管理服务（4种角色：合伙人/项目经理/审计员/质控人员，按业务循环筛选）
 - `session_store.py` — 会话存储（backend/data/sessions/{session_id}/session.json + findings.json）
+- `chat_service.py` — 聊天服务（ChatService：build_messages RAG注入+上下文拼接、_truncate_messages 上下文窗口截断、should_suggest_save_note 本地规则检测、MODULE_DESCRIPTIONS 模块描述注入）
 - `heading_utils.py` — 标题工具函数
 - `account_mapping_template.py` — 科目映射模板
 - `amount_check_presets.py` — 金额检查预设规则
@@ -132,7 +140,7 @@ inclusion: always
 - `App.tsx` — 主应用（工作模式路由：底稿复核/文档生成/文档分析/审计报告复核）
 - `index.tsx` — React 入口
 
-#### 组件 (frontend/src/components/) — 33 个组件
+#### 组件 (frontend/src/components/) — 44 个组件
 
 **工作模式选择：**
 - `WorkModeSelector.tsx` — 工作模式选择首页（四大模式入口）
@@ -179,20 +187,36 @@ inclusion: always
 - `ProjectPanel.tsx` — 项目管理面板
 - `WebSearchPanel.tsx` — 网络搜索面板
 
+**首页聊天（新增）：**
+- `ChatPanel.tsx` — 聊天面板主组件（可折叠、SSE流式对话、IndexedDB持久化、文件/图片上传、笔记保存）
+- `ChatMessageList.tsx` — 消息列表（Markdown渲染、图片预览、知识库引用标签、笔记保存按钮、建议保存提示）
+- `ChatInput.tsx` — 输入区域（@知识库触发、/快捷指令、📎上传、🎤语音、Ctrl+V粘贴图片、拖拽上传）
+- `KnowledgePopup.tsx` — 知识库候选列表弹窗（forwardRef+useImperativeHandle键盘导航）
+- `CommandPopup.tsx` — 快捷指令候选列表弹窗（同上模式）
+- `NotesSidebar.tsx` — 笔记侧边栏（按日期分组、展开/收起、预览、删除确认、移动/复制操作）
+- `ChatExportPanel.tsx` — 聊天导出预览编辑面板（Markdown编辑、AI润色SSE流式、导出Word、在线编辑）
+- `ChatWelcome.tsx` — 欢迎引导组件（2x2模块卡片网格、使用提示）
+- `DocumentEditorModal.tsx` — 文档在线编辑模态框（三模式：👁预览、✏️左右分栏编辑+实时预览、✨AI润色；🔄同步编辑内容回对话消息、📌转存笔记、⬇下载Word用编辑后内容重新生成）
+- `LibraryTargetSelector.tsx` — 目标知识库选择器弹窗（移动/复制文档时选择目标库+笔记库日期子文件夹）
+
 #### 页面 (frontend/src/pages/)
 - `DocumentAnalysis.tsx` — 文档分析页
 - `OutlineEdit.tsx` — 大纲编辑页
 - `ContentEdit.tsx` — 内容编辑页
 
 #### 服务与工具
-- `services/api.ts` — API 封装（reviewApi/generateApi/analysisApi/reportReviewApi/configApi/promptApi/templateApi/knowledgeApi/projectApi）
+- `services/api.ts` — API 封装（reviewApi/generateApi/analysisApi/reportReviewApi/configApi/promptApi/templateApi/knowledgeApi/projectApi/chatApi）
 - `hooks/useAppState.ts` — 全局状态管理
 - `utils/auditStorage.ts` — IndexedDB 缓存（审计工作状态持久化）
 - `utils/draftStorage.ts` — 草稿存储
 - `utils/sseParser.ts` — SSE 流解析（processSSEStream）
+- `utils/chatStorage.ts` — 聊天会话 IndexedDB 持久化（chat_current + chat_archive 两个 store）
+- `utils/markdownToHtml.ts` — Markdown→HTML 转换（unified pipeline，供富文本复制使用）
+- `utils/copyRichText.ts` — 富文本复制（ClipboardItem text/html + text/plain，回退纯文本）
 - `types/audit.ts` — 审计相关 TypeScript 类型定义
 - `types/analysis.ts` — 文档分析 TypeScript 类型定义
 - `types/index.ts` — 类型导出
+- `types/chat.ts` — 聊天类型定义（ChatMessage、ChatAttachment、ChatSession、KnowledgeRef、QuickCommand、QUICK_COMMANDS、NoteItem、NoteGroup）
 - `styles/gt-design-tokens.css` — GT 设计系统 Token（主色 #4b2d77、辅助色、间距、圆角等）
 
 ### 资源目录
@@ -245,7 +269,13 @@ inclusion: always
 - _extract_from_total_row 优先列扩展：bv_cols/_pick_from_range/_pick_net_or_first/单行表头 closing_bv_idx 均增加"税后净额"/"税后"关键词与"账面价值"同等优先，解决其他综合收益明细表取到税前金额而非税后净额的问题（国企版）
 - gitpython 崩溃防御：prompt_git_service.py 在 import git 前设置 GIT_PYTHON_REFRESH=quiet，__init__ 中用 shutil.which("git") 检测可用性，_ensure_configured 返回友好提示；build_exe.py launcher 中同样设置该环境变量
 - EXE 打包使用期限：build_exe.py launcher main() 最前面加过期检查，当前设为 2026-09-30，过期后弹 MessageBoxW 提示联系致同研究院获取新版本后 sys.exit(1)
+- 笔记库架构：在 knowledge_service.py LIBRARIES 中新增 'notes' 分类，与现有8个知识库并列管理，复用知识库全套 CRUD/搜索/RAG 检索能力，聊天中的 AI 回复、上传文档、整段对话均可保存为笔记，笔记可被其他四大工作模块关联使用；笔记按日期子文件夹管理（`~/.gt_audit_helper/knowledge/notes/{YYYY-MM-DD}/`），侧边栏按日期分组展示
+- 聊天框特殊字符交互模式：`/` 触发快捷指令跳转工作模块，`@` 触发知识库引用（弹出候选列表，支持模糊过滤，选中显示为标签），不带 `@` 的消息不走知识库检索
+- 聊天 Markdown 渲染依赖：前端需新增 react-markdown + remark-gfm + rehype-highlight + unified + remark-parse + remark-rehype + rehype-stringify（后四个用于富文本复制时 Markdown→HTML 转换）；@ranui/preview 已弃用，改用 iframe + markdownToHtml 方案做在线预览
+- 富文本复制内联样式：markdownToHtml.ts 中自定义 rehypeInlineStyles 插件，给 table/th/td/blockquote/pre/code/h1-h3/hr 注入内联 style 属性，确保剪贴板 HTML 不依赖外部 CSS，粘贴到 Word/邮件/飞书等任何富文本环境都能正确显示格式
 
 ## 待办 / 进行中
 - 项目文件清理（2026-04）：已删除根目录 `__pycache__/`、`frontend/README.md`；`GT_底稿/审计实务操作手册-框架.md` 和 `致同GT审计手册设计规范.md` 待用户确认是否删除
 - 用户计划对每个细分程序逐一打磨升级
+- 首页聊天功能（全部60个子任务已完成）：spec 路径 .kiro/specs/homepage-chat/，待用户启动测试验收；复盘发现的优化点：①ChatPanel.tsx 超1000行，后续可拆分清理UI/导出逻辑为独立hook ②IndexedDB saveChatSession 流式输出时高频写入，可加debounce ③Whisper API 依赖供应商支持，不支持时需友好提示
+- 在线文档编辑（第一步已完成）：homepage-chat 中已改用 iframe + markdownToHtml 方案（弃用 @ranui/preview，Web Component 加载不稳定且预览空白）；第二步单独开 spec 改造四大工作模块的导出流程

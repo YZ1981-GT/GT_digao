@@ -2,8 +2,9 @@
  * 知识库管理面板组件 - 支持拖拽、调整大小和内容预览
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { knowledgeApi } from '../services/api';
+import { knowledgeApi, chatApi } from '../services/api';
 import { processSSEStream } from '../utils/sseParser';
+import LibraryTargetSelector from './LibraryTargetSelector';
 
 interface Library {
   id: string;
@@ -45,6 +46,13 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
   const [formatting, setFormatting] = useState<'local' | 'ai' | null>(null);
+
+  // 移动/复制相关状态
+  const [showTargetSelector, setShowTargetSelector] = useState(false);
+  const [moveOrCopy, setMoveOrCopy] = useState<'move' | 'copy'>('move');
+  const [pendingDocIds, setPendingDocIds] = useState<string[]>([]);
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
 
   // 拖拽和调整大小相关状态
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -534,6 +542,46 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
     setTimeout(() => setMessage(null), 3000);
   };
 
+  // 发起移动/复制操作
+  const startMoveOrCopy = (docIds: string[], action: 'move' | 'copy') => {
+    setPendingDocIds(docIds);
+    setMoveOrCopy(action);
+    setShowTargetSelector(true);
+  };
+
+  const handleTargetSelect = async (targetLibraryId: string, targetDateFolder?: string) => {
+    if (!selectedLib || pendingDocIds.length === 0) return;
+    setShowTargetSelector(false);
+    const apiCall = moveOrCopy === 'move' ? chatApi.moveDocuments : chatApi.copyDocuments;
+    try {
+      await apiCall({
+        doc_ids: pendingDocIds,
+        source_library_id: selectedLib,
+        target_library_id: targetLibraryId,
+        target_date_folder: targetDateFolder,
+      });
+      const label = moveOrCopy === 'move' ? '移动' : '复制';
+      setMessage({ type: 'success', text: `已${label} ${pendingDocIds.length} 个文档` });
+      loadDocuments(selectedLib);
+      loadLibraries();
+      setMultiSelectMode(false);
+      setSelectedDocIds(new Set());
+    } catch (e: any) {
+      setMessage({ type: 'error', text: `操作失败: ${e?.response?.data?.detail || e.message}` });
+    }
+    setPendingDocIds([]);
+    setTimeout(() => setMessage(null), 3000);
+  };
+
+  const toggleDocSelect = (docId: string) => {
+    setSelectedDocIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) next.delete(docId);
+      else next.add(docId);
+      return next;
+    });
+  };
+
   if (!isOpen) return null;
 
   const selectedLibInfo = libraries.find(lib => lib.id === selectedLib);
@@ -660,6 +708,17 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
                     <p className="text-sm text-gray-500">{selectedLibInfo.desc}</p>
                   </div>
                   <div className="flex gap-2">
+                    {/* 多选模式切换 */}
+                    <button
+                      onClick={() => { setMultiSelectMode((p) => !p); setSelectedDocIds(new Set()); }}
+                      className={`inline-flex items-center px-3 py-2 text-sm font-medium rounded-md border ${
+                        multiSelectMode
+                          ? 'bg-purple-50 text-purple-700 border-purple-300'
+                          : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      {multiSelectMode ? '✕ 取消多选' : '☑ 多选'}
+                    </button>
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -701,6 +760,39 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
                   </div>
                 </div>
 
+                {/* 多选批量操作栏 */}
+                {multiSelectMode && documents.length > 0 && (
+                  <div className="flex items-center gap-2 mb-3 p-2 bg-purple-50 rounded-lg border border-purple-200">
+                    <label className="flex items-center gap-1 text-sm text-gray-600 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedDocIds.size === documents.length && documents.length > 0}
+                        onChange={() => {
+                          if (selectedDocIds.size === documents.length) setSelectedDocIds(new Set());
+                          else setSelectedDocIds(new Set(documents.map((d) => d.id)));
+                        }}
+                      />
+                      全选
+                    </label>
+                    <span className="text-xs text-gray-500">已选 {selectedDocIds.size} 项</span>
+                    <div className="flex-1" />
+                    <button
+                      disabled={selectedDocIds.size === 0}
+                      onClick={() => startMoveOrCopy(Array.from(selectedDocIds), 'move')}
+                      className="text-xs px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      📦 批量移动
+                    </button>
+                    <button
+                      disabled={selectedDocIds.size === 0}
+                      onClick={() => startMoveOrCopy(Array.from(selectedDocIds), 'copy')}
+                      className="text-xs px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      📋 批量复制
+                    </button>
+                  </div>
+                )}
+
                 {documents.length === 0 ? (
                   <div
                     className="text-center text-gray-500 py-12 cursor-pointer hover:bg-gray-50 rounded-lg border-2 border-dashed border-gray-300 hover:border-blue-400 transition-colors"
@@ -721,31 +813,58 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
                     {documents.map(doc => (
                       <div
                         key={doc.id}
-                        onClick={() => handlePreview(doc)}
+                        onClick={() => !multiSelectMode && handlePreview(doc)}
                         className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-colors ${
                           previewDoc?.id === doc.id
                             ? 'bg-blue-50 border border-blue-200'
                             : 'bg-gray-50 hover:bg-gray-100'
                         }`}
                       >
+                        {multiSelectMode && (
+                          <input
+                            type="checkbox"
+                            checked={selectedDocIds.has(doc.id)}
+                            onChange={() => toggleDocSelect(doc.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="mr-2 flex-shrink-0"
+                          />
+                        )}
                         <div className="flex-1 min-w-0">
                           <div className="font-medium text-gray-900 truncate">{doc.filename}</div>
                           <div className="text-xs text-gray-500">
                             {formatSize(doc.size)} · {doc.created_at}
                           </div>
                         </div>
-                        <div className="flex items-center gap-2 ml-2">
+                        <div className="flex items-center gap-1 ml-2 flex-shrink-0">
+                          {!multiSelectMode && (
+                            <>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); startMoveOrCopy([doc.id], 'move'); }}
+                                className="text-gray-400 hover:text-blue-600 text-xs px-1"
+                                title="移动到..."
+                              >
+                                📦
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); startMoveOrCopy([doc.id], 'copy'); }}
+                                className="text-gray-400 hover:text-green-600 text-xs px-1"
+                                title="复制到..."
+                              >
+                                📋
+                              </button>
+                            </>
+                          )}
                           <button
                             onClick={(e) => { e.stopPropagation(); handlePreview(doc); }}
                             className="text-blue-500 hover:text-blue-700 text-sm"
                           >
-                            👁️ 预览
+                            👁️
                           </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); handleDelete(doc.id); }}
                             className="text-red-500 hover:text-red-700 text-sm"
                           >
-                            🗑️ 删除
+                            🗑️
                           </button>
                         </div>
                       </div>
@@ -873,6 +992,14 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ isOpen, onClose }) => {
           }}
         />
       </div>
+
+      {/* 目标选择器弹窗 */}
+      <LibraryTargetSelector
+        visible={showTargetSelector}
+        onClose={() => { setShowTargetSelector(false); setPendingDocIds([]); }}
+        onSelect={handleTargetSelect}
+        excludeLibraryId={selectedLib || undefined}
+      />
     </div>
   );
 };

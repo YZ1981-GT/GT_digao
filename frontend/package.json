@@ -5,6 +5,7 @@
   "dependencies": {
     "@headlessui/react": "^2.2.7",
     "@heroicons/react": "^2.2.0",
+    "@ranui/preview": "^0.0.1-alpha-3",
     "@tailwindcss/typography": "^0.5.16",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.8.0",
@@ -24,7 +25,12 @@
     "react-markdown": "^10.1.0",
     "react-scripts": "5.0.1",
     "rehype-highlight": "^7.0.2",
+    "rehype-stringify": "^10.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "remark-rehype": "^11.1.2",
     "typescript": "^4.9.5",
+    "unified": "^11.0.5",
     "web-vitals": "^2.1.4"
   },
   "scripts": {

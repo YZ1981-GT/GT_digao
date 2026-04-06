@@ -651,3 +651,91 @@ export const analysisApi = {
   getProject: (projectId: string) =>
     api.get(`/api/analysis/project/${projectId}`),
 };
+
+// ─── 首页聊天 API ───
+
+export const chatApi = {
+  /** 流式聊天（SSE），返回 fetch Response 供 SSEParser 使用 */
+  stream: (data: {
+    messages: Array<{ role: string; content: string }>;
+    knowledge_library_ids?: string[];
+    document_context?: string;
+    image_ocr_context?: string;
+  }, signal?: AbortSignal) =>
+    fetch(`${API_BASE_URL}/api/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      signal,
+    }),
+
+  /** 文档/图片上传（multipart） */
+  upload: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/api/chat/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
+  /** 语音识别（音频上传） */
+  speechToText: (audioBlob: Blob) => {
+    const formData = new FormData();
+    formData.append('audio', audioBlob, 'recording.webm');
+    return api.post('/api/chat/speech-to-text', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
+  /** 导出 Word（返回 Blob） */
+  exportWord: (content: string, filename?: string) =>
+    api.post('/api/chat/export-word', { content, filename }, {
+      responseType: 'blob',
+    }),
+
+  /** 保存笔记 */
+  saveNote: (data: { title: string; content: string; date?: string }) =>
+    api.post('/api/chat/notes', data),
+
+  /** 获取笔记列表（按日期分组） */
+  getNotes: () =>
+    api.get('/api/chat/notes'),
+
+  /** 删除笔记 */
+  deleteNote: (docId: string) =>
+    api.delete(`/api/chat/notes/${docId}`),
+
+  /** AI 清理建议 */
+  cleanupSuggest: (thresholdCount?: number, thresholdSizeMb?: number) =>
+    api.post('/api/chat/notes/cleanup-suggest', {
+      threshold_count: thresholdCount,
+      threshold_size_mb: thresholdSizeMb,
+    }),
+
+  /** AI 润色（SSE流式），返回 fetch Response 供 SSEParser 使用 */
+  polish: (content: string, signal?: AbortSignal) =>
+    fetch(`${API_BASE_URL}/api/chat/polish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+      signal,
+    }),
+
+  /** 知识库文档移动 */
+  moveDocuments: (data: {
+    doc_ids: string[];
+    source_library_id: string;
+    target_library_id: string;
+    target_date_folder?: string;
+  }) =>
+    api.post('/api/knowledge/move', data),
+
+  /** 知识库文档复制 */
+  copyDocuments: (data: {
+    doc_ids: string[];
+    source_library_id: string;
+    target_library_id: string;
+    target_date_folder?: string;
+  }) =>
+    api.post('/api/knowledge/copy', data),
+};
