@@ -47,7 +47,7 @@ _BALANCE_SHEET_MAPPING: Dict[str, List[str]] = {
     '发放贷款和垫款': ['发放贷款和垫款', '发放贷款'],
     '债权投资': ['债权投资'],
     '其他债权投资': ['其他债权投资'],
-    '长期应收款': ['长期应收款'],
+    '长期应收款': ['长期应收款', '长期应收'],
     '长期股权投资': ['长期股权投资'],
     '其他权益工具投资': ['其他权益工具投资'],
     '其他非流动金融资产': ['其他非流动金融资产'],
@@ -108,7 +108,9 @@ _BALANCE_SHEET_MAPPING: Dict[str, List[str]] = {
     # === 所有者权益 ===
     '实收资本': ['实收资本', '股本'],
     '股本': ['实收资本', '股本'],
-    '其他权益工具': ['其他权益工具'],
+    '其他权益工具': ['其他权益工具', '优先股', '永续债'],
+    '优先股': ['其他权益工具', '优先股'],
+    '永续债': ['其他权益工具', '永续债'],
     '资本公积': ['资本公积'],
     '库存股': ['库存股'],
     '其他综合收益': ['其他综合收益'],
@@ -158,7 +160,7 @@ _INCOME_STATEMENT_MAPPING: Dict[str, List[str]] = {
     '资产处置收益': ['资产处置收益'],
     '营业外收入': ['营业外收入'],
     '营业外支出': ['营业外支出'],
-    '所得税费用': ['所得税费用', '所得税'],
+    '所得税费用': ['所得税费用'],
     # === 上市版/国企版附注中单独列示的利润表相关科目 ===
     '现金流量表补充资料': ['现金流量表补充资料', '将净利润调节为经营活动现金流量'],
     '外币货币性项目': ['外币货币性项目'],
@@ -308,7 +310,7 @@ _CONSOLIDATED_ACCOUNTS_LISTED: List[Dict[str, object]] = [
     # ── 资产负债表：非流动资产 ──
     {'name': '债权投资', 'keywords': ['债权投资'], 'order': 14},
     {'name': '其他债权投资', 'keywords': ['其他债权投资'], 'order': 15},
-    {'name': '长期应收款', 'keywords': ['长期应收款'], 'order': 16},
+    {'name': '长期应收款', 'keywords': ['长期应收款', '长期应收'], 'order': 16},
     {'name': '设定受益计划净资产', 'keywords': ['设定受益计划净资产', '设定受益计划'], 'order': 17},
     {'name': '长期股权投资', 'keywords': ['长期股权投资'], 'order': 18},
     {'name': '其他权益工具投资', 'keywords': ['其他权益工具投资'], 'order': 19},
@@ -351,7 +353,7 @@ _CONSOLIDATED_ACCOUNTS_LISTED: List[Dict[str, object]] = [
     {'name': '其他非流动负债', 'keywords': ['其他非流动负债'], 'order': 54},
     # ── 资产负债表：所有者权益 ──
     {'name': '股本', 'keywords': ['实收资本', '股本'], 'order': 55},
-    {'name': '其他权益工具', 'keywords': ['其他权益工具'], 'order': 56},
+    {'name': '其他权益工具', 'keywords': ['其他权益工具', '优先股', '永续债'], 'order': 56},
     {'name': '资本公积', 'keywords': ['资本公积'], 'order': 57},
     {'name': '其他综合收益', 'keywords': ['其他综合收益'], 'order': 58},
     {'name': '专项储备', 'keywords': ['专项储备'], 'order': 59},
@@ -374,7 +376,7 @@ _CONSOLIDATED_ACCOUNTS_LISTED: List[Dict[str, object]] = [
     {'name': '资产处置收益', 'keywords': ['资产处置收益'], 'order': 73},
     {'name': '营业外收入', 'keywords': ['营业外收入'], 'order': 74},
     {'name': '营业外支出', 'keywords': ['营业外支出'], 'order': 75},
-    {'name': '所得税费用', 'keywords': ['所得税费用', '所得税'], 'order': 76},
+    {'name': '所得税费用', 'keywords': ['所得税费用'], 'order': 76},
     # ── 现金流量表及补充资料 ──
     {'name': '现金流量表补充资料', 'keywords': ['现金流量表补充资料', '将净利润调节为经营活动现金流量'], 'order': 77},
     {'name': '外币货币性项目', 'keywords': ['外币货币性项目'], 'order': 78},
@@ -400,7 +402,7 @@ _CONSOLIDATED_ACCOUNTS_SOE: List[Dict[str, object]] = [
     # ── 资产负债表：非流动资产 ──
     {'name': '债权投资', 'keywords': ['债权投资'], 'order': 14},
     {'name': '其他债权投资', 'keywords': ['其他债权投资'], 'order': 15},
-    {'name': '长期应收款', 'keywords': ['长期应收款'], 'order': 16},
+    {'name': '长期应收款', 'keywords': ['长期应收款', '长期应收'], 'order': 16},
     {'name': '长期股权投资', 'keywords': ['长期股权投资'], 'order': 17},
     {'name': '其他权益工具投资', 'keywords': ['其他权益工具投资'], 'order': 18},
     {'name': '其他非流动金融资产', 'keywords': ['其他非流动金融资产'], 'order': 19},
@@ -442,7 +444,7 @@ _CONSOLIDATED_ACCOUNTS_SOE: List[Dict[str, object]] = [
     {'name': '其他非流动负债', 'keywords': ['其他非流动负债'], 'order': 53},
     # ── 资产负债表：所有者权益 ──
     {'name': '实收资本', 'keywords': ['实收资本', '股本'], 'order': 54},
-    {'name': '其他权益工具', 'keywords': ['其他权益工具'], 'order': 55},
+    {'name': '其他权益工具', 'keywords': ['其他权益工具', '优先股', '永续债'], 'order': 55},
     {'name': '资本公积', 'keywords': ['资本公积'], 'order': 56},
     {'name': '专项储备', 'keywords': ['专项储备'], 'order': 57},
     {'name': '盈余公积', 'keywords': ['盈余公积'], 'order': 58},
@@ -465,7 +467,7 @@ _CONSOLIDATED_ACCOUNTS_SOE: List[Dict[str, object]] = [
     {'name': '资产处置收益', 'keywords': ['资产处置收益'], 'order': 71},
     {'name': '营业外收入', 'keywords': ['营业外收入'], 'order': 72},
     {'name': '营业外支出', 'keywords': ['营业外支出'], 'order': 73},
-    {'name': '所得税费用', 'keywords': ['所得税费用', '所得税'], 'order': 74},
+    {'name': '所得税费用', 'keywords': ['所得税费用'], 'order': 74},
     # ── 其他综合收益 ──
     {'name': '其他综合收益', 'keywords': ['其他综合收益'], 'order': 75},
     # ── 现金流量表及补充资料 ──

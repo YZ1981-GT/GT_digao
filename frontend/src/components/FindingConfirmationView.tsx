@@ -241,6 +241,9 @@ const FindingConfirmationView: React.FC<Props> = ({ sessionId, onComplete }) => 
         <div style={{ marginBottom: 'var(--gt-space-2)', display: 'flex', gap: 8, alignItems: 'center' }}>
           <button onClick={() => setCheckedIds(new Set(filtered.map(f => f.id)))} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', border: '1px solid #ccc', borderRadius: 4, background: '#fff' }}>全选</button>
           <button onClick={() => setCheckedIds(new Set())} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', border: '1px solid #ccc', borderRadius: 4, background: '#fff' }}>全清</button>
+          <span style={{ width: 1, height: 16, background: '#ddd', margin: '0 2px' }} />
+          <button onClick={() => { setCollapsedAccounts(new Set()); setCollapsedCategories(new Set()); }} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', border: '1px solid #ccc', borderRadius: 4, background: '#fff' }}>全部展开</button>
+          <button onClick={() => { setCollapsedAccounts(new Set(groups.map(g => g.accountName))); setCollapsedCategories(new Set(groups.flatMap(g => g.categories.map(c => `${g.accountName}::${c.category}`)))); }} style={{ fontSize: 12, padding: '2px 10px', cursor: 'pointer', border: '1px solid #ccc', borderRadius: 4, background: '#fff' }}>全部折叠</button>
           {checkedIds.size > 0 && (
             <>
               <span style={{ fontSize: 13, marginLeft: 4 }}>已选 {checkedIds.size} 项</span>

@@ -160,10 +160,18 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
                            'exclude_keywords': ['减值准备']}],
     },
     {
-        # 长期应收款：按性质披露表
+        # 发放贷款及垫款：按计量方式/行业/地区/担保方式分布表
+        # 表格结构特殊：有加行（应计利息）、减行（损失准备、一年内到期）、
+        # 最终的「贷款和垫款账面价值」行是报表对应数（由策略2的账面价值行提取）
+        'account_keywords': ['发放贷款和垫款', '发放贷款'],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['发放贷款', '贷款和垫款', '按计量方式', '按行业', '按地区', '按担保方式'],
+                           'exclude_keywords': ['信用风险', '预期信用损失', '迁徙率', '逾期']}],
+    },
+    {
+        # 长期应收款：按性质/款项性质披露表
         'account_keywords': ['长期应收款'],
-        'verify_tables': [{'type': 'summary', 'title_keywords': ['按性质披露', '长期应收款'],
-                           'exclude_keywords': ['坏账准备', '减值准备', '终止确认']}],
+        'verify_tables': [{'type': 'summary', 'title_keywords': ['按性质披露', '按款项性质', '长期应收款'],
+                           'exclude_keywords': ['坏账准备', '减值准备', '终止确认', '账龄']}],
     },
     {
         # 长期股权投资：
@@ -508,7 +516,7 @@ AMOUNT_CHECK_PRESETS: List[AmountCheckPreset] = [
         'verify_tables': [{'type': 'summary', 'title_keywords': ['营业外支出']}],
     },
     {
-        'account_keywords': ['所得税费用', '所得税'],
+        'account_keywords': ['所得税费用'],
         'verify_tables': [{'type': 'summary', 'title_keywords': ['所得税费用'],
                            'exclude_keywords': ['调整过程', '适用税率', '递延所得税',
                                                 '其他综合收益', '利润总额的关系']}],
@@ -579,6 +587,7 @@ def should_verify_note_table(
     note_section_title: str,
     note_account_name: str,
     template_type: Optional[str] = None,
+    is_parent_note: bool = False,
 ) -> bool:
     """判断某个附注表格是否应参与报表-附注一致性校对。
 
@@ -590,11 +599,17 @@ def should_verify_note_table(
     5. 再检查 title_keywords（命中则通过）
     6. 所有规则都不匹配 → 不参与校对
 
+    母公司口径（is_parent_note=True）时：
+    - 仍然使用相同的预设规则
+    - 但排除关键词中的子表类关键词（对子公司/对联营/对合营/明细）不生效，
+      因为母公司附注中这些子表可能是唯一的披露表格
+
     Args:
         account_name: 报表科目名称
         note_section_title: 附注表格的 section_title
         note_account_name: 附注表格的 account_name
         template_type: 模板类型 'soe'(国企版) / 'listed'(上市版)，None 时用默认规则
+        is_parent_note: 是否为母公司口径的附注表格
 
     Returns:
         True = 应参与校对，False = 不参与
@@ -606,11 +621,21 @@ def should_verify_note_table(
     combined_title = (note_section_title or '') + (note_account_name or '')
     combined_title = combined_title.replace(' ', '').replace('\u3000', '')
 
+    # 母公司口径时，这些排除关键词不生效（母公司附注中子表可能是唯一的披露）
+    _parent_skip_exclude_kw = []
+
     verify_tables = _get_verify_tables(preset, template_type)
     for rule in verify_tables:
         exclude_kws = rule.get('exclude_keywords', [])
-        if exclude_kws and any(kw in combined_title for kw in exclude_kws):
-            continue
+        if exclude_kws:
+            if is_parent_note:
+                # 母公司口径：过滤掉子表类排除关键词
+                effective_excludes = [kw for kw in exclude_kws if kw not in _parent_skip_exclude_kw]
+                if effective_excludes and any(kw in combined_title for kw in effective_excludes):
+                    continue
+            else:
+                if any(kw in combined_title for kw in exclude_kws):
+                    continue
 
         title_kws = rule.get('title_keywords', [])
         if title_kws and any(kw in combined_title for kw in title_kws):

@@ -84,8 +84,13 @@ class TableStructureAnalyzer:
         避免误匹配"按组合计提"这类包含"合计"子串的科目名。"""
         if not label:
             return False
+        # 排除特定的非合计行（如"工资总额"是薪酬类别名称，不是合计行）
+        _not_total_labels = ["工资总额", "薪金总额", "薪酬总额"]
+        norm = label.replace(" ", "").replace("\u3000", "")
+        if norm in _not_total_labels:
+            return False
         # 先用原始 label 匹配，再用去空格版本匹配（兼容"合  计"、"小  计"等 OCR 多空格）
-        for raw in (label, label.replace(" ", "").replace("\u3000", "")):
+        for raw in (label, norm):
             for kw in self.TOTAL_KEYWORDS:
                 if raw == kw:
                     return True
@@ -1210,9 +1215,19 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
 
         # ── 第二遍：处理"其中"区域，将明细行标为 sub_item ──
         # 找到每个 sub_item_header 前面最近的 data 行作为 parent
+        # 特殊处理：「其他收益」表格中合计行后的「其中：政府补助」是备注行，
+        # 不是任何 data 行的子项，不设 parent、不向后扫描
+        _last_total_idx = total_row_indices[-1] if total_row_indices else -1
+        _is_other_income = any(kw in (note_table.account_name or "") for kw in ["其他收益"])
         i = 0
         while i < len(rows):
             if rows[i].role == "sub_item_header":
+                # 「其他收益」表格：合计行后的「其中」行是备注，不关联 parent
+                if _is_other_income and rows[i].row_index > _last_total_idx and _last_total_idx >= 0:
+                    rows[i].role = "sub_item"
+                    rows[i].parent_row_index = None
+                    i += 1
+                    continue
                 # 找 parent：往前找最近的 data 行
                 parent_idx = None
                 for j in range(i - 1, -1, -1):
@@ -1231,6 +1246,29 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
                 _header_is_numbered = bool(re.match(
                     r'^[\d①②③④⑤⑥⑦⑧⑨⑩⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽㈠㈡㈢㈣㈤]', _sub_header_text
                 ))
+
+                # 判断是否为单行其中项（"其中：XXX"后面有具体内容且该行有数值）
+                # 仅对特定科目生效（如长期应收款的"其中：未实现融资收益"），
+                # 避免影响其他表格中正常的多行其中项结构
+                _SINGLE_LINE_SUB_ITEM_ACCOUNTS = ["长期应收款"]
+                _is_single_line_sub_item = False
+                _acct_name = (note_table.account_name or "") + (note_table.section_title or "")
+                if (_sub_header_text and not _header_is_numbered
+                        and any(kw in _acct_name for kw in _SINGLE_LINE_SUB_ITEM_ACCOUNTS)):
+                    # 有具体内容且不带编号 → 检查该行是否有数值（确认是数据行而非纯标题）
+                    if rows[i].row_index < len(note_table.rows):
+                        _row_data = note_table.rows[rows[i].row_index]
+                        _has_value = any(
+                            str(c or "").strip() not in ("", "--", "—", "-", "－")
+                            for c in _row_data[1:]
+                        )
+                        if _has_value:
+                            _is_single_line_sub_item = True
+
+                # 单行其中项：不向后扫描，直接跳到下一行
+                if _is_single_line_sub_item:
+                    i += 1
+                    continue
 
                 # 向后扫描明细行，直到遇到 data/total/subtotal/sub_item_header
                 k = i + 1
@@ -1289,13 +1327,16 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
             else:
                 i += 1
 
-        # ── 第三遍：检测中文序号段落结构（一、二、三 + 1. 2. 3.）──
-        # 如果表格有中文序号段落标题（一、二、三）且段落内有编号子项（1. 2. 3.），
-        # 则段落标题行应标记为 subtotal（它们是子项的汇总），
-        # 编号子项保持 data 角色。这样 _get_data_rows_for_total 会正确地
-        # 只对 subtotal 行求和，避免 subtotal + data 双重计算。
+        # ── 第三遍：检测中文序号段落结构（一、二、三）──
+        # 如果表格有中文序号段落标题（一、二、三）且有合计行，
+        # 则段落标题行应标记为 subtotal（它们是子项的汇总）。
+        # 适用场景：
+        #   - 一、子公司 / 二、合营企业 / 三、联营企业 + 合计（长期股权投资明细）
+        #   - 一、账面原值 / 二、累计折旧 + 编号子项（固定资产变动表）
         _section_header_indices: List[int] = []
         _has_numbered_children = False
+        # 带括号编号模式：（1）（2）或 (1)(2)
+        _paren_num_pattern = re.compile(r'^[（(]\d+[）)]')
         for r in rows:
             norm_lbl = r.label.replace(" ", "").replace("\u3000", "")
             if _SECTION_PATTERN.match(norm_lbl) or re.match(
@@ -1304,13 +1345,59 @@ data_row_start: 第一个数据行的索引（跳过表头行）"""
                 _section_header_indices.append(r.row_index)
             elif r.role == "data" and re.match(r'^[\d]+[.、．]', norm_lbl):
                 _has_numbered_children = True
+            elif r.role == "data" and _paren_num_pattern.match(norm_lbl):
+                _has_numbered_children = True
 
-        if _section_header_indices and _has_numbered_children and total_row_indices:
+        # 条件：有中文序号段落标题 + 有合计行即可（不要求必须有编号子项）
+        if _section_header_indices and total_row_indices:
             for si in _section_header_indices:
                 r = rows[si]
                 if r.role == "data":
                     r.role = "subtotal"
                     subtotal_row_indices.append(si)
+
+        # ── 第四遍：带括号编号子项的分组标题检测 ──
+        # 检测「（1）账龄组合」「（2）低风险组合」等带括号编号的子项模式。
+        # 当连续的带括号编号行前面有一个非编号的 data 行时，
+        # 该非编号行是分组标题（subtotal），编号行是其明细。
+        # 例如：
+        #   按组合计提坏账准备的其他应收款  ← subtotal（分组标题）
+        #   （1）账龄组合                  ← data（编号子项）
+        #   （2）低风险组合                ← data（编号子项）
+        if _paren_num_pattern and total_row_indices:
+            i = 0
+            while i < len(rows):
+                r = rows[i]
+                norm_lbl = r.label.replace(" ", "").replace("\u3000", "")
+                # 找到一个带括号编号的 data 行
+                if r.role == "data" and _paren_num_pattern.match(norm_lbl):
+                    # 往前找最近的非编号 data 行（跳过 header/total/subtotal）
+                    parent_idx = None
+                    for j in range(i - 1, -1, -1):
+                        if rows[j].role in ("total", "subtotal", "header"):
+                            break
+                        if rows[j].role == "data":
+                            pj_norm = rows[j].label.replace(" ", "").replace("\u3000", "")
+                            if not _paren_num_pattern.match(pj_norm):
+                                parent_idx = j
+                            break
+                    # 往后数连续的带括号编号行
+                    k = i + 1
+                    while k < len(rows):
+                        kn = rows[k].label.replace(" ", "").replace("\u3000", "")
+                        if rows[k].role == "data" and _paren_num_pattern.match(kn):
+                            k += 1
+                        else:
+                            break
+                    num_children = k - i
+                    # 至少有2个编号子项，且前面有非编号的 data 行 → 标记为 subtotal
+                    if num_children >= 2 and parent_idx is not None:
+                        if rows[parent_idx].role == "data":
+                            rows[parent_idx].role = "subtotal"
+                            subtotal_row_indices.append(parent_idx)
+                    i = k
+                else:
+                    i += 1
 
         # ── 更新 current_parent_idx 用于后续（兼容性） ──
 

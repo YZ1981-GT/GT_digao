@@ -421,7 +421,58 @@ const FindingDetailPanel: React.FC<Props> = ({ findingId, finding, sessionId, on
       <div style={{ display: 'flex', gap: 6, marginBottom: 'var(--gt-space-3)' }}>
         <button onClick={() => sendTrace('cross_reference')} disabled={streaming} style={{ fontSize: 11, padding: '3px 8px', border: '1px solid var(--gt-primary)', borderRadius: 4, cursor: 'pointer', background: '#fff', color: 'var(--gt-primary)' }}>交叉引用</button>
         <button onClick={() => sendTrace('template_compare')} disabled={streaming} style={{ fontSize: 11, padding: '3px 8px', border: '1px solid var(--gt-primary)', borderRadius: 4, cursor: 'pointer', background: '#fff', color: 'var(--gt-primary)' }}>模板比对</button>
-        <button onClick={() => sendTrace('data_drill_down')} disabled={streaming} style={{ fontSize: 11, padding: '3px 8px', border: '1px solid var(--gt-primary)', borderRadius: 4, cursor: 'pointer', background: '#fff', color: 'var(--gt-primary)' }}>数据下钻</button>
+        <button onClick={() => {
+          // 数据下载：生成详细计算过程文本
+          if (!finding) return;
+          const lines: string[] = [];
+          lines.push(`=== 问题详细计算过程 ===`);
+          lines.push(`科目：${finding.account_name}`);
+          lines.push(`描述：${finding.description}`);
+          lines.push(`位置：${finding.location || '无'}`);
+          lines.push(`风险等级：${finding.risk_level === 'high' ? '高' : finding.risk_level === 'medium' ? '中' : '低'}`);
+          lines.push('');
+          if (finding.analysis_reasoning) {
+            lines.push(`--- 分析过程 ---`);
+            lines.push(finding.analysis_reasoning);
+            lines.push('');
+          }
+          if (finding.statement_amount != null || finding.note_amount != null) {
+            lines.push(`--- 数值明细 ---`);
+            if (finding.statement_amount != null) lines.push(`报表金额：${finding.statement_amount.toLocaleString()}`);
+            if (finding.note_amount != null) lines.push(`附注金额：${finding.note_amount.toLocaleString()}`);
+            if (finding.difference != null) lines.push(`差异金额：${finding.difference.toLocaleString()}`);
+            lines.push('');
+          }
+          if (noteTables.length > 0) {
+            lines.push(`--- 关联附注表格数据 ---`);
+            for (const table of noteTables) {
+              lines.push(`表格：${table.section_title || table.account_name}`);
+              if (table.headers) lines.push(`表头：${table.headers.join('\t')}`);
+              for (const row of (table.rows || [])) {
+                lines.push(row.map((c: any) => c != null ? String(c) : '').join('\t'));
+              }
+              lines.push('');
+            }
+          }
+          if (finding.suggestion) {
+            lines.push(`--- 建议 ---`);
+            lines.push(finding.suggestion);
+          }
+          const text = lines.join('\n');
+          // 复制到剪贴板
+          navigator.clipboard.writeText(text).then(() => {
+            alert('计算过程已复制到剪贴板');
+          }).catch(() => {
+            // 回退：创建下载文件
+            const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `finding_${finding.id}_detail.txt`;
+            a.click();
+            URL.revokeObjectURL(url);
+          });
+        }} style={{ fontSize: 11, padding: '3px 8px', border: '1px solid var(--gt-primary)', borderRadius: 4, cursor: 'pointer', background: '#fff', color: 'var(--gt-primary)' }}>数据下载</button>
       </div>
 
       {/* Conversation */}

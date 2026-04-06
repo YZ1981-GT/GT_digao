@@ -54,18 +54,35 @@
 
 ### 📊 文档分析
 
-- 文档上传与智能解析（PDF/Word/Excel）
-- 科目匹配与对账分析
-- 表格结构分析与数据提取
-- OCR 图片文字识别（Tesseract）
-- 文本质量分析
+四步骤工作流：文档上传与预览 → 分析配置 → 章节框架确认 → 逐章节内容生成与编辑
+
+- 支持多文档上传（PDF/Word/Excel/图片/TXT），单文件最大 50MB
+- 智能 OCR 解析策略：纯文本直接读取、图片走 Tesseract OCR、PDF 自动检测类型（文字层/扫描版/混合）、Word/Excel 嵌入图片 OCR 补充
+- 可选 MinerU GPU 加速高精度 PDF→Markdown 转换
+- 三种分析模式：总结分析（3000字）、整理汇总（5000字）、生成汇总台账（8000字）
+- 支持自定义分析指令和目标字数
+- AI 自动生成带注释的章节框架，用户可编辑确认
+- SSE 流式逐章节生成，引用原文并标注出处（`<source doc="文件名" excerpt="原文片段"/>`）
+- 鼠标悬停出处标注可查看引用原文
+- 每个章节支持：手动编辑、AI 修改、重新生成、重置
+- Word 导出，排版复用审计报告复核风格
 
 ### 📋 审计报告复核
 
-- 审计报告上传与模板配置
-- 报告正文智能复核
-- 附注内容复核
-- 发现问题确认与跟踪
+五步骤工作流：文件上传 → 科目对照 → 复核配置 → 问题确认 → 复核报告
+
+- 上传审计报告 Word 文档 + 报表 Excel 文件，选择模板类型（国有企业/上市公司）
+- 自动解析报表（资产负债表/利润表/现金流量表/权益变动表），识别合并报表的合并/母公司列
+- 自动提取附注表格和附注章节，处理多行表头合并单元格
+- 报表科目与附注表格自动匹配，用户确认科目对照关系
+- 30+ 种数值校验：报表vs附注金额一致性、附注表格内部勾稽、期初+变动=期末公式、宽表公式、子项合计、跨表交叉校验（坏账/薪酬/存货/商誉/债权投资/合同资产/收入成本）、现金流量表补充资料、所得税一致性、权益变动表交叉、账龄衔接、预期信用损失三阶段等
+- 正文 LLM 复核：单位名称一致性、简称统一性、与致同报告模板逐段比对
+- 附注 LLM 复核：叙述性章节表达通顺性、会计政策与模板逐条比对
+- 文本质量检查：中英文标点混用本地规则检测（含行号页码定位）+ LLM 标点/错别字检查
+- 问题列表按 account_name → category 两级折叠分组，组头 checkbox 支持批量确认/驳回
+- 每个问题支持：确认/驳回/恢复、编辑、AI 对话讨论、追溯分析
+- 致同报告模板管理：正文模板/附注模板，支持从 Word 导入自定义模板
+- 复核报告导出 Word，含概要统计、问题明细、风险分布
 
 ### 💡 提示词库管理
 
@@ -211,18 +228,18 @@ python build_exe.py
 
 | 模块 | 端点前缀 | 说明 |
 |------|----------|------|
-| 配置 | `/api/config` | AI 供应商/模型配置 |
-| 复核 | `/api/review` | 底稿上传、发起复核、报告导出、问题状态更新、交叉引用 |
-| 文档生成 | `/api/generate` | 大纲提取、逐章节生成、章节修改、文档导出 |
-| 文档分析 | `/api/analysis` | 文档解析、科目匹配、表格分析 |
-| 审计报告复核 | `/api/report-review` | 报告上传、正文复核、附注复核 |
-| 提示词 | `/api/prompt` | 提示词 CRUD、Git 同步/推送/冲突处理/标签 |
+| 配置 | `/api/config` | AI 供应商/模型 CRUD、激活切换 |
+| 底稿复核 | `/api/review` | 底稿上传（单/批量）、引用检查、补充材料、SSE 复核、报告导出（Word/PDF）、问题状态更新、交叉引用分析 |
+| 文档生成 | `/api/generate` | 大纲提取/确认、SSE 逐章节生成、单章节生成、章节 AI 修改、Word 导出 |
+| 文档分析 | `/api/analysis` | 文档上传（智能 OCR）、格式化、项目管理、大纲生成/确认、SSE 章节生成/修改、Word 导出 |
+| 审计报告复核 | `/api/report-review` | 文件上传/解析、科目对照、SSE 复核、findings CRUD/批量/对话/追溯、模板管理（CRUD/导入）、Word 导出 |
+| 提示词 | `/api/prompt` | 提示词列表/保存/编辑/替换/恢复、Git 配置/同步/推送/冲突处理/标签 |
 | 模板 | `/api/template` | 模板上传、列表、详情、删除、更新 |
-| 知识库 | `/api/knowledge` | 知识库文档管理、搜索、检索 |
-| 项目 | `/api/project` | 项目创建、底稿关联、模板关联、进度概览 |
-| 文档处理 | `/api/document` | 文档上传与解析 |
-| 大纲 | `/api/outline` | 大纲提取与编辑 |
-| 内容 | `/api/content` | 章节内容生成与编辑 |
+| 知识库 | `/api/knowledge` | 知识库列表、文档 CRUD、关键词搜索 |
+| 项目 | `/api/project` | 项目创建/列表/详情、底稿关联、模板关联 |
+| 文档处理 | `/api/document` | 文档上传与解析、SSE 分析、Word 导出 |
+| 大纲 | `/api/outline` | 大纲生成 |
+| 内容 | `/api/content` | 知识库预加载、SSE 章节生成、SSE 章节修改 |
 | 搜索 | `/api/search` | 网络搜索辅助 |
 
 ## 数据存储
@@ -231,10 +248,13 @@ python build_exe.py
 |----------|----------|
 | 项目数据 | `~/.gt_audit_helper/projects/{project_id}/` |
 | 模板文件 | `~/.gt_audit_helper/templates/{template_id}/` |
+| 报告模板 | `~/.gt_audit_helper/report_templates/` |
 | 自定义提示词 | `~/.gt_audit_helper/prompts/` |
 | Git 仓库克隆 | `~/.gt_audit_helper/prompt_git/` |
 | AI 配置 | `~/.gt_audit_helper/config.json` |
 | 知识库文件 | `~/.gt_audit_helper/knowledge/` |
+| 审计报告复核会话 | `backend/data/sessions/{session_id}/` |
+| 模型上下文限制 | `backend/data/model_context_limits.json` |
 | 浏览器端工作状态 | IndexedDB（浏览器本地） |
 
 
@@ -248,48 +268,71 @@ GT_digao/
 │   │   ├── config.py                  # 应用配置（CORS、文件上传限制等）
 │   │   ├── models/
 │   │   │   ├── schemas.py             # 通用数据模型
-│   │   │   ├── audit_schemas.py       # 审计相关数据模型
+│   │   │   ├── audit_schemas.py       # 审计相关数据模型（50+ Pydantic 模型）
 │   │   │   └── analysis_schemas.py    # 文档分析数据模型
 │   │   ├── routers/                   # API 路由层（15个路由模块）
-│   │   │   ├── review.py              # 复核 API
-│   │   │   ├── generate.py            # 文档生成 API
-│   │   │   ├── prompt.py              # 提示词管理 API
-│   │   │   ├── template.py            # 模板管理 API
-│   │   │   ├── project.py             # 项目管理 API
-│   │   │   ├── knowledge.py           # 知识库 API
-│   │   │   ├── analysis.py            # 文档分析 API
-│   │   │   ├── report_review.py       # 审计报告复核 API
-│   │   │   ├── config.py              # 配置管理 API
-│   │   │   ├── document.py            # 文档处理 API
-│   │   │   ├── outline.py             # 大纲 API
-│   │   │   ├── content.py             # 内容生成 API
-│   │   │   ├── search.py              # 搜索 API
+│   │   │   ├── review.py              # 底稿复核 API（/api/review）
+│   │   │   ├── generate.py            # 文档生成 API（/api/generate）
+│   │   │   ├── analysis.py            # 文档分析 API（/api/analysis）
+│   │   │   ├── report_review.py       # 审计报告复核 API（/api/report-review，1300+行）
+│   │   │   ├── config.py              # 配置管理 API（/api/config）
+│   │   │   ├── prompt.py              # 提示词管理 API（/api/prompt）
+│   │   │   ├── template.py            # 模板管理 API（/api/template）
+│   │   │   ├── knowledge.py           # 知识库 API（/api/knowledge）
+│   │   │   ├── project.py             # 项目管理 API（/api/project）
+│   │   │   ├── document.py            # 文档处理 API（/api/document）
+│   │   │   ├── outline.py             # 大纲 API（/api/outline）
+│   │   │   ├── content.py             # 内容生成 API（/api/content）
+│   │   │   ├── search.py              # 搜索 API（/api/search）
 │   │   │   └── expand.py              # 扩展 API
 │   │   ├── services/                  # 业务逻辑层（28个服务模块）
-│   │   │   ├── openai_service.py      # LLM 服务（多供应商适配）
-│   │   │   ├── review_engine.py       # 底稿复核引擎
-│   │   │   ├── report_generator.py    # 报告生成与导出
-│   │   │   ├── document_generator.py  # 文档生成（大纲提取+章节生成）
-│   │   │   ├── workpaper_parser.py    # 底稿解析
-│   │   │   ├── template_service.py    # 模板管理
-│   │   │   ├── project_service.py     # 项目管理
-│   │   │   ├── prompt_library.py      # 提示词库
+│   │   │   ├── openai_service.py      # LLM 服务（多供应商 OpenAI 兼容 API 适配）
+│   │   │   ├── # ── 底稿智能复核 ──
+│   │   │   ├── workpaper_parser.py    # 底稿解析（xlsx/xls/docx/doc/pdf，合并单元格，底稿编号识别）
+│   │   │   ├── review_engine.py       # 复核引擎（SSE 逐维度 LLM 复核，交叉引用分析）
+│   │   │   ├── prompt_library.py      # 提示词库（TSJ/ 预置 + 自定义 + Git 版本管理）
 │   │   │   ├── prompt_git_service.py  # 提示词 Git 版本管理
-│   │   │   ├── knowledge_service.py   # 知识库服务
-│   │   │   ├── knowledge_retriever.py # 知识库智能检索
-│   │   │   ├── word_service.py        # Word 导出
-│   │   │   ├── analysis_service.py    # 文档分析服务
-│   │   │   ├── report_review_engine.py # 审计报告复核引擎
-│   │   │   ├── ocr_service.py         # OCR 服务
-│   │   │   └── ...                    # 其他服务模块
+│   │   │   ├── report_generator.py    # 复核报告生成与导出（Word/PDF）
+│   │   │   ├── # ── 审计文档生成 ──
+│   │   │   ├── document_generator.py  # 文档生成器（1400+行，大纲提取+逐章节生成+对话修改）
+│   │   │   ├── template_service.py    # 模板管理（5种预置类型）
+│   │   │   ├── word_service.py        # Word 导出（自定义字体，Markdown→Word 渲染）
+│   │   │   ├── # ── 文档分析 ──
+│   │   │   ├── analysis_service.py    # 文档分析服务（1200+行，章节生成+原文出处标注+Word导出）
+│   │   │   ├── ocr_service.py         # OCR 服务（Tesseract + MinerU，智能 PDF 类型检测）
+│   │   │   ├── file_service.py        # 文件服务
+│   │   │   ├── # ── 审计报告复核 ──
+│   │   │   ├── report_parser.py       # 报告解析器（2000+行，报表/附注表格/章节提取）
+│   │   │   ├── reconciliation_engine.py # 对账引擎（25000+行，30+种数值校验）
+│   │   │   ├── report_review_engine.py  # 报告复核引擎（SSE 复核调度）
+│   │   │   ├── report_body_reviewer.py  # 正文 LLM 复核（名称一致性/简称/模板比对）
+│   │   │   ├── note_content_reviewer.py # 附注 LLM 复核（表达通顺性/政策模板比对）
+│   │   │   ├── text_quality_analyzer.py # 文本质量检查（标点混用/错别字）
+│   │   │   ├── table_structure_analyzer.py # 表格结构分析（预设规则+LLM，宽表公式）
+│   │   │   ├── report_template_service.py # 报告模板服务（正文/附注模板管理）
+│   │   │   ├── # ── 共享服务 ──
+│   │   │   ├── knowledge_service.py   # 知识库服务（7个分类，LRU 缓存 300 文档）
+│   │   │   ├── knowledge_retriever.py # 知识库智能检索（关键词匹配，token 预算控制）
+│   │   │   ├── knowledge_vector_service.py # 知识库向量服务
+│   │   │   ├── search_service.py      # 网络搜索服务
+│   │   │   ├── project_service.py     # 项目管理服务
+│   │   │   ├── session_store.py       # 会话存储
+│   │   │   ├── heading_utils.py       # 标题工具函数
+│   │   │   ├── account_mapping_template.py # 科目映射模板
+│   │   │   ├── amount_check_presets.py # 金额检查预设规则
+│   │   │   ├── statement_preset.py    # 报表预设
+│   │   │   └── wide_table_presets.py  # 宽表预设规则
 │   │   └── utils/                     # 工具层
 │   │       ├── config_manager.py      # 运行时配置管理
 │   │       ├── prompt_manager.py      # 提示词模板管理
 │   │       ├── outline_util.py        # 大纲处理工具
-│   │       ├── json_util.py           # JSON 解析工具
+│   │       ├── json_util.py           # JSON 解析工具（容错解析 LLM 返回）
 │   │       ├── docx_to_md.py          # Word→Markdown 转换
 │   │       └── sse.py                 # SSE 流式响应工具
-│   ├── data/templates/                # 内置模板
+│   ├── data/
+│   │   ├── model_context_limits.json  # 各模型上下文长度限制
+│   │   └── sessions/                  # 审计报告复核会话数据
+│   ├── tests/                         # 测试（22个测试文件）
 │   ├── requirements.txt               # Python 依赖
 │   ├── run.py                         # 启动脚本
 │   └── .env.example                   # 环境变量示例
@@ -299,15 +342,42 @@ GT_digao/
 │       ├── components/                # UI 组件（33个）
 │       │   ├── WorkModeSelector.tsx   # 工作模式选择首页
 │       │   ├── ConfigPanel.tsx        # AI 配置面板
-│       │   ├── ReviewWorkflow.tsx     # 底稿复核工作流
-│       │   ├── GenerateWorkflow.tsx   # 文档生成工作流
-│       │   ├── AnalysisWorkflow.tsx   # 文档分析工作流
-│       │   ├── AuditReportWorkflow.tsx # 审计报告复核工作流
-│       │   ├── DocumentEditor.tsx     # 文档编辑器
-│       │   ├── SectionEditor.tsx      # 章节编辑器
+│       │   ├── ModelSelector.tsx      # 模型选择器
+│       │   ├── StepBar.tsx            # 步骤指示器
+│       │   ├── # ── 底稿智能复核（四步） ──
+│       │   ├── ReviewWorkflow.tsx     # 复核工作流容器
+│       │   ├── WorkpaperUpload.tsx    # 底稿上传
+│       │   ├── PromptSelector.tsx     # 提示词选择
+│       │   ├── ReviewDimensionConfig.tsx # 维度配置
+│       │   ├── SupplementaryUpload.tsx # 补充材料上传
+│       │   ├── ReviewConfirmation.tsx # 复核确认
+│       │   ├── ReviewReport.tsx       # 复核报告展示
+│       │   ├── CrossReferenceGraph.tsx # 交叉引用关系图
+│       │   ├── # ── 审计文档生成（四步） ──
+│       │   ├── GenerateWorkflow.tsx   # 文档生成工作流容器
+│       │   ├── TemplateSelector.tsx   # 模板上传与配置
+│       │   ├── TemplateOutlineEditor.tsx # 大纲可视化编辑
+│       │   ├── DocumentEditor.tsx     # 文档编辑器（批量/逐章节/停止）
+│       │   ├── SectionEditor.tsx      # 章节编辑器（AI 对话修改+选中文本）
+│       │   ├── ExportPanel.tsx        # 导出面板
+│       │   ├── FontSettings.tsx       # 字体设置
+│       │   ├── # ── 文档分析（四步） ──
+│       │   ├── AnalysisWorkflow.tsx   # 文档分析工作流容器
+│       │   ├── # ── 审计报告复核（五步） ──
+│       │   ├── AuditReportWorkflow.tsx # 审计报告复核工作流容器
+│       │   ├── AuditReportUpload.tsx  # 报告上传
+│       │   ├── AccountMatchingView.tsx # 科目对照确认
+│       │   ├── AuditReportConfig.tsx  # 复核配置
+│       │   ├── FindingConfirmationView.tsx # 问题确认（两级折叠分组）
+│       │   ├── FindingDetailPanel.tsx # 问题详情面板
+│       │   ├── AuditReportResult.tsx  # 复核报告展示与导出
+│       │   ├── SourceDocPreview.tsx   # 源文档预览
+│       │   ├── TemplateEditorView.tsx # 模板编辑视图
+│       │   ├── # ── 知识库与项目 ──
 │       │   ├── KnowledgePanel.tsx     # 知识库面板
+│       │   ├── KnowledgeSearchPanel.tsx # 知识库搜索
 │       │   ├── ProjectPanel.tsx       # 项目管理面板
-│       │   └── ...                    # 其他组件
+│       │   └── WebSearchPanel.tsx     # 网络搜索面板
 │       ├── pages/                     # 页面组件
 │       │   ├── DocumentAnalysis.tsx   # 文档分析页
 │       │   ├── OutlineEdit.tsx        # 大纲编辑页
@@ -315,6 +385,9 @@ GT_digao/
 │       ├── hooks/useAppState.ts       # 全局状态管理
 │       ├── services/api.ts            # API 封装
 │       ├── types/                     # TypeScript 类型定义
+│       │   ├── audit.ts               # 审计相关类型
+│       │   ├── analysis.ts            # 文档分析类型
+│       │   └── index.ts               # 类型导出
 │       ├── utils/                     # 工具函数
 │       │   ├── auditStorage.ts        # IndexedDB 缓存
 │       │   ├── draftStorage.ts        # 草稿存储
@@ -322,8 +395,8 @@ GT_digao/
 │       └── styles/gt-design-tokens.css # GT 设计系统 Token
 ├── TSJ/                               # 预置提示词库（~70个 Markdown 文件）
 ├── MinerU/                            # MinerU PDF 解析工具（可选）
-│   ├── mineru_env/                    # MinerU Python 虚拟环境
 │   ├── web_ui.py                      # Web 界面
+│   ├── fix_md_tables.py               # Markdown 表格修复脚本
 │   └── 启动Web界面.bat
 ├── GT_底稿/                            # 审计底稿模板与操作手册
 │   ├── D销售循环/ ~ M权益循环/         # 各业务循环底稿模板

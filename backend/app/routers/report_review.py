@@ -635,7 +635,16 @@ async def start_review(req: StartReviewRequest):
             import traceback
             tb = traceback.format_exc()
             logger.error("复核流异常: %s\n%s", exc, tb)
-            err_msg = json.dumps({"status": "error", "message": f"复核过程出错: {exc}"}, ensure_ascii=False)
+            # 提取最后一个文件行号信息，帮助定位问题
+            tb_lines = tb.strip().split("\n")
+            # 找到最后一个 "File" 行（最内层调用）
+            loc_hint = ""
+            for tl in reversed(tb_lines):
+                tl_stripped = tl.strip()
+                if tl_stripped.startswith("File "):
+                    loc_hint = f" [{tl_stripped}]"
+                    break
+            err_msg = json.dumps({"status": "error", "message": f"复核过程出错: {exc}{loc_hint}"}, ensure_ascii=False)
             yield f"data: {err_msg}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

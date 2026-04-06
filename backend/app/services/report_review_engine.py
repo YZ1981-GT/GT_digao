@@ -567,6 +567,11 @@ class ReportReviewEngine:
                                 break
                     if not has_balance or not best_item:
                         continue
+                    _desc_parts = []
+                    if best_item.closing_balance is not None:
+                        _desc_parts.append(f"期末余额 {best_item.closing_balance:,.2f}")
+                    if best_item.opening_balance is not None and best_item.opening_balance != 0:
+                        _desc_parts.append(f"期初余额 {best_item.opening_balance:,.2f}")
                     all_findings.append(ReportReviewFinding(
                         id=str(uuid.uuid4())[:8],
                         category=ReportReviewFindingCategory.NOTE_MISSING,
@@ -575,8 +580,7 @@ class ReportReviewEngine:
                         statement_amount=best_item.closing_balance,
                         location=f"{label}-{best_item.sheet_name}-{acct_name}",
                         description=(
-                            f"科目「{acct_name}」期末余额 {best_item.closing_balance:,.2f}"
-                            + (f"、期初余额 {best_item.opening_balance:,.2f}" if best_item.opening_balance else "")
+                            f"科目「{acct_name}」{'、'.join(_desc_parts)}"
                             + "，但未找到对应的附注披露。根据会计准则要求，有余额的报表科目应在附注中进行充分披露。"
                         ),
                         suggestion=f"请补充「{acct_name}」的附注披露内容，包括明细构成、期初期末变动等信息。",
@@ -607,100 +611,108 @@ class ReportReviewEngine:
             for note in session.note_tables:
                 ts = table_structures.get(note.id)
                 if ts:
-                    note_findings: List[ReportReviewFinding] = []
-                    note_match: Dict[str, bool] = {}
+                    try:
+                        note_findings: List[ReportReviewFinding] = []
+                        note_match: Dict[str, bool] = {}
 
-                    if ts.total_row_indices:
-                        integrity_check_count += 1
-                        integrity_f = self.reconciliation.check_note_table_integrity(note, ts)
-                        if not integrity_f:
-                            integrity_match_count += 1
-                            note_match["integrity"] = True
-                        else:
-                            note_match["integrity"] = False
-                        note_findings.extend(integrity_f)
-
-                    if ts.has_balance_formula:
-                        # 如果该表格有宽表预设匹配，跳过简单余额变动公式校验，
-                        # 后续宽表横向公式校验会用更精确的预设列语义处理
-                        _has_preset = self.table_analyzer.try_build_formula_from_preset(note) is not None
-                        if _has_preset:
-                            pass  # 跳过，由宽表公式校验接管
-                        else:
-                            formula_check_count += 1
-                            formula_f = self.reconciliation.check_balance_formula(note, ts)
-                            if not formula_f:
-                                formula_match_count += 1
-                                note_match["formula"] = True
+                        if ts.total_row_indices:
+                            integrity_check_count += 1
+                            integrity_f = self.reconciliation.check_note_table_integrity(note, ts)
+                            if not integrity_f:
+                                integrity_match_count += 1
+                                note_match["integrity"] = True
                             else:
-                                note_match["formula"] = False
-                            note_findings.extend(formula_f)
+                                note_match["integrity"] = False
+                            note_findings.extend(integrity_f)
 
-                    has_sub = any(r.role == "sub_item" for r in ts.rows)
-                    if has_sub:
-                        sub_item_check_count += 1
-                        sub_f = self.reconciliation.check_sub_items(note, ts)
-                        if not sub_f:
-                            sub_item_match_count += 1
-                            note_match["sub_item"] = True
-                        else:
-                            note_match["sub_item"] = False
-                        note_findings.extend(sub_f)
+                        if ts.has_balance_formula:
+                            # 如果该表格有宽表预设匹配，跳过简单余额变动公式校验，
+                            # 后续宽表横向公式校验会用更精确的预设列语义处理
+                            _has_preset = self.table_analyzer.try_build_formula_from_preset(note) is not None
+                            if _has_preset:
+                                pass  # 跳过，由宽表公式校验接管
+                            else:
+                                formula_check_count += 1
+                                formula_f = self.reconciliation.check_balance_formula(note, ts)
+                                if not formula_f:
+                                    formula_match_count += 1
+                                    note_match["formula"] = True
+                                else:
+                                    note_match["formula"] = False
+                                note_findings.extend(formula_f)
 
-                    ratio_f = self.reconciliation.check_ratio_columns(note, ts)
-                    note_findings.extend(ratio_f)
+                        has_sub = any(r.role == "sub_item" for r in ts.rows)
+                        if has_sub:
+                            sub_item_check_count += 1
+                            sub_f = self.reconciliation.check_sub_items(note, ts)
+                            if not sub_f:
+                                sub_item_match_count += 1
+                                note_match["sub_item"] = True
+                            else:
+                                note_match["sub_item"] = False
+                            note_findings.extend(sub_f)
 
-                    # 账龄衔接校验
-                    if self.reconciliation._is_aging_table(note):
-                        aging_check_count += 1
-                        aging_f = self.reconciliation.check_aging_transition(note, ts)
-                        if not aging_f:
-                            aging_match_count += 1
-                        note_findings.extend(aging_f)
+                        ratio_f = self.reconciliation.check_ratio_columns(note, ts)
+                        note_findings.extend(ratio_f)
 
-                    # 纵向勾稽（账面余额 - 准备 = 账面价值）
-                    bv_f = self.reconciliation.check_book_value_formula(note, ts)
-                    if bv_f:
-                        book_value_check_count += 1
-                    else:
-                        # 只有实际执行了校验才计数（方法内部判断是否适用）
-                        _bv_applicable = len(note.headers or []) >= 3
-                        if _bv_applicable:
+                        # 账龄衔接校验
+                        if self.reconciliation._is_aging_table(note):
+                            aging_check_count += 1
+                            aging_f = self.reconciliation.check_aging_transition(note, ts)
+                            if not aging_f:
+                                aging_match_count += 1
+                            note_findings.extend(aging_f)
+
+                        # 纵向勾稽（账面余额 - 准备 = 账面价值）
+                        bv_f = self.reconciliation.check_book_value_formula(note, ts)
+                        if bv_f:
                             book_value_check_count += 1
-                            book_value_match_count += 1
-                    note_findings.extend(bv_f)
+                        else:
+                            # 只有实际执行了校验才计数（方法内部判断是否适用）
+                            _bv_applicable = len(note.headers or []) >= 3
+                            if _bv_applicable:
+                                book_value_check_count += 1
+                                book_value_match_count += 1
+                        note_findings.extend(bv_f)
 
-                    # 完整性校验（金额非零时文本列不应为空）
-                    comp_f = self.reconciliation.check_data_completeness(note, ts)
-                    if comp_f:
-                        completeness_check_count += 1
-                    note_findings.extend(comp_f)
+                        # 完整性校验（金额非零时文本列不应为空）
+                        comp_f = self.reconciliation.check_data_completeness(note, ts)
+                        if comp_f:
+                            completeness_check_count += 1
+                        note_findings.extend(comp_f)
 
-                    # 三阶段ECL表校验（横向：各阶段之和=合计；纵向：期初+变动=期末）
-                    ecl_f = self.reconciliation.check_ecl_three_stage_table(note, ts)
-                    note_findings.extend(ecl_f)
+                        # 三阶段ECL表校验（横向：各阶段之和=合计；纵向：期初+变动=期末）
+                        ecl_f = self.reconciliation.check_ecl_three_stage_table(note, ts)
+                        note_findings.extend(ecl_f)
 
-                    # 未分配利润专用校验
-                    if self.reconciliation._is_undistributed_profit_table(note):
-                        udp_f = self.reconciliation.check_undistributed_profit(note, ts)
-                        note_findings.extend(udp_f)
+                        # 未分配利润专用校验
+                        if self.reconciliation._is_undistributed_profit_table(note):
+                            udp_f = self.reconciliation.check_undistributed_profit(note, ts)
+                            note_findings.extend(udp_f)
 
-                    # 财务费用明细纵向校验 (F64-3)
-                    fe_f = self.reconciliation.check_financial_expense_detail(note, ts)
-                    note_findings.extend(fe_f)
+                        # 财务费用明细纵向校验 (F64-3)
+                        fe_f = self.reconciliation.check_financial_expense_detail(note, ts)
+                        note_findings.extend(fe_f)
 
-                    # 设定受益计划变动表校验 (F49-5~10a)
-                    bp_f = self.reconciliation.check_benefit_plan_movement(note, ts)
-                    note_findings.extend(bp_f)
+                        # 设定受益计划变动表校验 (F49-5~10a)
+                        bp_f = self.reconciliation.check_benefit_plan_movement(note, ts)
+                        note_findings.extend(bp_f)
 
-                    # 股本/实收资本小计列校验 (F53-3a)
-                    eq_f = self.reconciliation.check_equity_subtotal_detail(note, ts)
-                    note_findings.extend(eq_f)
+                        # 股本/实收资本小计列校验 (F53-3a)
+                        eq_f = self.reconciliation.check_equity_subtotal_detail(note, ts)
+                        note_findings.extend(eq_f)
 
-                    _first_pass_match[note.id] = note_match
-                    if note_findings:
-                        local_error_note_ids.add(note.id)
-                    _first_pass_findings.extend(note_findings)
+                        _first_pass_match[note.id] = note_match
+                        if note_findings:
+                            local_error_note_ids.add(note.id)
+                        _first_pass_findings.extend(note_findings)
+                    except Exception as _note_exc:
+                        logger.error(
+                            "第一轮本地校验异常 note_id=%s account=%s section=%s: %s",
+                            note.id, note.account_name, note.section_title, _note_exc,
+                            exc_info=True,
+                        )
+                        raise
 
             # ── 统一 LLM 反馈循环：合并金额不一致 + 本地校验失败的表格，一次性 LLM reanalyze ──
             all_problem_note_ids = mismatch_note_ids | local_error_note_ids
@@ -947,6 +959,7 @@ class ReportReviewEngine:
             # ── 跨表交叉核对（同科目下多表之间的一致性校验）──
             cross_table_findings = self.reconciliation.check_cross_table_consistency(
                 session.note_tables, table_structures,
+                note_sections=session.note_sections,
             )
             cross_table_check_count = len(cross_table_findings)  # 发现的问题数即为校验点数的近似
             all_findings.extend(cross_table_findings)
@@ -969,6 +982,7 @@ class ReportReviewEngine:
             # ── 权益法投资损益跨科目交叉核对 ──
             equity_income_findings = self.reconciliation.check_equity_method_income_consistency(
                 session.statement_items, session.note_tables, table_structures,
+                note_sections=session.note_sections,
             )
             cross_table_check_count += len(equity_income_findings)
             all_findings.extend(equity_income_findings)
@@ -1002,6 +1016,20 @@ class ReportReviewEngine:
             )
             cross_table_check_count += len(surplus_findings)
             all_findings.extend(surplus_findings)
+
+            # ── 发放贷款及垫款专项校验 ──
+            loan_findings = self.reconciliation.check_loan_and_advance(
+                session.statement_items, session.note_tables, session.matching_map,
+            )
+            cross_table_check_count += len(loan_findings)
+            all_findings.extend(loan_findings)
+
+            # ── 应收股利专项校验 ──
+            dividend_findings = self.reconciliation.check_dividend_receivable(
+                session.note_tables,
+            )
+            cross_table_check_count += len(dividend_findings)
+            all_findings.extend(dividend_findings)
 
             # ── 货币资金vs现金等价物 / 一年内到期vs各长期科目 (X-10, X-11, X-12) ──
             maturity_findings = self.reconciliation.check_maturity_reclassification(
@@ -1218,17 +1246,20 @@ class ReportReviewEngine:
                         loc = f"附注-{chg.account_name}-{'、'.join(note_names[:2])}"
                     else:
                         loc = f"报表-{chg.account_name}"
+                    _ob = chg.opening_balance if chg.opening_balance is not None else 0
+                    _cb = chg.closing_balance if chg.closing_balance is not None else 0
+                    _ca = chg.change_amount if chg.change_amount is not None else 0
                     change_findings.append(ReportReviewFinding(
                         id=str(uuid.uuid4())[:8],
                         category=ReportReviewFindingCategory.CHANGE_ABNORMAL,
                         risk_level=RiskLevel.MEDIUM if abs(chg.change_percentage) > 1.0 else RiskLevel.LOW,
                         account_name=chg.account_name,
                         location=loc,
-                        description=f"'{chg.account_name}'整体变动 {pct_str}（期初 {chg.opening_balance:,.2f} → 期末 {chg.closing_balance:,.2f}，变动 {chg.change_amount:,.2f}），超过阈值 {threshold_pct}%",
+                        description=f"'{chg.account_name}'整体变动 {pct_str}（期初 {_ob:,.2f} → 期末 {_cb:,.2f}，变动 {_ca:,.2f}），超过阈值 {threshold_pct}%",
                         suggestion=f"请关注'{chg.account_name}'大幅变动的原因，核实变动合理性",
                         statement_amount=chg.opening_balance,
                         note_amount=chg.closing_balance,
-                        difference=round(chg.change_amount, 2),
+                        difference=round(_ca, 2),
                         analysis_reasoning=f"变动率 {pct_str} 超过阈值 {threshold_pct}%",
                         note_table_ids=nids,
                         confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
