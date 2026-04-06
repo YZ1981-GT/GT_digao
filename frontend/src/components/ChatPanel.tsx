@@ -38,13 +38,13 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onSelectMode }) => {
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
   const resizeRef = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null);
 
-  // 默认尺寸：页面宽度的 1/4，高度 4/5，最小 380x450
+  // 默认尺寸：页面宽度的 1/4，高度 100%（满屏高），最小 380x450
   const defaultW = Math.max(380, Math.floor(window.innerWidth / 4));
-  const defaultH = Math.max(450, Math.floor(window.innerHeight * 0.8));
+  const defaultH = window.innerHeight;
   const panelW = panelSize.w || defaultW;
   const panelH = panelSize.h || defaultH;
-  const panelX = panelPos.x >= 0 ? panelPos.x : Math.max(0, window.innerWidth - panelW - 24);
-  const panelY = panelPos.y >= 0 ? panelPos.y : Math.max(0, window.innerHeight - panelH - 24);
+  const panelX = panelPos.x >= 0 ? panelPos.x : Math.max(0, window.innerWidth - panelW);
+  const panelY = panelPos.y >= 0 ? panelPos.y : 0;
 
   const [currentModel, setCurrentModel] = useState('');
   const [exportMode, setExportMode] = useState(false);
