@@ -303,7 +303,7 @@ GT_digao/
 │   │   │   ├── file_service.py        # 文件服务
 │   │   │   ├── # ── 审计报告复核 ──
 │   │   │   ├── report_parser.py       # 报告解析器（2000+行，报表/附注表格/章节提取）
-│   │   │   ├── reconciliation_engine.py # 对账引擎（25000+行，30+种数值校验）
+│   │   │   ├── reconciliation_engine.py # 对账引擎（8700+行，30+种数值校验）
 │   │   │   ├── report_review_engine.py  # 报告复核引擎（SSE 复核调度）
 │   │   │   ├── report_body_reviewer.py  # 正文 LLM 复核（名称一致性/简称/模板比对）
 │   │   │   ├── note_content_reviewer.py # 附注 LLM 复核（表达通顺性/政策模板比对）
@@ -332,7 +332,7 @@ GT_digao/
 │   ├── data/
 │   │   ├── model_context_limits.json  # 各模型上下文长度限制
 │   │   └── sessions/                  # 审计报告复核会话数据
-│   ├── tests/                         # 测试（22个测试文件）
+│   ├── tests/                         # 测试（23个测试文件）
 │   ├── requirements.txt               # Python 依赖
 │   ├── run.py                         # 启动脚本
 │   └── .env.example                   # 环境变量示例
