@@ -15,6 +15,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   NoteTable, NoteSection, MatchingMap, StatementItem,
+  UNIT_LABEL_BY_MULTIPLIER,
 } from '../types/audit';
 
 const API = process.env.REACT_APP_API_URL || (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:9980');
@@ -1599,7 +1600,14 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
             alignItems: 'center',
             borderTop: idx > 0 ? `1px solid ${GT.primary}30` : undefined,
           }}>
-            <span style={{ fontWeight: 700, color: GT.primary, fontSize: 12 }}>📊 {entry.label}</span>
+            <span style={{ fontWeight: 700, color: GT.primary, fontSize: 12 }}>
+              📊 {entry.label}
+              {UNIT_LABEL_BY_MULTIPLIER[entry.si.source_unit_multiplier ?? 1] && (
+                <span style={{ fontWeight: 400, marginLeft: 4 }}>
+                  （单位：{UNIT_LABEL_BY_MULTIPLIER[entry.si.source_unit_multiplier ?? 1]}）
+                </span>
+              )}
+            </span>
             <span style={{ color: GT.primary, fontWeight: 600 }}>
               期末/本期：<span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(stmtClosing)}</span>
             </span>
@@ -1704,7 +1712,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
           <span style={{
             display: 'inline-block', margin: '4px 0', padding: '1px 8px', borderRadius: 10,
             fontSize: 12, color: GT.primary, background: GT.primaryBg,
-          }}>金额单位：{nt.unit_label}（核对时已折算为元）</span>
+          }}>金额单位：{nt.unit_label}（与报表核对时折算为元）</span>
           {baseTableEl}
         </div>
       ) : baseTableEl;

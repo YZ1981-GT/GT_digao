@@ -552,8 +552,18 @@ export interface StatementItem {
   parent_id?: string;
   is_sub_item: boolean;
   row_index: number;
+  /** 来源 Sheet 金额单位倍率（余额按原单位保存，×倍率=元） */
+  source_unit_multiplier?: number;
   parse_warnings: string[];
 }
+
+/** 非"元"单位倍率 → 单位名称（倍率为1或未知时无标注） */
+export const UNIT_LABEL_BY_MULTIPLIER: Record<number, string> = {
+  1000: '千元',
+  10000: '万元',
+  1000000: '百万元',
+  100000000: '亿元',
+};
 
 /** 附注表格（Req 2.3） */
 export interface NoteTable {
