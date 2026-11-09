@@ -78,6 +78,13 @@ def _safe_float(val) -> Optional[float]:
         pass
     return None
 
+def _scale_note(note, val: Optional[float]) -> Optional[float]:
+    """按附注表格声明的金额单位把数值折算为元；未声明或倍率为1时原样返回。"""
+    if val is None:
+        return None
+    mul = getattr(note, "unit_multiplier", 1.0) or 1.0
+    return val if mul == 1.0 else val * mul
+
 def _amounts_equal(a: Optional[float], b: Optional[float]) -> bool:
 
     if a is None or b is None:
@@ -1020,6 +1027,7 @@ class ReconciliationEngine:
                     if _note_val is None:
                         _rule_c, _rule_o = self._extract_note_totals_by_rules(note)
                         _note_val = _rule_c
+                    _note_val = _scale_note(note, _note_val)
                     if _note_val is not None:
                         _diff_cons = abs(_note_val - (item.closing_balance or 0))
                         _diff_comp = abs(_note_val - (item.company_closing_balance or 0))
@@ -1035,6 +1043,7 @@ class ReconciliationEngine:
                                 if _note_opening_val is None:
                                     _r_c, _r_o = self._extract_note_totals_by_rules(note)
                                     _note_opening_val = _r_o
+                                _note_opening_val = _scale_note(note, _note_opening_val)
                                 if _note_opening_val is not None:
                                     # 期初值与合并期初一致 → 这是合并附注，不是母公司
                                     if (_amounts_equal(_note_opening_val, item.opening_balance)
@@ -1145,6 +1154,9 @@ class ReconciliationEngine:
                     note_closing = self._get_cell_value(note, ts.closing_balance_cell)
                 if note_opening is None:
                     note_opening = self._get_cell_value(note, ts.opening_balance_cell)
+                # 附注按其声明单位折算为元，与报表金额同口径比较
+                note_closing = _scale_note(note, note_closing)
+                note_opening = _scale_note(note, note_opening)
                 if note_closing is not None:
                     scope_any_closing_found[scope_key] = True
                 if note_opening is not None:
@@ -1232,6 +1244,8 @@ class ReconciliationEngine:
                         n_c = r_c
                     if n_o is None and r_o is not None:
                         n_o = r_o
+                    n_c = _scale_note(note, n_c)
+                    n_o = _scale_note(note, n_o)
                     # 跳过与合并余额一致的附注（明确是合并口径，不应用母公司余额比对）
                     if (_amounts_equal(n_c, item.closing_balance)
                             and _amounts_equal(n_o, item.opening_balance)):

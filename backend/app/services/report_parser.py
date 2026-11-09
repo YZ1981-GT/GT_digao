@@ -30,6 +30,30 @@ from .heading_utils import (
 
 logger = logging.getLogger(__name__)
 
+# 金额单位 → 换算为「元」的倍率（长词在前，避免「百万元」被「万元」截断）
+_UNIT_MULTIPLIERS: Dict[str, float] = {
+    "百万元": 1e6, "亿元": 1e8, "万元": 1e4, "千元": 1e3, "元": 1.0,
+}
+_UNIT_PATTERN = re.compile(
+    r'单位\s*[为是]?\s*[:：]?\s*(?:人民币|RMB)?\s*(百万元|亿元|万元|千元|元)'
+)
+
+
+def detect_amount_unit(texts: List[str]) -> Tuple[str, float]:
+    """从一组文本（表头前的行/表格前的段落）中识别金额单位。
+
+    只认「单位：xx / 金额单位为人民币xx」这类显式声明，避免正文里的「万元」误判。
+    返回 (单位原文, 换算为元的倍率)；未识别返回 ("", 1.0)。
+    """
+    for text in texts:
+        if not text:
+            continue
+        m = _UNIT_PATTERN.search(str(text))
+        if m:
+            label = m.group(1)
+            return label, _UNIT_MULTIPLIERS[label]
+    return "", 1.0
+
 
 class ReportParser(WorkpaperParser):
     """审计报告文件解析服务，继承 WorkpaperParser 的文件解析能力。"""
@@ -490,6 +514,13 @@ class ReportParser(WorkpaperParser):
                 merged_headers = merged_headers[:data_col_end]
                 header_rows_raw = [row[:data_col_end] for row in header_rows_raw]
 
+            # 金额单位：扫描表头及其之前的行（标题/编制单位/单位声明通常在表头上方）
+            _unit_texts = [
+                str(v) for row_vals in all_row_values[:header_end_idx + 1]
+                for v in row_vals if v is not None
+            ]
+            unit_label, unit_multiplier = detect_amount_unit(_unit_texts)
+
             sheets.append(ReportSheetData(
                 sheet_name=sheet_name,
                 statement_type=statement_type,
@@ -500,6 +531,8 @@ class ReportParser(WorkpaperParser):
                 is_consolidated=is_consolidated,
                 column_map=column_map,
                 data_col_end=data_col_end,
+                unit_label=unit_label,
+                unit_multiplier=unit_multiplier,
             ))
 
         # ── 续表继承：如果续表未检测到合并列结构，从同类型主表继承 ──
@@ -526,6 +559,18 @@ class ReportParser(WorkpaperParser):
                             f"[extract_sheets] Continuation sheet '{sd.sheet_name}' "
                             f"inherited column_map from '{main.sheet_name}': {sd.column_map}"
                         )
+
+        # ── 续表单位继承：续表通常没有单位声明，沿用同类型主表的单位 ──
+        unit_by_type: Dict[str, ReportSheetData] = {}
+        for sd in sheets:
+            if '续' not in sd.sheet_name.replace(' ', '') and sd.unit_label:
+                unit_by_type[sd.statement_type] = sd
+        for sd in sheets:
+            if '续' in sd.sheet_name.replace(' ', '') and not sd.unit_label:
+                main = unit_by_type.get(sd.statement_type)
+                if main:
+                    sd.unit_label = main.unit_label
+                    sd.unit_multiplier = main.unit_multiplier
 
         return sheets
 
@@ -1004,6 +1049,17 @@ class ReportParser(WorkpaperParser):
                 company_opening = None
                 company_closing = None
 
+            # 统一换算为「元」：raw_data 保持原值，仅结构化金额按 Sheet 声明的单位折算
+            _mul = getattr(sheet_data, 'unit_multiplier', 1.0) or 1.0
+            if _mul != 1.0:
+                opening_balance = None if opening_balance is None else opening_balance * _mul
+                closing_balance = None if closing_balance is None else closing_balance * _mul
+                company_opening = None if company_opening is None else company_opening * _mul
+                company_closing = None if company_closing is None else company_closing * _mul
+                warnings = list(warnings) + [
+                    f"金额单位为{sheet_data.unit_label}，已按×{_mul:g}折算为元"
+                ]
+
             item = StatementItem(
                 id=item_id,
                 account_name=account_name.strip(),
@@ -1076,6 +1132,14 @@ class ReportParser(WorkpaperParser):
 
         # ── 定位附注正文起始段落索引 ──
         _notes_start_pi = self.detect_notes_start_index(word_result.paragraphs)
+
+        # 全文默认金额单位：附注前言常见「除特别注明外，金额单位为人民币元」，
+        # 仅在附注正文起始之后的前若干段中查找，作为表格自身无声明时的回退
+        _scan_from = max(_notes_start_pi, 0)
+        _doc_default_unit = detect_amount_unit([
+            p.get('text', '') for p in word_result.paragraphs[_scan_from:_scan_from + 60]
+            if '除特别注明' in p.get('text', '') or '除特殊注明' in p.get('text', '')
+        ])
 
         # 从段落中构建科目标题索引
         # 匹配 "1、货币资金" "2、应收票据" "(1) 应收票据分类" 等格式
@@ -1194,6 +1258,22 @@ class ReportParser(WorkpaperParser):
 
             account_name, section_title, sub_title = _find_account_title(table_idx)
 
+            # 金额单位：表格前最近几个非空段落 + 表格首行；都没有则用全文默认单位
+            _unit_texts: List[str] = []
+            _tpi_u = -1
+            if (getattr(word_result, 'table_after_para_idx', None)
+                    and table_idx < len(word_result.table_after_para_idx)):
+                _tpi_u = word_result.table_after_para_idx[table_idx]
+            if 0 <= _tpi_u < len(word_result.paragraphs):
+                for _pi in range(_tpi_u, max(_tpi_u - 4, -1), -1):
+                    _t = word_result.paragraphs[_pi].get('text', '').strip()
+                    if _t:
+                        _unit_texts.append(_t)
+            _unit_texts.extend(str(c) for c in table_data[0] if c)
+            unit_label, unit_multiplier = detect_amount_unit(_unit_texts)
+            if not unit_label:
+                unit_label, unit_multiplier = _doc_default_unit
+
             # section_title 优先用紧邻段落，如果紧邻段落为空则用科目名
             if not section_title:
                 section_title = account_name
@@ -1223,6 +1303,8 @@ class ReportParser(WorkpaperParser):
                 header_rows=header_rows_raw,
                 rows=rows,
                 source_location=f"表格 {table_idx + 1}",
+                unit_label=unit_label,
+                unit_multiplier=unit_multiplier,
             ))
 
         return note_tables
