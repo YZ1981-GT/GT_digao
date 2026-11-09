@@ -522,6 +522,15 @@ class ReportReviewEngine:
             amount_match_count = amount_check_count - amount_mismatch_accounts
             all_findings.extend(amount_findings)
 
+            # ── 金额单位一致性提示（低风险）：说明折算依据及无法折算的盲区 ──
+            try:
+                _all_sheets = [sd for sheets in session.sheet_data.values() for sd in sheets]
+                all_findings.extend(
+                    self.reconciliation.check_unit_consistency(_all_sheets, session.note_tables)
+                )
+            except Exception as _unit_err:
+                logger.warning("金额单位一致性检查失败: %s", _unit_err)
+
             # ── 附注缺失检查：基于预设1级科目清单 ──
             # 只检查预设科目清单中的科目，而非遍历所有 unmatched_items
             from .account_mapping_template import account_mapping_template

@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 _UNIT_MULTIPLIERS: Dict[str, float] = {
     "百万元": 1e6, "亿元": 1e8, "万元": 1e4, "千元": 1e3, "元": 1.0,
 }
+# 排除「编制单位：」（公司名可能以「元」开头）；单位词后不能紧跟汉字，避免「元泰公司」之类误命中
 _UNIT_PATTERN = re.compile(
-    r'单位\s*[为是]?\s*[:：]?\s*(?:人民币|RMB)?\s*(百万元|亿元|万元|千元|元)'
+    r'(?<!编制)单位\s*[为是]?\s*[:：]?\s*(?:人民币|RMB)?\s*(百万元|亿元|万元|千元|元)(?![\u4e00-\u9fff])'
 )
 
 
@@ -1073,6 +1074,7 @@ class ReportParser(WorkpaperParser):
                 parent_id=current_parent_id if is_sub else None,
                 is_sub_item=is_sub,
                 row_index=row_idx,
+                source_unit_multiplier=_mul,
                 parse_warnings=warnings,
             )
             items.append(item)
@@ -2115,6 +2117,33 @@ class ReportParser(WorkpaperParser):
 
         # 没匹配到科目关键词，截断返回
         return long_text[:30] + "…"
+
+    @staticmethod
+    def _extract_pdf_table_units(pdf_text: str) -> List[Tuple[str, float]]:
+        """从 PDF 文本中提取每个 [表格 N] 标记对应的金额单位。
+
+        向上回溯至多 9 行（遇到上一表格的 [表格结束] 即停止），取最近的显式单位声明；
+        未命中时回退到全文「除特别注明…金额单位…」默认单位。未识别返回 ("", 1.0)。
+        """
+        lines = pdf_text.splitlines()
+        table_marker_pat = re.compile(r'^\[表格\s*\d+\]')
+        doc_default = detect_amount_unit([
+            ln for ln in lines if '除特别注明' in ln or '除特殊注明' in ln
+        ])
+        units: List[Tuple[str, float]] = []
+        for i, line in enumerate(lines):
+            if not table_marker_pat.match(line.strip()):
+                continue
+            nearby: List[str] = []
+            for j in range(i - 1, max(i - 10, -1), -1):
+                prev = lines[j].strip()
+                if prev.startswith('[表格结束]'):
+                    break
+                if prev:
+                    nearby.append(prev)
+            label, mul = detect_amount_unit(nearby)
+            units.append((label, mul) if label else doc_default)
+        return units
 
     @staticmethod
     def _extract_pdf_table_titles(pdf_text: str) -> List[str]:
