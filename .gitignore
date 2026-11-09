@@ -250,3 +250,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 模块状态快照（review/generate/analysis 运行时数据）
+backend/data/snapshots/

@@ -20,6 +20,7 @@ from ..models.analysis_schemas import (
     AnalysisDocumentInfo,
     AnalysisMode,
     AnalysisProject,
+    AnalysisSourceRef,
     AnalysisUploadResponse,
     ConfirmOutlineRequest,
     FormatDocumentRequest,
@@ -29,6 +30,7 @@ from ..models.analysis_schemas import (
     UpdateDocumentRequest,
     ANALYSIS_MODE_CONFIG,
 )
+from ..services import json_snapshot as snapshot
 from ..services.analysis_service import analysis_service
 from ..services.workpaper_parser import WorkpaperParser
 from ..services.ocr_service import ocr_service, OCRService
@@ -41,9 +43,44 @@ router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 # 复用已有的文件解析器
 workpaper_parser = WorkpaperParser()
 
-# In-memory stores
+# In-memory stores（启动时从 data/snapshots 恢复，变更后写回快照）
 _analysis_documents: dict = {}   # doc_id -> AnalysisDocumentInfo
 _analysis_projects: dict = {}    # project_id -> AnalysisProject
+
+_NS_DOCS = "analysis_documents"
+_NS_PROJECTS = "analysis_projects"
+
+
+def _doc_to_dict(doc: AnalysisDocumentInfo) -> dict:
+    """序列化文档；original_file_path 在模型里 exclude=True，需手动补回才能在重启后预览原件。"""
+    data = doc.model_dump(mode="json")
+    data["original_file_path"] = doc.original_file_path
+    return data
+
+
+def _persist_doc(doc: AnalysisDocumentInfo) -> None:
+    snapshot.save(_NS_DOCS, doc.id, _doc_to_dict(doc))
+
+
+def _persist_project(project: AnalysisProject) -> None:
+    data = project.model_dump(mode="json")
+    data["documents"] = [_doc_to_dict(d) for d in project.documents]
+    snapshot.save(_NS_PROJECTS, project.id, data)
+
+
+def _restore_state() -> None:
+    _analysis_documents.update(
+        snapshot.load_all(_NS_DOCS, lambda d: AnalysisDocumentInfo(**d))
+    )
+    _analysis_projects.update(
+        snapshot.load_all(_NS_PROJECTS, lambda d: AnalysisProject(**d))
+    )
+    if _analysis_documents or _analysis_projects:
+        logger.info("文档分析状态已恢复: %d 个文档, %d 个项目",
+                    len(_analysis_documents), len(_analysis_projects))
+
+
+_restore_state()
 
 
 @router.post("/upload")
@@ -107,6 +144,7 @@ async def upload_document(file: UploadFile = File(...)):
                     original_file_path=persistent_path,
                 )
                 _analysis_documents[doc_id] = doc
+                _persist_doc(doc)
                 return {"success": True, "message": "文档上传成功", "document": doc.model_dump()}
 
             # ─── 图片文件 → 纯 OCR ───
@@ -123,6 +161,7 @@ async def upload_document(file: UploadFile = File(...)):
                     original_file_path=persistent_path,
                 )
                 _analysis_documents[doc_id] = doc
+                _persist_doc(doc)
                 msg = f"文档上传成功（OCR: {ocr_method}）" if content_text else "图片上传成功，但 OCR 未识别到文本"
                 return {"success": True, "message": msg, "document": doc.model_dump()}
 
@@ -198,6 +237,7 @@ async def upload_document(file: UploadFile = File(...)):
             )
 
             _analysis_documents[doc_id] = doc
+            _persist_doc(doc)
             msg = "文档上传成功"
             if ocr_method and ocr_method not in ("direct_text(无需OCR)", "no_images", "unsupported"):
                 msg += f"（OCR: {ocr_method}）"
@@ -229,6 +269,7 @@ async def update_document(doc_id: str, request: UpdateDocumentRequest):
         raise HTTPException(status_code=404, detail="文档不存在")
     doc.content_text = request.content_text
     _analysis_documents[doc_id] = doc
+    _persist_doc(doc)
     return {"success": True, "message": "文档内容已更新"}
 
 
@@ -244,6 +285,7 @@ async def delete_document(doc_id: str):
             pass
     if doc_id in _analysis_documents:
         del _analysis_documents[doc_id]
+    snapshot.delete(_NS_DOCS, doc_id)
     return {"success": True, "message": "文档已删除"}
 
 
@@ -405,6 +447,7 @@ async def create_project(data: dict):
         created_at=datetime.now(timezone.utc).isoformat(),
     )
     _analysis_projects[project_id] = project
+    _persist_project(project)
     return {"success": True, "project_id": project_id}
 
 
@@ -425,6 +468,7 @@ async def generate_outline(request: GenerateOutlineRequest):
     project.mode = request.mode
     project.target_word_count = request.target_word_count
     project.custom_instruction = request.custom_instruction
+    _persist_project(project)
 
     async def stream():
         try:
@@ -465,6 +509,7 @@ async def confirm_outline(request: ConfirmOutlineRequest):
         return result
 
     project.outline = parse_chapters(request.outline)
+    _persist_project(project)
     return {"success": True, "message": "章节框架已确认"}
 
 
@@ -499,6 +544,17 @@ async def generate_chapter(request: GenerateChapterRequest):
                 outline=project.outline,
                 custom_instruction=request.custom_instruction,
             ):
+                # 章节生成完成时把内容/来源写回项目并落盘，导出与重启恢复都依赖 chapter.content
+                if '"status": "completed"' in event:
+                    try:
+                        payload = json.loads(event.split("data: ", 1)[1])
+                        chapter.content = payload.get("content") or chapter.content
+                        chapter.sources = [
+                            AnalysisSourceRef(**s) for s in payload.get("sources", [])
+                        ]
+                        _persist_project(project)
+                    except Exception as persist_err:
+                        logger.warning("章节生成结果落盘失败: %s", persist_err)
                 yield event
         except Exception as e:
             logger.error("章节内容生成失败: %s", e, exc_info=True)
