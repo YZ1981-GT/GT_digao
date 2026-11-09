@@ -78,11 +78,51 @@ def _safe_float(val) -> Optional[float]:
         pass
     return None
 
-def _amounts_equal(a: Optional[float], b: Optional[float]) -> bool:
+def _scale_note(note, val: Optional[float]) -> Optional[float]:
+    """按附注表格声明的金额单位把数值折算为元；未声明或倍率为1时原样返回。"""
+    if val is None:
+        return None
+    mul = getattr(note, "unit_multiplier", 1.0) or 1.0
+    return val if mul == 1.0 else val * mul
+
+# 非元单位报表按保留 2 位小数计：四舍五入误差最多为 0.005 个单位
+_UNIT_ROUNDING = 0.005
+
+
+def _item_in_yuan(item):
+    """返回余额已按来源单位折算为元的 StatementItem 副本；倍率为1时返回原对象。"""
+    mul = getattr(item, "source_unit_multiplier", 1.0) or 1.0
+    if mul == 1.0:
+        return item
+
+    def _s(v):
+        return None if v is None else v * mul
+
+    return item.model_copy(update={
+        "opening_balance": _s(item.opening_balance),
+        "closing_balance": _s(item.closing_balance),
+        "company_opening_balance": _s(item.company_opening_balance),
+        "company_closing_balance": _s(item.company_closing_balance),
+    })
+
+
+def _unit_tolerance(item, note) -> float:
+    """报表与附注比对的容差（元）：按两侧中较粗的来源单位放宽到其四舍五入误差。
+
+    万元报表保留 2 位小数时，误差最多 0.005 万元 = 50 元；两侧均为元时仍为 TOLERANCE。
+    """
+    mul = max(
+        1.0,
+        getattr(item, "source_unit_multiplier", 1.0) or 1.0,
+        getattr(note, "unit_multiplier", 1.0) or 1.0,
+    )
+    return max(TOLERANCE, _UNIT_ROUNDING * mul)
+
+def _amounts_equal(a: Optional[float], b: Optional[float], tol: float = TOLERANCE) -> bool:
 
     if a is None or b is None:
         return a is None and b is None
-    return abs(a - b) < TOLERANCE
+    return abs(a - b) < tol
 
 class ReconciliationEngine:
 
@@ -940,6 +980,9 @@ class ReconciliationEngine:
             item = item_map.get(entry.statement_item_id)
             if not item:
                 continue
+            # 报表余额保持原值（其他跨表规则按原值比较）；仅在本核对中按来源单位折算为元，
+            # 与同样折算为元的附注值比较
+            item = _item_in_yuan(item)
             # 跳过不需要金额核对的科目（汇总行、无附注披露的现金流量表科目等）
             if self._should_skip_amount_check(item):
                 continue
@@ -987,6 +1030,7 @@ class ReconciliationEngine:
                 ts = table_structures.get(note_id)
                 if not note or not ts:
                     continue
+                _tol = _unit_tolerance(item, note)
                 valid_note_ids.append(note_id)
                 is_partial = self._is_partial_disclosure(note)
                 # 先判断口径（母公司/合并），再做白名单过滤
@@ -1020,25 +1064,27 @@ class ReconciliationEngine:
                     if _note_val is None:
                         _rule_c, _rule_o = self._extract_note_totals_by_rules(note)
                         _note_val = _rule_c
+                    _note_val = _scale_note(note, _note_val)
                     if _note_val is not None:
                         _diff_cons = abs(_note_val - (item.closing_balance or 0))
                         _diff_comp = abs(_note_val - (item.company_closing_balance or 0))
                         # 附注值与公司余额一致或明显更接近 → 推断为母公司附注
-                        if (_amounts_equal(_note_val, item.company_closing_balance)
+                        if (_amounts_equal(_note_val, item.company_closing_balance, _tol)
                                 or (_diff_comp < _diff_cons * 0.5
-                                    and not _amounts_equal(_note_val, item.closing_balance))):
+                                    and not _amounts_equal(_note_val, item.closing_balance, _tol))):
                             # 当期末值同时匹配合并和母公司时（两者相等），
                             # 进一步用期初值区分：如果期初值更接近母公司期初 → 母公司
-                            if (_amounts_equal(_note_val, item.closing_balance)
+                            if (_amounts_equal(_note_val, item.closing_balance, _tol)
                                     and item.company_opening_balance is not None):
                                 _note_opening_val = self._get_cell_value(note, ts.opening_balance_cell)
                                 if _note_opening_val is None:
                                     _r_c, _r_o = self._extract_note_totals_by_rules(note)
                                     _note_opening_val = _r_o
+                                _note_opening_val = _scale_note(note, _note_opening_val)
                                 if _note_opening_val is not None:
                                     # 期初值与合并期初一致 → 这是合并附注，不是母公司
-                                    if (_amounts_equal(_note_opening_val, item.opening_balance)
-                                            and not _amounts_equal(_note_opening_val, item.company_opening_balance)):
+                                    if (_amounts_equal(_note_opening_val, item.opening_balance, _tol)
+                                            and not _amounts_equal(_note_opening_val, item.company_opening_balance, _tol)):
                                         is_parent_note = False
                                     else:
                                         is_parent_note = True
@@ -1145,15 +1191,18 @@ class ReconciliationEngine:
                     note_closing = self._get_cell_value(note, ts.closing_balance_cell)
                 if note_opening is None:
                     note_opening = self._get_cell_value(note, ts.opening_balance_cell)
+                # 附注按其声明单位折算为元，与报表金额同口径比较
+                note_closing = _scale_note(note, note_closing)
+                note_opening = _scale_note(note, note_opening)
                 if note_closing is not None:
                     scope_any_closing_found[scope_key] = True
                 if note_opening is not None:
                     scope_any_opening_found[scope_key] = True
                 # 期末余额比对
                 if stmt_closing is not None and note_closing is not None:
-                    if _amounts_equal(stmt_closing, note_closing):
+                    if _amounts_equal(stmt_closing, note_closing, _tol):
                         scope_matched_closing[scope_key] = True
-                    elif is_partial and stmt_closing >= note_closing - TOLERANCE:
+                    elif is_partial and stmt_closing >= note_closing - _tol:
                         scope_matched_closing[scope_key] = True
                     else:
                         diff = round(stmt_closing - note_closing, 2)
@@ -1172,9 +1221,9 @@ class ReconciliationEngine:
                         ))
                 # 期初余额比对
                 if stmt_opening is not None and note_opening is not None:
-                    if _amounts_equal(stmt_opening, note_opening):
+                    if _amounts_equal(stmt_opening, note_opening, _tol):
                         scope_matched_opening[scope_key] = True
-                    elif is_partial and stmt_opening >= note_opening - TOLERANCE:
+                    elif is_partial and stmt_opening >= note_opening - _tol:
                         scope_matched_opening[scope_key] = True
                     else:
                         diff = round(stmt_opening - note_opening, 2)
@@ -1219,6 +1268,7 @@ class ReconciliationEngine:
                     ts = table_structures.get(note_id)
                     if not note or not ts:
                         continue
+                    _tol = _unit_tolerance(item, note)
                     n_c = self._get_cell_value(note, ts.closing_balance_cell)
                     n_o = self._get_cell_value(note, ts.opening_balance_cell)
                     if self._is_revenue_cost_combined_table(note):
@@ -1232,21 +1282,23 @@ class ReconciliationEngine:
                         n_c = r_c
                     if n_o is None and r_o is not None:
                         n_o = r_o
+                    n_c = _scale_note(note, n_c)
+                    n_o = _scale_note(note, n_o)
                     # 跳过与合并余额一致的附注（明确是合并口径，不应用母公司余额比对）
-                    if (_amounts_equal(n_c, item.closing_balance)
-                            and _amounts_equal(n_o, item.opening_balance)):
+                    if (_amounts_equal(n_c, item.closing_balance, _tol)
+                            and _amounts_equal(n_o, item.opening_balance, _tol)):
                         continue
                     # 跳过与合并余额期末一致的附注（即使期初不一致，也是合并口径）
-                    if n_c is not None and _amounts_equal(n_c, item.closing_balance):
+                    if n_c is not None and _amounts_equal(n_c, item.closing_balance, _tol):
                         continue
                     # 仅当附注金额与母公司余额一致时，才确认母公司口径匹配
                     # 不再对不一致的合并附注生成母公司口径的 finding（避免误报）
                     if n_c is not None and item.company_closing_balance is not None:
-                        if _amounts_equal(item.company_closing_balance, n_c):
+                        if _amounts_equal(item.company_closing_balance, n_c, _tol):
                             _p_matched_c = True
                             _p_any_c = True
                     if n_o is not None and item.company_opening_balance is not None:
-                        if _amounts_equal(item.company_opening_balance, n_o):
+                        if _amounts_equal(item.company_opening_balance, n_o, _tol):
                             _p_matched_o = True
                             _p_any_o = True
                 # 合并到 scope 字典供后续"未找到值"警告使用
@@ -8718,6 +8770,92 @@ class ReconciliationEngine:
             confirmation_status=FindingConfirmationStatus.PENDING_CONFIRMATION,
             status=FindingStatus.OPEN,
         )
+
+    def check_unit_consistency(
+        self,
+        sheets: list,
+        note_tables: List[NoteTable],
+    ) -> List[ReportReviewFinding]:
+        """金额单位一致性提示（低风险）。
+
+        报表与附注余额核对前已按各自声明的单位折算为元；这里把「折算依据」和
+        「无法折算的盲区」显式告知用户：
+        - 报表与附注声明的单位不一致（已折算，请确认声明无误）；
+        - 报表非元单位，但部分附注表格未声明单位（按元处理，可能失真）；
+        - 附注非元单位，但报表未声明单位（按元处理，可能失真）。
+        """
+        findings: List[ReportReviewFinding] = []
+        stmt_units = {
+            (s.unit_label, s.unit_multiplier)
+            for s in sheets if getattr(s, "unit_label", "")
+        }
+        # 只统计金额类表格：人数、比例、期限等非金额表没有金额单位，不应计入「未声明单位」
+        _amount_kw = ("余额", "金额", "账面", "发生额", "价值", "原值", "原价", "成本", "收入", "期末", "期初", "本期", "上期")
+        _non_amount_kw = ("人数", "比例", "比率", "%", "％", "年限", "期限", "股数", "数量")
+
+        def _is_amount_table(n: NoteTable) -> bool:
+            hdr = "".join(str(h) for h in (n.headers or []))
+            if not any(kw in hdr for kw in _amount_kw):
+                return False
+            return not all(
+                any(kw in str(h) for kw in _non_amount_kw)
+                for h in (n.headers or [])[1:] if str(h).strip()
+            )
+
+        amount_notes = [n for n in note_tables if _is_amount_table(n)]
+        note_declared = [n for n in amount_notes if getattr(n, "unit_label", "")]
+        note_undeclared = [n for n in amount_notes if not getattr(n, "unit_label", "")]
+        note_units = {(n.unit_label, n.unit_multiplier) for n in note_declared}
+
+        stmt_non_yuan = {u for u in stmt_units if u[1] != 1.0}
+        note_non_yuan = {u for u in note_units if u[1] != 1.0}
+
+        if stmt_units and note_units and (
+            {m for _, m in stmt_units} != {m for _, m in note_units}
+        ):
+            findings.append(self._make_finding(
+                category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
+                account_name="金额单位",
+                location="报表/附注-金额单位",
+                description=(
+                    f"报表声明的金额单位为{'、'.join(sorted(u[0] for u in stmt_units))}，"
+                    f"附注声明的金额单位为{'、'.join(sorted(u[0] for u in note_units))}，两者不一致。"
+                    "余额核对已按各自声明的单位折算为元，请确认单位声明无误"
+                ),
+                risk_level=RiskLevel.LOW,
+                reasoning="核对前按单位倍率将报表与附注金额统一折算为元；比对容差按较粗的单位放宽",
+            ))
+        if stmt_non_yuan and note_undeclared:
+            sample = "、".join(
+                (n.section_title or n.account_name or n.source_location)[:20]
+                for n in note_undeclared[:5]
+            )
+            findings.append(self._make_finding(
+                category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
+                account_name="金额单位",
+                location="附注-金额单位",
+                description=(
+                    f"报表金额单位为{'、'.join(sorted(u[0] for u in stmt_non_yuan))}，"
+                    f"但 {len(note_undeclared)} 个附注表格未识别到单位声明（如：{sample}），"
+                    "已按元处理，可能造成金额核对失真，请确认附注单位"
+                ),
+                risk_level=RiskLevel.LOW,
+                note_table_ids=[n.id for n in note_undeclared[:20]],
+                reasoning="未声明单位的附注表格按元（倍率1）处理",
+            ))
+        if note_non_yuan and not stmt_units:
+            findings.append(self._make_finding(
+                category=ReportReviewFindingCategory.AMOUNT_INCONSISTENCY,
+                account_name="金额单位",
+                location="报表-金额单位",
+                description=(
+                    f"附注金额单位为{'、'.join(sorted(u[0] for u in note_non_yuan))}，"
+                    "但报表未识别到单位声明，已按元处理，可能造成金额核对失真，请确认报表单位"
+                ),
+                risk_level=RiskLevel.LOW,
+                reasoning="未声明单位的报表按元（倍率1）处理",
+            ))
+        return findings
 
     def check_financial_expense_detail(
 

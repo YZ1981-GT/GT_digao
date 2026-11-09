@@ -385,6 +385,7 @@ async def upload_files(
                         import uuid as _uuid_pdf
                         # 从 PDF 文本中提取表格前的上下文标题
                         pdf_table_titles = report_parser._extract_pdf_table_titles(pdf_result.text)
+                        pdf_table_units = report_parser._extract_pdf_table_units(pdf_result.text)
                         for tidx, tdata in enumerate(pdf_result.tables):
                             if not tdata:
                                 continue
@@ -402,6 +403,8 @@ async def upload_files(
                                 header_rows=[headers] if headers else [],
                                 rows=rows,
                                 source_location=f"PDF 表格 {tidx + 1}",
+                                unit_label=pdf_table_units[tidx][0] if tidx < len(pdf_table_units) else "",
+                                unit_multiplier=pdf_table_units[tidx][1] if tidx < len(pdf_table_units) else 1.0,
                             ))
                         logger.info(f"从 PDF {filename} 提取到 {len(pdf_result.tables)} 个表格")
 
@@ -562,6 +565,8 @@ async def confirm_matching(req: ConfirmMatchingRequest):
         raise HTTPException(404, "会话不存在")
     session.matching_map = req.matching_map
     session.status = "matched"
+    # 用户手工确认的科目匹配必须落盘，否则服务重启后丢失
+    session_store.save_session(req.session_id, session)
     return {"status": "matched"}
 
 

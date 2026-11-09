@@ -573,6 +573,7 @@ class StatementItem(BaseModel):
     parent_id: Optional[str] = Field(None, description="父科目ID（其中项时指向主科目）")
     is_sub_item: bool = Field(False, description="是否为其中项明细")
     row_index: int = Field(..., description="在报表中的行号")
+    source_unit_multiplier: float = Field(1.0, description="来源 Sheet 的金额单位倍率（余额按原单位保存，×倍率=元；用于报表 vs 附注核对折算、容差与变动金额阈值换算）")
     parse_warnings: List[str] = Field(default_factory=list, description="解析警告（Req 2.9）")
 
 
@@ -585,6 +586,8 @@ class NoteTable(BaseModel):
     header_rows: List[List[str]] = Field(default_factory=list, description="原始多行表头（用于前端展示合并单元格）")
     rows: List[List[Any]] = Field(default_factory=list, description="数据行")
     source_location: str = Field("", description="在源文档中的位置描述")
+    unit_label: str = Field("", description="来源表格声明的金额单位原文（如 万元），空表示未识别")
+    unit_multiplier: float = Field(1.0, description="换算为元的倍率（元=1，万元=1e4），仅用于金额核对，不改写 rows 原值")
 
 
 class NoteSection(BaseModel):
@@ -614,6 +617,8 @@ class ReportSheetData(BaseModel):
     is_consolidated: bool = Field(False, description="是否为合并报表（含合并+公司列）")
     column_map: Dict[str, int] = Field(default_factory=dict, description="语义列映射：closing_consolidated/closing_company/opening_consolidated/opening_company → 列索引")
     data_col_end: Optional[int] = Field(None, description="有效数据列的右边界索引（公司列为最右有效列）")
+    unit_label: str = Field("", description="Sheet 声明的金额单位原文（如 万元），空表示未识别")
+    unit_multiplier: float = Field(1.0, description="换算为元的倍率（元=1，万元=1e4），raw_data 保持原值")
 
 
 # ─── 表格结构识别模型 ───

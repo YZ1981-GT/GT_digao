@@ -552,8 +552,18 @@ export interface StatementItem {
   parent_id?: string;
   is_sub_item: boolean;
   row_index: number;
+  /** 来源 Sheet 金额单位倍率（余额按原单位保存，×倍率=元） */
+  source_unit_multiplier?: number;
   parse_warnings: string[];
 }
+
+/** 非"元"单位倍率 → 单位名称（倍率为1或未知时无标注） */
+export const UNIT_LABEL_BY_MULTIPLIER: Record<number, string> = {
+  1000: '千元',
+  10000: '万元',
+  1000000: '百万元',
+  100000000: '亿元',
+};
 
 /** 附注表格（Req 2.3） */
 export interface NoteTable {
@@ -564,6 +574,9 @@ export interface NoteTable {
   header_rows?: string[][];
   rows: any[][];
   source_location: string;
+  /** 来源表格声明的金额单位原文（如"万元"），空表示未识别；rows 保持原值，核对时按倍率折算为元 */
+  unit_label?: string;
+  unit_multiplier?: number;
 }
 
 /** 附注层级节点 - 按附注文档的标题层级组织 */
@@ -583,6 +596,9 @@ export interface ReportSheetData {
   statement_type: StatementType;
   row_count: number;
   headers: string[];
+  /** Sheet 声明的金额单位原文（如"万元"）；raw_data 保持原值，科目金额已折算为元 */
+  unit_label?: string;
+  unit_multiplier?: number;
 }
 
 // ─── 表格结构识别 ───

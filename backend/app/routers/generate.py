@@ -4,6 +4,7 @@
 单章节生成（SSE）、章节修改（SSE）和文档导出等端点。
 """
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict, List
@@ -19,6 +20,7 @@ from ..models.audit_schemas import (
     SectionGenerateRequest,
     SectionRevisionRequest,
 )
+from ..services import json_snapshot as snapshot
 from ..services.document_generator import DocumentGenerator
 from ..utils.sse import sse_response, sse_with_heartbeat
 
@@ -32,6 +34,20 @@ document_generator = DocumentGenerator()
 # In-memory stores
 _confirmed_outlines: dict = {}  # template_id -> outline
 _generated_documents: dict = {}  # document_id -> GeneratedDocument
+
+# 已生成文档落盘，重启后仍可导出。
+# 注意：_confirmed_outlines 目前无人读取（/start 使用请求体里的大纲），故不持久化。
+_NS_DOCS = "generate_documents"
+
+
+def _persist_document(document: GeneratedDocument) -> None:
+    snapshot.save(_NS_DOCS, document.id, document.model_dump(mode="json"))
+
+
+snapshot.prune(_NS_DOCS)
+_generated_documents.update(
+    snapshot.load_all(_NS_DOCS, lambda d: GeneratedDocument(**d))
+)
 
 
 class ExtractOutlineRequest(BaseModel):
@@ -87,6 +103,7 @@ async def start_generate(request: GenerateRequest):
                         if evt.get("status") == "completed" and "document" in evt:
                             document = GeneratedDocument(**evt["document"])
                             _generated_documents[document.id] = document
+                            await asyncio.to_thread(_persist_document, document)
                     except (json.JSONDecodeError, Exception):
                         pass
             except Exception as e:

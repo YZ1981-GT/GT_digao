@@ -15,6 +15,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   NoteTable, NoteSection, MatchingMap, StatementItem,
+  UNIT_LABEL_BY_MULTIPLIER,
 } from '../types/audit';
 
 const API = process.env.REACT_APP_API_URL || (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:9980');
@@ -1599,7 +1600,14 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
             alignItems: 'center',
             borderTop: idx > 0 ? `1px solid ${GT.primary}30` : undefined,
           }}>
-            <span style={{ fontWeight: 700, color: GT.primary, fontSize: 12 }}>📊 {entry.label}</span>
+            <span style={{ fontWeight: 700, color: GT.primary, fontSize: 12 }}>
+              📊 {entry.label}
+              {UNIT_LABEL_BY_MULTIPLIER[entry.si.source_unit_multiplier ?? 1] && (
+                <span style={{ fontWeight: 400, marginLeft: 4 }}>
+                  （单位：{UNIT_LABEL_BY_MULTIPLIER[entry.si.source_unit_multiplier ?? 1]}）
+                </span>
+              )}
+            </span>
             <span style={{ color: GT.primary, fontWeight: 600 }}>
               期末/本期：<span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(stmtClosing)}</span>
             </span>
@@ -1697,7 +1705,17 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         label = nt.section_title;
         shownLabels.add(rawLabel);
       }
-      const tableEl = renderNoteTable(nt, label, sec.level);
+      const baseTableEl = renderNoteTable(nt, label, sec.level);
+      // 表格原值保持不变；非"元"单位时在表格上方标注，提示核对时已按该单位折算为元
+      const tableEl = nt.unit_label && nt.unit_label !== '元' ? (
+        <div key={`unit-${id}`}>
+          <span style={{
+            display: 'inline-block', margin: '4px 0', padding: '1px 8px', borderRadius: 10,
+            fontSize: 12, color: GT.primary, background: GT.primaryBg,
+          }}>金额单位：{nt.unit_label}（与报表核对时折算为元）</span>
+          {baseTableEl}
+        </div>
+      ) : baseTableEl;
       if (perTableMode) {
         const tableStmtItem = noteToStmtMap.get(id);
         if (tableStmtItem) {
@@ -2678,7 +2696,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
           ) : (
             <>
               {renderTabBar(
-                allSheets.map((s, i) => ({ key: i, label: s.sheet.sheet_name || `Sheet ${i + 1}` })),
+                allSheets.map((s, i) => ({ key: i, label: (s.sheet.sheet_name || `Sheet ${i + 1}`) + (s.sheet.unit_label && s.sheet.unit_label !== '元' ? `（${s.sheet.unit_label}）` : '') })),
                 activeSheetTab,
                 setActiveSheetTab,
               )}

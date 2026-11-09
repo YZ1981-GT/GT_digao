@@ -4,6 +4,7 @@
 复核启动（SSE 流式）、报告查看/导出、问题状态更新和交叉引用分析等端点。
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from ..models.audit_schemas import (
     ReviewRequest,
     SupplementaryMaterial,
 )
+from ..services import json_snapshot as snapshot
 from ..services.report_generator import ReportGenerator
 from ..services.review_engine import ReviewEngine
 from ..services.workpaper_parser import WorkpaperParser
@@ -41,6 +43,24 @@ report_generator = ReportGenerator()
 _parsed_workpapers: dict = {}  # id -> WorkpaperParseResult
 _supplementary_materials: dict = {}  # id -> SupplementaryMaterial
 _review_reports: dict = {}  # id -> ReviewReport
+
+# 复核报告落盘：重启后仍可查看/导出/更新问题状态（底稿与补充材料可重新上传，不持久化）
+_NS_REPORTS = "review_reports"
+
+
+def _persist_report(report) -> None:
+    snapshot.save(_NS_REPORTS, report.id, report.model_dump(mode="json"))
+
+
+def _restore_reports() -> None:
+    from ..models.audit_schemas import ReviewReport
+    snapshot.prune(_NS_REPORTS)
+    _review_reports.update(snapshot.load_all(_NS_REPORTS, lambda d: ReviewReport(**d)))
+    if _review_reports:
+        logger.info("复核报告已恢复: %d 份", len(_review_reports))
+
+
+_restore_reports()
 
 
 @router.post("/upload")
@@ -123,7 +143,10 @@ async def check_references(request: ReferenceCheckRequest):
     try:
         workpapers = [_parsed_workpapers[wid] for wid in request.workpaper_ids if wid in _parsed_workpapers]
         if not workpapers:
-            raise HTTPException(status_code=404, detail="未找到指定底稿")
+            raise HTTPException(
+                status_code=404,
+                detail="未找到指定底稿：解析结果仅保存在服务内存中，服务重启后需要重新上传底稿",
+            )
 
         refs = await review_engine.check_required_references(
             workpapers[0], request.workpaper_ids
@@ -195,7 +218,10 @@ async def start_review(request: ReviewRequest):
         workpapers = [_parsed_workpapers[wid] for wid in request.workpaper_ids if wid in _parsed_workpapers]
         if not workpapers:
             logger.warning(f"[复核启动] 未找到底稿，请求ID: {request.workpaper_ids}, 内存中: {list(_parsed_workpapers.keys())}")
-            raise HTTPException(status_code=404, detail="未找到指定底稿")
+            raise HTTPException(
+                status_code=404,
+                detail="未找到指定底稿：解析结果仅保存在服务内存中，服务重启后需要重新上传底稿",
+            )
 
         logger.info(f"[复核启动] 找到 {len(workpapers)} 份底稿，维度: {request.dimensions}, prompt_id: {request.prompt_id}")
 
@@ -230,6 +256,7 @@ async def start_review(request: ReviewRequest):
                             from ..models.audit_schemas import ReviewReport
                             report = ReviewReport(**evt["report"])
                             _review_reports[report.id] = report
+                            await asyncio.to_thread(_persist_report, report)
                             logger.info(f"[SSE] 报告已存储，ID: {report.id}, 内存中报告数: {len(_review_reports)}")
                     except (json.JSONDecodeError, Exception):
                         pass
@@ -325,6 +352,7 @@ async def update_finding_status(finding_id: str, request: FindingStatusUpdate):
                     finding.status = request.status
                     if request.status.value == "resolved":
                         finding.resolved_at = datetime.now(timezone.utc).isoformat()
+                    _persist_report(report)
                     return {"success": True, "message": "状态已更新"}
 
         raise HTTPException(status_code=404, detail="未找到指定问题")
