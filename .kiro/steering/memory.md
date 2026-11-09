@@ -234,7 +234,9 @@ inclusion: always
 - 金额单位方案（PR #1）：ReportSheetData/NoteTable 带 `unit_label`/`unit_multiplier`，StatementItem 带 `source_unit_multiplier`；**余额与附注 rows 都保持原单位**，只在 check_amount_consistency 报表 vs 附注比对时两侧折算为元（`_item_in_yuan`/`_scale_note`），容差 `max(0.5, 0.005×倍率)`；变动金额阈值（元）按倍率换算；跨表规则按原值比较，单位不一致由 `check_unit_consistency` 低风险提示。教训：曾在解析期把报表余额折成元，导致跨表校验/LLM 提示/前端勾稽单位错配（同为万元时误报）
 - 单位识别：只认显式声明（`(?<!编制)单位…(百万元|亿元|万元|千元|元)(?!汉字)`）；Excel 扫表头及上方行、续表继承主表；Word 取表前至多 4 段且不越过上一张表，回退附注前言「除特别注明…」；PDF 取 `[表格 N]` 前至多 9 行、遇 `[表格结束]` 停止
 - 模块状态持久化：`services/json_snapshot.py`（原子写、ID 白名单、损坏跳过、启动 prune 90 天）；analysis 文档/项目快照（项目只存 document_ids，章节 SSE completed 时写回 chapter.content/sources，事件循环内序列化后 to_thread 写盘，删除文档级联）；review 报告与问题状态快照（底稿解析结果不持久化，404 提示重新上传）；generate 已生成文档快照；report_review `confirm_matching` 后 save_session
-- 提交混合改动的做法：工作区常有用户未提交改动，AI 提交时从 `git show HEAD:<file>` 出发按字符串重放自己的改动，`hash-object -w` + `update-index --cacheinfo` 写暂存区；禁止用 `--unidiff-zero` 无上下文补丁（曾把代码插错位置导致语法错误）；提交前用 `git checkout-index -a --prefix=` 导出暂存区单独编译+跑测试
+- 提交混合改动的做法：工作区常有用户未提交改动，AI 提交时从 `git show HEAD:<file>` 出发按字符串重放自己的改动，`hash-object -w` + `update-index --cacheinfo` 写暂存区；禁止用 `--unidiff-zero` 无上下文补丁（曾把代码插错位置导致语法错误）；提交前用 `git checkout-index -a --prefix=` 导出暂存区单独编译+跑测试；不想切分支时用临时 `GIT_INDEX_FILE` + `commit-tree` 基于 origin/master 建提交
+- EXE 打包数据范围：`build_exe.py` DATA_DIRS 只打包 `backend/data/templates` 与 `model_context_limits.json`，**禁止打包 `backend/data/sessions`（客户报告数据）和 `snapshots`**（2026-11 修正，原先整个 backend/data 打入包内）
+- 换行符：仓库内文本按 LF 入库（core.autocrlf=true），`hash-object` 要带 `--path=<file>` 走过滤；检查换行符必须在 Python 里直接读 `git show` 字节，PowerShell 管道会改写换行导致误判
 - UTF-8 BOM 防御：所有 Python 脚本读取 JSON/HTML 文件统一用 `utf-8-sig` 编码
 - Word 导出统一排版规范：仿宋_GB2312+Arial Narrow、页边距3/3.18/3.2/2.54cm、表格上下1磅边框无左右、高风险标红、页脚页码
 - 底稿复核编制单位提取：ReviewEngine._extract_entity_name() 从 content_text 前2000字符正则匹配
@@ -285,7 +287,10 @@ inclusion: always
 ## 待办 / 进行中
 
 - PR #1（`fix/report-review-consistency` → master，https://github.com/YZ1981-GT/GT_digao/pull/1）：金额单位统一 + 三模块持久化，待 review 合入；PR 中含本地 master 未推送的 `b03b0f6 docs: VLLM 配置指南`
+- PR #2（`work/2026-11-09-kiro-steering` → master，https://github.com/YZ1981-GT/GT_digao/pull/2）：steering/记忆 hook 整理入库，待合入；合入后本地 `.kiro` 改动才会变为已跟踪（之后 memory.md 新增内容需另行提交）
 - 工作区仍有用户大量未提交改动（解析完整性检查、LLM 重算替换金额 finding、笔记 date_folder 路径、EXE 期限 2028-12-31、SSRF 防护、口径冲突保护等，对应 `分析` 文档的七项问题），需尽快整理提交
+- EXE 已于 2026-11-09 按工作区代码重新打包（dist/致同AI审计助手，启动冒烟通过）；`build_exe.py` 的数据范围修正未提交（与用户的授权期限改动在同一文件）
+- 打包后会话/快照写在程序目录 `_internal\data\` 下，整目录覆盖升级会丢失；待定是否改到 `~/.gt_audit_helper\`
 - 已知失败用例：`test_note_table_headers.py::TestMergeNoteHeaderRows::test_two_rows_merge` 在 master/提交树上失败，修复在用户未提交的 report_parser/测试改动里
 - 金额单位后续：跨表校验在报表与附注单位不同时仍不自动折算；前端金额条单位依赖 `source_unit_multiplier`
 - 项目文件清理（2026-04）：已删除根目录 `__pycache__/`、`frontend/README.md`；`GT_底稿/审计实务操作手册-框架.md` 和 `致同GT审计手册设计规范.md` 待用户确认是否删除
