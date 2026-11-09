@@ -19,6 +19,7 @@ inclusion: always
 - 聊天面板全局可见偏好：💬按钮需要在所有页面（首页+四大工作模块）都显示，不能只在首页；ChatPanel 已从 renderSelectMode 提升到 App.tsx 顶层所有 return 分支
 - 聊天消息操作按钮布局偏好：📋📄✏️📌等按钮不能叠在气泡内右上角（会被文字遮挡看不清），必须放在气泡外下方显示
 - 聊天面板窗口控制偏好：需要支持最大化/还原切换（⊞/⊡按钮），已实现 520×720 小窗 ↔ 全屏切换
+- 工作节奏偏好：修复后习惯要求「复盘」找改进点，再要求「逐一修复」全部落实；完成后推送到工作分支并用 `gh pr create` 建 PR（目标 master）；改写未推送历史需先征得同意
 - 聊天 AI 回复排版偏好：Markdown 渲染必须有清晰层次，不能一大段纯文本；system prompt 用「## 【重要】回复格式强制要求」+禁止性措辞+示例模板强制 LLM 分段输出（温和措辞会被忽略）；CSS 中 h1/h2 加底部分隔线、段落间距 10px、列表项间距 6px
 
 ## 项目上下文
@@ -134,6 +135,7 @@ inclusion: always
 #### 数据目录
 - `backend/data/model_context_limits.json` — 各模型上下文长度限制配置
 - `backend/data/sessions/` — 审计报告复核会话数据（72个会话目录，每个含 session.json + findings.json）
+- `backend/data/snapshots/{namespace}/{id}.json` — review/generate/analysis 运行时快照（已 gitignore）
 
 ### 前端文件清单 (frontend/src/)
 
@@ -227,7 +229,14 @@ inclusion: always
 
 ## 技术决策
 - AI 记忆方案：放弃 mem0 本地部署（太重6GB+），改用 Kiro 原生 steering + hook 轻量方案
-- 记忆系统架构：memory.md (always steering) + auto-save-memory hook (agentStop 触发自动保存)
+- 记忆系统架构：memory.md (always steering) + `.kiro/hooks/auto-save-memory.json`（v2 格式，Stop 触发 agent 动作；旧 `.kiro.hook`/agentStop 格式已不被识别，2026-11 已替换，替换后当场确认可触发）
+- steering 现状（2026-11 整理）：`代码提交与分支管理规范.md` 已按本仓库改写（基线 master、无 .git-hooks/push_version.py、普通 git push、只暂存自己改动）；`glossary.md` 属另一审计平台，改为 manual；本仓库术语在 `project-glossary.md`（always）；`windows-commands.md` 已改为 PowerShell 5 + GBK 控制台注意事项
+- 金额单位方案（PR #1）：ReportSheetData/NoteTable 带 `unit_label`/`unit_multiplier`，StatementItem 带 `source_unit_multiplier`；**余额与附注 rows 都保持原单位**，只在 check_amount_consistency 报表 vs 附注比对时两侧折算为元（`_item_in_yuan`/`_scale_note`），容差 `max(0.5, 0.005×倍率)`；变动金额阈值（元）按倍率换算；跨表规则按原值比较，单位不一致由 `check_unit_consistency` 低风险提示。教训：曾在解析期把报表余额折成元，导致跨表校验/LLM 提示/前端勾稽单位错配（同为万元时误报）
+- 单位识别：只认显式声明（`(?<!编制)单位…(百万元|亿元|万元|千元|元)(?!汉字)`）；Excel 扫表头及上方行、续表继承主表；Word 取表前至多 4 段且不越过上一张表，回退附注前言「除特别注明…」；PDF 取 `[表格 N]` 前至多 9 行、遇 `[表格结束]` 停止
+- 模块状态持久化：`services/json_snapshot.py`（原子写、ID 白名单、损坏跳过、启动 prune 90 天）；analysis 文档/项目快照（项目只存 document_ids，章节 SSE completed 时写回 chapter.content/sources，事件循环内序列化后 to_thread 写盘，删除文档级联）；review 报告与问题状态快照（底稿解析结果不持久化，404 提示重新上传）；generate 已生成文档快照；report_review `confirm_matching` 后 save_session
+- 提交混合改动的做法：工作区常有用户未提交改动，AI 提交时从 `git show HEAD:<file>` 出发按字符串重放自己的改动，`hash-object -w` + `update-index --cacheinfo` 写暂存区；禁止用 `--unidiff-zero` 无上下文补丁（曾把代码插错位置导致语法错误）；提交前用 `git checkout-index -a --prefix=` 导出暂存区单独编译+跑测试；不想切分支时用临时 `GIT_INDEX_FILE` + `commit-tree` 基于 origin/master 建提交
+- EXE 打包数据范围：`build_exe.py` DATA_DIRS 只打包 `backend/data/templates` 与 `model_context_limits.json`，**禁止打包 `backend/data/sessions`（客户报告数据）和 `snapshots`**（2026-11 修正，原先整个 backend/data 打入包内）
+- 换行符：仓库内文本按 LF 入库（core.autocrlf=true），`hash-object` 要带 `--path=<file>` 走过滤；检查换行符必须在 Python 里直接读 `git show` 字节，PowerShell 管道会改写换行导致误判
 - UTF-8 BOM 防御：所有 Python 脚本读取 JSON/HTML 文件统一用 `utf-8-sig` 编码
 - Word 导出统一排版规范：仿宋_GB2312+Arial Narrow、页边距3/3.18/3.2/2.54cm、表格上下1磅边框无左右、高风险标红、页脚页码
 - 底稿复核编制单位提取：ReviewEngine._extract_entity_name() 从 content_text 前2000字符正则匹配
@@ -276,6 +285,14 @@ inclusion: always
 - 富文本复制内联样式：markdownToHtml.ts 中自定义 rehypeInlineStyles 插件，给 table/th/td/blockquote/pre/code/h1-h3/hr 注入内联 style 属性，确保剪贴板 HTML 不依赖外部 CSS，粘贴到 Word/邮件/飞书等任何富文本环境都能正确显示格式
 
 ## 待办 / 进行中
+
+- PR #1（`fix/report-review-consistency` → master，https://github.com/YZ1981-GT/GT_digao/pull/1）：金额单位统一 + 三模块持久化，待 review 合入；PR 中含本地 master 未推送的 `b03b0f6 docs: VLLM 配置指南`
+- PR #2（`work/2026-11-09-kiro-steering` → master，https://github.com/YZ1981-GT/GT_digao/pull/2）：steering/记忆 hook 整理入库，待合入；合入后本地 `.kiro` 改动才会变为已跟踪（之后 memory.md 新增内容需另行提交）
+- 工作区仍有用户大量未提交改动（解析完整性检查、LLM 重算替换金额 finding、笔记 date_folder 路径、EXE 期限 2028-12-31、SSRF 防护、口径冲突保护等，对应 `分析` 文档的七项问题），需尽快整理提交
+- EXE 已于 2026-11-09 按工作区代码重新打包（dist/致同AI审计助手，启动冒烟通过）；`build_exe.py` 的数据范围修正未提交（与用户的授权期限改动在同一文件）
+- 打包后会话/快照写在程序目录 `_internal\data\` 下，整目录覆盖升级会丢失；待定是否改到 `~/.gt_audit_helper\`
+- 已知失败用例：`test_note_table_headers.py::TestMergeNoteHeaderRows::test_two_rows_merge` 在 master/提交树上失败，修复在用户未提交的 report_parser/测试改动里
+- 金额单位后续：跨表校验在报表与附注单位不同时仍不自动折算；前端金额条单位依赖 `source_unit_multiplier`
 - 项目文件清理（2026-04）：已删除根目录 `__pycache__/`、`frontend/README.md`；`GT_底稿/审计实务操作手册-框架.md` 和 `致同GT审计手册设计规范.md` 待用户确认是否删除
 - 用户计划对每个细分程序逐一打磨升级
 - 首页聊天功能（全部60个子任务已完成）：spec 路径 .kiro/specs/homepage-chat/，待用户启动测试验收；复盘发现的优化点：①ChatPanel.tsx 超1000行，后续可拆分清理UI/导出逻辑为独立hook ②IndexedDB saveChatSession 流式输出时高频写入，可加debounce ③Whisper API 依赖供应商支持，不支持时需友好提示
