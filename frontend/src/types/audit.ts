@@ -564,6 +564,9 @@ export interface NoteTable {
   header_rows?: string[][];
   rows: any[][];
   source_location: string;
+  /** 来源表格声明的金额单位原文（如"万元"），空表示未识别；rows 保持原值，核对时按倍率折算为元 */
+  unit_label?: string;
+  unit_multiplier?: number;
 }
 
 /** 附注层级节点 - 按附注文档的标题层级组织 */
@@ -583,6 +586,9 @@ export interface ReportSheetData {
   statement_type: StatementType;
   row_count: number;
   headers: string[];
+  /** Sheet 声明的金额单位原文（如"万元"）；raw_data 保持原值，科目金额已折算为元 */
+  unit_label?: string;
+  unit_multiplier?: number;
 }
 
 // ─── 表格结构识别 ───

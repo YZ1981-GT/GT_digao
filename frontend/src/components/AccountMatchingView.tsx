@@ -1697,7 +1697,17 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
         label = nt.section_title;
         shownLabels.add(rawLabel);
       }
-      const tableEl = renderNoteTable(nt, label, sec.level);
+      const baseTableEl = renderNoteTable(nt, label, sec.level);
+      // 表格原值保持不变；非"元"单位时在表格上方标注，提示核对时已按该单位折算为元
+      const tableEl = nt.unit_label && nt.unit_label !== '元' ? (
+        <div key={`unit-${id}`}>
+          <span style={{
+            display: 'inline-block', margin: '4px 0', padding: '1px 8px', borderRadius: 10,
+            fontSize: 12, color: GT.primary, background: GT.primaryBg,
+          }}>金额单位：{nt.unit_label}（核对时已折算为元）</span>
+          {baseTableEl}
+        </div>
+      ) : baseTableEl;
       if (perTableMode) {
         const tableStmtItem = noteToStmtMap.get(id);
         if (tableStmtItem) {
@@ -2678,7 +2688,7 @@ const AccountMatchingView: React.FC<Props> = ({ sessionId, onConfirm }) => {
           ) : (
             <>
               {renderTabBar(
-                allSheets.map((s, i) => ({ key: i, label: s.sheet.sheet_name || `Sheet ${i + 1}` })),
+                allSheets.map((s, i) => ({ key: i, label: (s.sheet.sheet_name || `Sheet ${i + 1}`) + (s.sheet.unit_label && s.sheet.unit_label !== '元' ? `（${s.sheet.unit_label}）` : '') })),
                 activeSheetTab,
                 setActiveSheetTab,
               )}
