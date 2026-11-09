@@ -1111,7 +1111,15 @@ class ReportReviewEngine:
             config.change_amount_threshold / 10000 if config.change_amount_threshold else 0,
         )
         changes = self.calculate_changes(session.statement_items)
-        abnormal = self.flag_abnormal_changes(changes, config.change_threshold, config.change_amount_threshold)
+        # 余额按原单位保存；金额阈值是「元」，需按各科目来源单位倍率换算后比较
+        _item_unit_mul = {
+            i.id: (getattr(i, "source_unit_multiplier", 1.0) or 1.0)
+            for i in session.statement_items
+        }
+        abnormal = self.flag_abnormal_changes(
+            changes, config.change_threshold, config.change_amount_threshold,
+            unit_multipliers=_item_unit_mul,
+        )
         threshold_pct = int(config.change_threshold * 100)
 
         # 排除不需要变动分析的科目
@@ -1218,7 +1226,10 @@ class ReportReviewEngine:
 
                     if change_pct_val is not None and abs(change_pct_val) > config.change_threshold:
                         # 金额阈值过滤：变动金额低于阈值时跳过
-                        if config.change_amount_threshold > 0 and abs(change_amt) < config.change_amount_threshold:
+                        # 附注值按原单位保存，阈值为「元」：按附注表格声明的单位换算
+                        _note_mul = getattr(note, "unit_multiplier", 1.0) or 1.0
+                        if (config.change_amount_threshold > 0
+                                and abs(change_amt) * _note_mul < config.change_amount_threshold):
                             continue
                         detail_abnormal_count += 1
                         detail_rows_found = True
@@ -1813,18 +1824,23 @@ class ReportReviewEngine:
     def flag_abnormal_changes(
         self, changes: List[ChangeAnalysis], threshold: float = 0.3,
         amount_threshold: float = 0,
+        unit_multipliers: Optional[Dict[str, float]] = None,
     ) -> List[ChangeAnalysis]:
         """标记超阈值科目，返回超阈值的 ChangeAnalysis 列表。
 
         Args:
             threshold: 变动比率阈值（如 0.3 = 30%）
             amount_threshold: 变动金额阈值（元），变动金额低于此值不报异常
+            unit_multipliers: statement_item_id → 来源单位倍率；变动金额按原单位保存，
+                乘以倍率后与「元」阈值比较。缺省视为元
         """
         abnormal = []
         for c in changes:
             if c.change_percentage is not None and abs(c.change_percentage) > threshold:
-                # 金额阈值过滤：变动金额低于阈值时跳过
-                if amount_threshold > 0 and c.change_amount is not None and abs(c.change_amount) < amount_threshold:
+                # 金额阈值过滤：变动金额（折算为元）低于阈值时跳过
+                mul = (unit_multipliers or {}).get(c.statement_item_id, 1.0) or 1.0
+                if (amount_threshold > 0 and c.change_amount is not None
+                        and abs(c.change_amount) * mul < amount_threshold):
                     continue
                 c.exceeds_threshold = True
                 abnormal.append(c)

@@ -573,7 +573,7 @@ class StatementItem(BaseModel):
     parent_id: Optional[str] = Field(None, description="父科目ID（其中项时指向主科目）")
     is_sub_item: bool = Field(False, description="是否为其中项明细")
     row_index: int = Field(..., description="在报表中的行号")
-    source_unit_multiplier: float = Field(1.0, description="来源 Sheet 的金额单位倍率（余额已折算为元，此字段仅用于按来源精度放宽比对容差）")
+    source_unit_multiplier: float = Field(1.0, description="来源 Sheet 的金额单位倍率（余额按原单位保存，×倍率=元；用于报表 vs 附注核对折算、容差与变动金额阈值换算）")
     parse_warnings: List[str] = Field(default_factory=list, description="解析警告（Req 2.9）")
 
 

@@ -85,18 +85,38 @@ def _scale_note(note, val: Optional[float]) -> Optional[float]:
     mul = getattr(note, "unit_multiplier", 1.0) or 1.0
     return val if mul == 1.0 else val * mul
 
-def _unit_tolerance(item, note) -> float:
-    """报表与附注比对的容差：按两侧中较粗的来源单位放宽。
+# 非元单位报表按保留 2 位小数计：四舍五入误差最多为 0.005 个单位
+_UNIT_ROUNDING = 0.005
 
-    折算为元后，来源是万元的数据本身只有万元级精度（四舍五入误差可达数十元），
-    固定 0.5 元会产生误报。两侧均为元时仍为 TOLERANCE。
+
+def _item_in_yuan(item):
+    """返回余额已按来源单位折算为元的 StatementItem 副本；倍率为1时返回原对象。"""
+    mul = getattr(item, "source_unit_multiplier", 1.0) or 1.0
+    if mul == 1.0:
+        return item
+
+    def _s(v):
+        return None if v is None else v * mul
+
+    return item.model_copy(update={
+        "opening_balance": _s(item.opening_balance),
+        "closing_balance": _s(item.closing_balance),
+        "company_opening_balance": _s(item.company_opening_balance),
+        "company_closing_balance": _s(item.company_closing_balance),
+    })
+
+
+def _unit_tolerance(item, note) -> float:
+    """报表与附注比对的容差（元）：按两侧中较粗的来源单位放宽到其四舍五入误差。
+
+    万元报表保留 2 位小数时，误差最多 0.005 万元 = 50 元；两侧均为元时仍为 TOLERANCE。
     """
     mul = max(
         1.0,
         getattr(item, "source_unit_multiplier", 1.0) or 1.0,
         getattr(note, "unit_multiplier", 1.0) or 1.0,
     )
-    return TOLERANCE * mul
+    return max(TOLERANCE, _UNIT_ROUNDING * mul)
 
 def _amounts_equal(a: Optional[float], b: Optional[float], tol: float = TOLERANCE) -> bool:
 
@@ -960,6 +980,9 @@ class ReconciliationEngine:
             item = item_map.get(entry.statement_item_id)
             if not item:
                 continue
+            # 报表余额保持原值（其他跨表规则按原值比较）；仅在本核对中按来源单位折算为元，
+            # 与同样折算为元的附注值比较
+            item = _item_in_yuan(item)
             # 跳过不需要金额核对的科目（汇总行、无附注披露的现金流量表科目等）
             if self._should_skip_amount_check(item):
                 continue
@@ -8766,8 +8789,22 @@ class ReconciliationEngine:
             (s.unit_label, s.unit_multiplier)
             for s in sheets if getattr(s, "unit_label", "")
         }
-        note_declared = [n for n in note_tables if getattr(n, "unit_label", "")]
-        note_undeclared = [n for n in note_tables if not getattr(n, "unit_label", "")]
+        # 只统计金额类表格：人数、比例、期限等非金额表没有金额单位，不应计入「未声明单位」
+        _amount_kw = ("余额", "金额", "账面", "发生额", "价值", "原值", "原价", "成本", "收入", "期末", "期初", "本期", "上期")
+        _non_amount_kw = ("人数", "比例", "比率", "%", "％", "年限", "期限", "股数", "数量")
+
+        def _is_amount_table(n: NoteTable) -> bool:
+            hdr = "".join(str(h) for h in (n.headers or []))
+            if not any(kw in hdr for kw in _amount_kw):
+                return False
+            return not all(
+                any(kw in str(h) for kw in _non_amount_kw)
+                for h in (n.headers or [])[1:] if str(h).strip()
+            )
+
+        amount_notes = [n for n in note_tables if _is_amount_table(n)]
+        note_declared = [n for n in amount_notes if getattr(n, "unit_label", "")]
+        note_undeclared = [n for n in amount_notes if not getattr(n, "unit_label", "")]
         note_units = {(n.unit_label, n.unit_multiplier) for n in note_declared}
 
         stmt_non_yuan = {u for u in stmt_units if u[1] != 1.0}

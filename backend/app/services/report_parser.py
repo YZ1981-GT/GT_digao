@@ -1050,15 +1050,12 @@ class ReportParser(WorkpaperParser):
                 company_opening = None
                 company_closing = None
 
-            # 统一换算为「元」：raw_data 保持原值，仅结构化金额按 Sheet 声明的单位折算
+            # 余额保持 Sheet 原单位（跨表规则、前端勾稽与附注同单位比较）；
+            # 只记录来源倍率，报表 vs 附注核对时再按倍率折算为元
             _mul = getattr(sheet_data, 'unit_multiplier', 1.0) or 1.0
             if _mul != 1.0:
-                opening_balance = None if opening_balance is None else opening_balance * _mul
-                closing_balance = None if closing_balance is None else closing_balance * _mul
-                company_opening = None if company_opening is None else company_opening * _mul
-                company_closing = None if company_closing is None else company_closing * _mul
                 warnings = list(warnings) + [
-                    f"金额单位为{sheet_data.unit_label}，已按×{_mul:g}折算为元"
+                    f"金额单位为{sheet_data.unit_label}，余额按原单位保存，核对时按×{_mul:g}折算为元"
                 ]
 
             item = StatementItem(
@@ -1266,8 +1263,12 @@ class ReportParser(WorkpaperParser):
             if (getattr(word_result, 'table_after_para_idx', None)
                     and table_idx < len(word_result.table_after_para_idx)):
                 _tpi_u = word_result.table_after_para_idx[table_idx]
+            # 下界：上一张表格之前的段落属于上一张表，不能把它的单位声明套到本表
+            _prev_tpi_u = -1
+            if _tpi_u >= 0 and table_idx > 0:
+                _prev_tpi_u = word_result.table_after_para_idx[table_idx - 1]
             if 0 <= _tpi_u < len(word_result.paragraphs):
-                for _pi in range(_tpi_u, max(_tpi_u - 4, -1), -1):
+                for _pi in range(_tpi_u, max(_tpi_u - 4, _prev_tpi_u, -1), -1):
                     _t = word_result.paragraphs[_pi].get('text', '').strip()
                     if _t:
                         _unit_texts.append(_t)
