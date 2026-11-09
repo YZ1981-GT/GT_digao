@@ -562,6 +562,8 @@ async def confirm_matching(req: ConfirmMatchingRequest):
         raise HTTPException(404, "会话不存在")
     session.matching_map = req.matching_map
     session.status = "matched"
+    # 用户手工确认的科目匹配必须落盘，否则服务重启后丢失
+    session_store.save_session(req.session_id, session)
     return {"status": "matched"}
 
 
