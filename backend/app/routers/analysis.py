@@ -63,21 +63,43 @@ def _persist_doc(doc: AnalysisDocumentInfo) -> None:
     snapshot.save(_NS_DOCS, doc.id, _doc_to_dict(doc))
 
 
+def _project_to_dict(project: AnalysisProject) -> dict:
+    """序列化项目：文档全文已在文档快照里，项目只存文档 ID，恢复时再关联。
+
+    必须在事件循环线程里调用（并发生成章节时，避免在线程池里序列化正被修改的对象）。
+    """
+    data = project.model_dump(mode="json", exclude={"documents"})
+    data["document_ids"] = [d.id for d in project.documents]
+    return data
+
+
 def _persist_project(project: AnalysisProject) -> None:
-    data = project.model_dump(mode="json")
-    data["documents"] = [_doc_to_dict(d) for d in project.documents]
-    snapshot.save(_NS_PROJECTS, project.id, data)
+    snapshot.save(_NS_PROJECTS, project.id, _project_to_dict(project))
+
+
+async def _persist_project_async(project: AnalysisProject) -> None:
+    """先在事件循环内序列化成 dict，再把文件写入交给线程池。"""
+    data = _project_to_dict(project)
+    await asyncio.to_thread(snapshot.save, _NS_PROJECTS, project.id, data)
+
+
+def _build_project(data: dict) -> AnalysisProject:
+    data = dict(data)
+    if "document_ids" in data:
+        ids = data.pop("document_ids")
+        data["documents"] = [_analysis_documents[i] for i in ids if i in _analysis_documents]
+    # 兼容旧快照：documents 为完整文档 dict 列表
+    return AnalysisProject(**data)
 
 
 def _restore_state() -> None:
     snapshot.prune(_NS_DOCS)
     snapshot.prune(_NS_PROJECTS)
+    # 先恢复文档，项目按 ID 关联文档
     _analysis_documents.update(
         snapshot.load_all(_NS_DOCS, lambda d: AnalysisDocumentInfo(**d))
     )
-    _analysis_projects.update(
-        snapshot.load_all(_NS_PROJECTS, lambda d: AnalysisProject(**d))
-    )
+    _analysis_projects.update(snapshot.load_all(_NS_PROJECTS, _build_project))
     if _analysis_documents or _analysis_projects:
         logger.info("文档分析状态已恢复: %d 个文档, %d 个项目",
                     len(_analysis_documents), len(_analysis_projects))
@@ -289,6 +311,11 @@ async def delete_document(doc_id: str):
     if doc_id in _analysis_documents:
         del _analysis_documents[doc_id]
     snapshot.delete(_NS_DOCS, doc_id)
+    # 级联：原件已删除，从引用该文档的项目中移除并更新项目快照
+    for project in _analysis_projects.values():
+        if any(d.id == doc_id for d in project.documents):
+            project.documents = [d for d in project.documents if d.id != doc_id]
+            _persist_project(project)
     return {"success": True, "message": "文档已删除"}
 
 
@@ -555,8 +582,8 @@ async def generate_chapter(request: GenerateChapterRequest):
                         chapter.sources = [
                             AnalysisSourceRef(**s) for s in payload.get("sources", [])
                         ]
-                        # 项目快照含全部文档全文，放到线程池写入，避免阻塞事件循环
-                        await asyncio.to_thread(_persist_project, project)
+                        # 事件循环内序列化，线程池写入，避免阻塞且不与并发章节生成竞争
+                        await _persist_project_async(project)
                     except Exception as persist_err:
                         logger.warning("章节生成结果落盘失败: %s", persist_err)
                 yield event
