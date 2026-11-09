@@ -3,6 +3,7 @@
 提供文档上传解析、缓存预览编辑、章节框架生成、
 逐章节内容生成（SSE）、章节修改（SSE）等端点。
 """
+import asyncio
 import json
 import logging
 import os
@@ -69,6 +70,8 @@ def _persist_project(project: AnalysisProject) -> None:
 
 
 def _restore_state() -> None:
+    snapshot.prune(_NS_DOCS)
+    snapshot.prune(_NS_PROJECTS)
     _analysis_documents.update(
         snapshot.load_all(_NS_DOCS, lambda d: AnalysisDocumentInfo(**d))
     )
@@ -552,7 +555,8 @@ async def generate_chapter(request: GenerateChapterRequest):
                         chapter.sources = [
                             AnalysisSourceRef(**s) for s in payload.get("sources", [])
                         ]
-                        _persist_project(project)
+                        # 项目快照含全部文档全文，放到线程池写入，避免阻塞事件循环
+                        await asyncio.to_thread(_persist_project, project)
                     except Exception as persist_err:
                         logger.warning("章节生成结果落盘失败: %s", persist_err)
                 yield event

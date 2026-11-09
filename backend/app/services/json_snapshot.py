@@ -14,6 +14,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,36 @@ def delete(namespace: str, item_id: str) -> None:
                 os.remove(path)
     except Exception as e:
         logger.warning("删除快照失败 %s/%s: %s", namespace, item_id, e)
+
+
+def prune(namespace: str, max_age_days: int = 90) -> int:
+    """删除命名空间下超过 max_age_days 未更新的快照，返回删除数量。
+
+    快照只是运行时状态缓存（可重新上传/生成），按修改时间清理避免磁盘只增不减。
+    """
+    removed = 0
+    try:
+        d = _dir_for(namespace)
+    except ValueError as e:
+        logger.error("%s", e)
+        return 0
+    if not os.path.isdir(d):
+        return 0
+    cutoff = time.time() - max_age_days * 86400
+    with _lock:
+        for name in os.listdir(d):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(d, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError as e:
+                logger.warning("清理快照失败 %s/%s: %s", namespace, name, e)
+    if removed:
+        logger.info("已清理 %d 个超过 %d 天的快照: %s", removed, max_age_days, namespace)
+    return removed
 
 
 def load_all(namespace: str, builder: Optional[Callable[[Dict[str, Any]], Any]] = None) -> Dict[str, Any]:
